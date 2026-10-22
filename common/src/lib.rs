@@ -1,5 +1,7 @@
 //! Common types and IPC protocol definitions
 
+pub mod ipc;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

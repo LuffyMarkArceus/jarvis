@@ -6,6 +6,7 @@ pub mod tools;
 pub mod memory;
 pub mod ipc;
 pub mod model;
+pub mod daemon;
 pub mod error;
 
 pub fn init_tracing() {

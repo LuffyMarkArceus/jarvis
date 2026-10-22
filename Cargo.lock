@@ -908,8 +908,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "dirs",
  "jarvis-common",
  "jarvis-core",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -921,6 +923,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]
@@ -931,6 +934,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "dirs",
+ "jarvis-common",
  "reqwest",
  "rusqlite",
  "serde",
