@@ -100,7 +100,7 @@ impl MemoryManager {
                 "SELECT id, session_id, role, content, created_at 
                  FROM messages 
                  WHERE session_id = ?1 
-                 ORDER BY created_at ASC, id ASC 
+                 ORDER BY created_at DESC, id DESC
                  LIMIT ?2",
             )
             .map_err(|e| JarvisError::Memory(format!("Query failed: {}", e)))?;
@@ -125,6 +125,9 @@ impl MemoryManager {
         for msg in rows {
             messages.push(msg.map_err(|e| JarvisError::Memory(format!("Row error: {}", e)))?);
         }
+        // The query selects newest-first so LIMIT keeps the latest messages;
+        // flip back to chronological order for callers.
+        messages.reverse();
         Ok(messages)
     }
 

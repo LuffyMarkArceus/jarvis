@@ -106,9 +106,22 @@ async fn send_request(request: Request) -> anyhow::Result<Response> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    init_tracing();
     let cli = Cli::parse();
 
+    // The daemon detaches from the terminal, so stdout is not a usable log
+    // sink. Log to a file so agent turns are debuggable after the fact.
+    if let Commands::Daemon {
+        action: DaemonCommands::Run,
+    } = cli.command
+    {
+        let config = jarvis_core::config::Config::load();
+        let log_path = config.general.data_dir.join("jarvis.log");
+        if let Err(e) = jarvis_core::init_tracing_to_file(&log_path) {
+            eprintln!("warning: could not open log file: {}", e);
+        }
+    } else {
+        init_tracing();
+    }
     match cli.command {
         Commands::Ask { prompt } => {
             // Try to connect to daemon first
@@ -142,7 +155,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Daemon { action } => match action {
             DaemonCommands::Run => {
                 info!("Starting Jarvis daemon in foreground...");
-                let config = jarvis_core::config::Config::default();
+                let config = jarvis_core::config::Config::load();
                 let daemon = jarvis_core::daemon::Daemon::new(config.clone());
                 daemon.write_pid().await?;
                 let daemon_arc = std::sync::Arc::new(tokio::sync::Mutex::new(daemon.clone()));

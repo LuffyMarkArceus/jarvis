@@ -12,7 +12,7 @@ impl Tool for ListDirTool {
     }
 
     fn description(&self) -> &str {
-        "List contents of a directory"
+        "List the names of files and directories in a directory. Use when the user asks what files or folders exist at a path."
     }
 
     fn schema(&self) -> Value {
@@ -52,7 +52,7 @@ impl Tool for ReadFileTool {
     }
 
     fn description(&self) -> &str {
-        "Read contents of a file"
+        "Read the text contents of a file. Use when the user asks what is inside a specific file."
     }
 
     fn schema(&self) -> Value {

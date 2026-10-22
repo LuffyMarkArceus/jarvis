@@ -36,6 +36,59 @@ impl ToolRegistry {
         self.tools.keys().map(|s| s.as_str()).collect()
     }
 
+    /// Returns tool names with their descriptions, for prompting the model.
+    pub fn describe(&self) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = self
+            .tools
+            .values()
+            .map(|t| (t.name().to_string(), t.description().to_string()))
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    /// Tool definitions in OpenAI/Ollama function format, for the native
+    /// function-calling interface.
+    pub fn schemas(&self) -> Vec<Value> {
+        let mut out: Vec<Value> = self
+            .tools
+            .values()
+            .map(|t| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name(),
+                        "description": t.description(),
+                        "parameters": t.schema(),
+                    }
+                })
+            })
+            .collect();
+        out.sort_by(|a, b| {
+            a["function"]["name"]
+                .as_str()
+                .unwrap_or("")
+                .cmp(b["function"]["name"].as_str().unwrap_or(""))
+        });
+        out
+    }
+
+    /// The required argument names of a tool, per its schema.
+    pub fn required_args(&self, name: &str) -> Vec<String> {
+        let Some(tool) = self.tools.get(name) else {
+            return Vec::new();
+        };
+        tool.schema()
+            .get("required")
+            .and_then(|r| r.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub async fn execute(&self, name: &str, args: Value) -> Result<Value> {
         let tool = self
             .tools

@@ -1,7 +1,18 @@
-//! Ollama model client
+//! Ollama model client.
+//!
+//! Two tool-calling paths are supported:
+//!
+//! * **Native function calling** - the `tools` array is sent with the
+//!   request and the model replies with structured `tool_calls`. This is
+//!   preferred: the model was trained for it and small models follow it far
+//!   more reliably than "please reply with JSON".
+//! * **Text parsing** - the model's reply is scanned for JSON tool calls in
+//!   any of the common shapes (see `tools::parser`). Used for providers or
+//!   models without a native function-calling interface.
 
 use crate::error::{JarvisError, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Clone)]
 pub struct OllamaClient {
@@ -9,22 +20,84 @@ pub struct OllamaClient {
     client: reqwest::Client,
 }
 
+/// The function payload of a native tool call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelFunction {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<usize>,
+    pub name: String,
+    /// Arguments as an object. Some providers send a JSON-encoded string
+    /// instead, which is normalised at the call site.
+    #[serde(default)]
+    pub arguments: Value,
+}
+
+/// A native tool call returned by the model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelToolCall {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub function: ModelFunction,
+}
+
+/// A single chat message, in the shape Ollama expects.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ModelToolCall>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+}
+
+impl ChatMessage {
+    pub fn text(role: &str, content: &str) -> Self {
+        Self {
+            role: role.to_string(),
+            content: content.to_string(),
+            tool_calls: None,
+            tool_name: None,
+        }
+    }
+
+    /// Echo back the assistant turn that requested tools.
+    pub fn assistant_with_tool_calls(content: &str, calls: Vec<ModelToolCall>) -> Self {
+        Self {
+            role: "assistant".to_string(),
+            content: content.to_string(),
+            tool_calls: Some(calls),
+            tool_name: None,
+        }
+    }
+
+    /// The result of a tool call, fed back to the model.
+    pub fn tool_result(tool_name: &str, content: &str) -> Self {
+        Self {
+            role: "tool".to_string(),
+            content: content.to_string(),
+            tool_calls: None,
+            tool_name: Some(tool_name.to_string()),
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct ChatRequest {
     model: String,
-    messages: Vec<Message>,
+    messages: Vec<ChatMessage>,
     stream: bool,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct Message {
-    role: String,
-    content: String,
+    /// JSON-schema tool definitions, in OpenAI/Ollama function format.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<Value>>,
+    /// Provider tuning options (temperature, top_p, ...).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    options: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ChatResponse {
-    message: Message,
+    message: ChatMessage,
 }
 
 impl OllamaClient {
@@ -36,13 +109,73 @@ impl OllamaClient {
     }
 
     pub async fn chat(&self, model: &str, user_message: &str) -> Result<String> {
+        let messages = vec![ChatMessage::text("user", user_message)];
+        let turn = self.chat_turn(model, None, &messages, None).await?;
+        Ok(turn.content)
+    }
+
+    /// Send a chat request with an optional system prompt.
+    ///
+    /// The system prompt is delivered as a `system` role message, which
+    /// Ollama's chat template renders separately from the conversation. That
+    /// keeps behavioural rules out of the user turn, which matters a lot for
+    /// small models that otherwise blend instructions with the request.
+    pub async fn chat_with_system(
+        &self,
+        model: &str,
+        system: Option<&str>,
+        user_message: &str,
+    ) -> Result<String> {
+        let mut messages = Vec::new();
+        if let Some(s) = system {
+            let s = s.trim();
+            if !s.is_empty() {
+                messages.push(ChatMessage::text("system", s));
+            }
+        }
+        messages.push(ChatMessage::text("user", user_message));
+        let turn = self.chat_turn(model, None, &messages, None).await?;
+        Ok(turn.content)
+    }
+
+    /// Run a full conversation turn, optionally exposing tools to the model.
+    ///
+    /// Returns the assistant message, which may contain native tool calls.
+    pub async fn chat_turn(
+        &self,
+        model: &str,
+        system: Option<&str>,
+        messages: &[ChatMessage],
+        tools: Option<&[Value]>,
+    ) -> Result<ChatMessage> {
+        self.chat_turn_with_options(model, system, messages, tools, None)
+            .await
+    }
+
+    /// As [`Self::chat_turn`], with explicit provider options.
+    pub async fn chat_turn_with_options(
+        &self,
+        model: &str,
+        system: Option<&str>,
+        messages: &[ChatMessage],
+        tools: Option<&[Value]>,
+        options: Option<Value>,
+    ) -> Result<ChatMessage> {
+        let mut all_messages: Vec<ChatMessage> = Vec::new();
+        if let Some(s) = system {
+            let s = s.trim();
+            if !s.is_empty() {
+                all_messages.push(ChatMessage::text("system", s));
+            }
+        }
+        all_messages.extend(messages.iter().cloned());
+
         let req = ChatRequest {
             model: model.to_string(),
-            messages: vec![Message {
-                role: "user".to_string(),
-                content: user_message.to_string(),
-            }],
+            messages: all_messages,
             stream: false,
+            tools: tools.map(|t| t.to_vec()),
+            options,
         };
 
         let resp = self
@@ -62,7 +195,7 @@ impl OllamaClient {
             .await
             .map_err(|e| JarvisError::Model(format!("Parse error: {}", e)))?;
 
-        Ok(chat_resp.message.content)
+        Ok(chat_resp.message)
     }
 
     pub async fn list_models(&self) -> Result<Vec<String>> {

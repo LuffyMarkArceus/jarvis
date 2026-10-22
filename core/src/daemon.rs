@@ -167,6 +167,10 @@ impl Daemon {
         self.config.general.data_dir.join("jarvis.pid")
     }
 
+    pub fn get_log_path(&self) -> PathBuf {
+        self.config.general.data_dir.join("jarvis.log")
+    }
+
     pub async fn write_pid(&self) -> Result<()> {
         let pid = std::process::id();
         std::fs::create_dir_all(&self.config.general.data_dir)?;

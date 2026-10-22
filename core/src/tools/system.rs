@@ -12,7 +12,7 @@ impl Tool for GetSystemInfoTool {
     }
 
     fn description(&self) -> &str {
-        "Get OS/architecture/hostname only. Do NOT use to list files or directories."
+        "Get the operating system, CPU architecture and hostname of this computer. Use ONLY when the user asks about system specs. Do NOT use to list files or directories."
     }
 
     fn schema(&self) -> Value {

@@ -25,6 +25,25 @@ pub struct ModelConfig {
     pub default_model: String,
     pub routing_model: String,
     pub embedding_model: String,
+    /// Use the provider's native function-calling interface when available.
+    ///
+    /// When true, tool schemas are sent with the request and structured
+    /// `tool_calls` are expected back. When false, the orchestrator falls
+    /// back to parsing tool calls out of the model's text.
+    #[serde(default = "default_true")]
+    pub native_tool_calling: bool,
+    /// Sampling temperature.
+    ///
+    /// Defaults to 0 (greedy). An agent that answers differently for the
+    /// same question is impossible to test and impossible to trust, and
+    /// small models drift into refusals or fabrications at higher
+    /// temperatures.
+    #[serde(default)]
+    pub temperature: f32,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +92,8 @@ impl Default for Config {
                 default_model: "llama3.2:1b".to_string(),
                 routing_model: "llama3.2:1b".to_string(),
                 embedding_model: "nomic-embed-text".to_string(),
+                native_tool_calling: true,
+                temperature: 0.0,
             },
             memory: MemoryConfig {
                 db_path: data_dir.join("memory.db"),
@@ -128,6 +149,11 @@ impl Config {
         if let Ok(val) = std::env::var("JARVIS_MAX_HISTORY_FETCH") {
             if let Ok(v) = val.parse::<usize>() {
                 config.context.max_history_fetch = v;
+            }
+        }
+        if let Ok(val) = std::env::var("JARVIS_TEMPERATURE") {
+            if let Ok(v) = val.parse::<f32>() {
+                config.model.temperature = v;
             }
         }
 
