@@ -110,18 +110,17 @@ impl Orchestrator {
 
             // Build context with history (token-aware truncation)
             let mut context = String::new();
-            context.push_str(
-                "You are Jarvis, a helpful personal assistant. You have access to tools.\n\n",
-            );
+            context.push_str("You are Jarvis, a personal AI assistant. You are NOT the operating system - you are an AI running on this computer.\n\n");
             context.push_str("Tool usage rules:\n");
-            context.push_str("- Use tools ONLY when necessary. For simple questions (math, general knowledge), answer directly.\n");
+            context.push_str("- Answer identity questions (who are you) directly without tools.\n");
+            context.push_str(
+                "- Use tools ONLY when necessary. For simple questions, answer directly.\n",
+            );
             context.push_str("- Use filesystem.list_dir ONLY to list directory contents. Do NOT use system.info for listing files/directories.\n");
             context.push_str("- Use filesystem.read to read files.\n");
             context.push_str("- Use filesystem.write/filesystem.edit to modify files.\n");
-            context.push_str("- Use shell.run for shell commands (requires confirmation).\n");
-            context.push_str(
-                "- Use system.info ONLY for OS/arch/hostname. Never pass paths to system.info.\n\n",
-            );
+            context.push_str("- Use shell.run for shell commands like opening apps (firefox, opencode) - requires confirmation.\n");
+            context.push_str("- Use system.info ONLY for OS/arch/hostname when explicitly asked about the system specs.\n\n");
             context.push_str(
                 "When you need a tool, respond with ONLY a JSON block in one of these formats:\n",
             );
