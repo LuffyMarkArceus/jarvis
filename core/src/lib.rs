@@ -1,13 +1,13 @@
 //! Jarvis Core - Orchestrator, tools, memory, and IPC
 
 pub mod config;
-pub mod orchestrator;
-pub mod tools;
-pub mod memory;
-pub mod ipc;
-pub mod model;
 pub mod daemon;
 pub mod error;
+pub mod ipc;
+pub mod memory;
+pub mod model;
+pub mod orchestrator;
+pub mod tools;
 
 pub fn init_tracing() {
     tracing_subscriber::fmt()

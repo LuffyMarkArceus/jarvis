@@ -17,7 +17,10 @@ pub struct IpcServer {
 
 impl IpcServer {
     pub fn new(daemon: Arc<Mutex<Daemon>>, socket_path: PathBuf) -> Self {
-        Self { socket_path, daemon }
+        Self {
+            socket_path,
+            daemon,
+        }
     }
 
     pub async fn start(&self) -> Result<()> {
@@ -74,13 +77,15 @@ async fn handle_client(stream: UnixStream, daemon: Arc<Mutex<Daemon>>) -> Result
 
         // Handle request
         let response = handle_request(request, &daemon).await;
-        
+
         // Send response
         let response_json = serde_json::to_string(&response)
             .map_err(|e| JarvisError::Ipc(format!("Failed to serialize response: {}", e)))?;
-        writer.write_all(format!("{}\n", response_json).as_bytes()).await?;
+        writer
+            .write_all(format!("{}\n", response_json).as_bytes())
+            .await?;
         writer.flush().await?;
-        
+
         line.clear();
     }
 
@@ -89,7 +94,7 @@ async fn handle_client(stream: UnixStream, daemon: Arc<Mutex<Daemon>>) -> Result
 
 async fn handle_request(request: Request, daemon: &Arc<Mutex<Daemon>>) -> Response {
     let daemon_lock = daemon.lock().await;
-    
+
     match request.method.as_str() {
         "ask" => {
             let prompt = match request.params.get("prompt").and_then(|p| p.as_str()) {
@@ -103,34 +108,42 @@ async fn handle_request(request: Request, daemon: &Arc<Mutex<Daemon>>) -> Respon
         }
         "status" => {
             let sid = daemon_lock.session_id().await;
-            Response::ok(request.id, serde_json::json!({
-                "status": "running",
-                "tools": daemon_lock.list_tools(),
-                "session_id": sid,
-            }))
+            Response::ok(
+                request.id,
+                serde_json::json!({
+                    "status": "running",
+                    "tools": daemon_lock.list_tools(),
+                    "session_id": sid,
+                }),
+            )
         }
-        "tools.list" => {
-            Response::ok(request.id, serde_json::json!({
+        "tools.list" => Response::ok(
+            request.id,
+            serde_json::json!({
                 "tools": daemon_lock.list_tools(),
-            }))
-        }
+            }),
+        ),
         "session.list" => {
-            let limit = request.params.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+            let limit = request
+                .params
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(20) as usize;
             match daemon_lock.list_sessions(limit).await {
                 Ok(sessions) => Response::ok(request.id, serde_json::json!({"sessions": sessions})),
                 Err(e) => Response::err(request.id, e.to_string()),
             }
         }
-        "session.new" => {
-            match daemon_lock.new_session().await {
-                Ok(sid) => Response::ok(request.id, serde_json::json!({"session_id": sid})),
-                Err(e) => Response::err(request.id, e.to_string()),
-            }
-        }
+        "session.new" => match daemon_lock.new_session().await {
+            Ok(sid) => Response::ok(request.id, serde_json::json!({"session_id": sid})),
+            Err(e) => Response::err(request.id, e.to_string()),
+        },
         "session.switch" => {
             let sid = match request.params.get("session_id").and_then(|p| p.as_str()) {
                 Some(p) => p.to_string(),
-                None => return Response::err(request.id, "Missing 'session_id' parameter".to_string()),
+                None => {
+                    return Response::err(request.id, "Missing 'session_id' parameter".to_string())
+                }
             };
             match daemon_lock.set_session(&sid).await {
                 Ok(_) => Response::ok(request.id, serde_json::json!({"session_id": sid})),
@@ -144,18 +157,32 @@ async fn handle_request(request: Request, daemon: &Arc<Mutex<Daemon>>) -> Respon
         "session.delete" => {
             let sid = match request.params.get("session_id").and_then(|p| p.as_str()) {
                 Some(p) => p.to_string(),
-                None => return Response::err(request.id, "Missing 'session_id' parameter".to_string()),
+                None => {
+                    return Response::err(request.id, "Missing 'session_id' parameter".to_string())
+                }
             };
             match daemon_lock.delete_session(&sid).await {
                 Ok(_) => Response::ok(request.id, serde_json::json!({"ok": true})),
                 Err(e) => Response::err(request.id, e.to_string()),
             }
         }
-        "ping" => {
-            Response::ok(request.id, serde_json::json!({"pong": true}))
+        "session.show" => {
+            let sid = match request.params.get("session_id").and_then(|p| p.as_str()) {
+                Some(p) => p.to_string(),
+                None => {
+                    return Response::err(request.id, "Missing 'session_id' parameter".to_string())
+                }
+            };
+            match daemon_lock.get_session_messages(&sid).await {
+                Ok(messages) => Response::ok(request.id, serde_json::json!({"messages": messages})),
+                Err(e) => Response::err(request.id, e.to_string()),
+            }
         }
-        _ => {
-            Response::err(request.id, format!("Unknown method: {}", request.method))
-        }
+        "session.prune" => match daemon_lock.prune_empty_sessions().await {
+            Ok(count) => Response::ok(request.id, serde_json::json!({"pruned": count})),
+            Err(e) => Response::err(request.id, e.to_string()),
+        },
+        "ping" => Response::ok(request.id, serde_json::json!({"pong": true})),
+        _ => Response::err(request.id, format!("Unknown method: {}", request.method)),
     }
 }

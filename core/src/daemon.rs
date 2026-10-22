@@ -30,21 +30,45 @@ impl Daemon {
 
     pub async fn ask(&self, prompt: &str) -> Result<String> {
         let orch = self.orchestrator.lock().await;
+        let session_id = orch.session_id().to_string();
         let result = orch.run(prompt).await?;
         // Auto-title if this is a new session with few messages
         if let Some(ref mem) = self.memory {
-            let session_id = orch.session_id();
-            if let Ok(count) = mem.get_message_count(session_id) {
+            if let Ok(count) = mem.get_message_count(&session_id) {
                 if count == 2 {
-                    // First exchange (user + assistant) - generate title
-                    let title = prompt
-                        .chars()
-                        .take(40)
-                        .collect::<String>()
-                        .trim()
-                        .to_string();
-                    let title = if title.is_empty() { "New Session".to_string() } else { title };
-                    let _ = mem.update_session_title(session_id, &title);
+                    // First exchange (user + assistant) - generate title from first user message
+                    if let Ok(messages) = mem.get_recent_messages(&session_id, 2) {
+                        if let Some(first) = messages.first() {
+                            if first.role == "user" {
+                                let title = first
+                                    .content
+                                    .chars()
+                                    .take(40)
+                                    .collect::<String>()
+                                    .trim()
+                                    .to_string();
+                                let title = if title.is_empty() {
+                                    "New Session".to_string()
+                                } else {
+                                    title
+                                };
+                                let _ = mem.update_session_title(&session_id, &title);
+                            } else {
+                                let title = prompt
+                                    .chars()
+                                    .take(40)
+                                    .collect::<String>()
+                                    .trim()
+                                    .to_string();
+                                let title = if title.is_empty() {
+                                    "New Session".to_string()
+                                } else {
+                                    title
+                                };
+                                let _ = mem.update_session_title(&session_id, &title);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -94,8 +118,31 @@ impl Daemon {
         Ok(())
     }
 
+    pub async fn get_session_messages(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<crate::memory::Message>> {
+        if let Some(ref mem) = self.memory {
+            mem.get_all_messages(session_id)
+        } else {
+            Ok(vec![])
+        }
+    }
+
+    pub async fn prune_empty_sessions(&self) -> Result<usize> {
+        if let Some(ref mem) = self.memory {
+            mem.prune_empty_sessions()
+        } else {
+            Ok(0)
+        }
+    }
+
     pub fn list_tools(&self) -> Vec<String> {
-        vec!["filesystem.list_dir".to_string(), "shell.run".to_string(), "system.info".to_string()]
+        vec![
+            "filesystem.list_dir".to_string(),
+            "shell.run".to_string(),
+            "system.info".to_string(),
+        ]
     }
 
     pub async fn session_id(&self) -> String {
@@ -109,8 +156,7 @@ impl Daemon {
 
     pub fn save_active_session(&self, session_id: &str) -> Result<()> {
         std::fs::create_dir_all(&self.config.general.data_dir)?;
-        std::fs::write(self.get_active_session_path(), session_id)
-            .map_err(|e| JarvisError::Io(e))?;
+        std::fs::write(self.get_active_session_path(), session_id).map_err(JarvisError::Io)?;
         Ok(())
     }
 

@@ -83,13 +83,13 @@ impl MemoryManager {
             params![session_id, role, content],
         )
         .map_err(|e| JarvisError::Memory(format!("Failed to add message: {}", e)))?;
-        
+
         // Update session timestamp
         let _ = conn.execute(
             "UPDATE sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
             params![session_id],
         );
-        
+
         Ok(conn.last_insert_rowid())
     }
 
@@ -186,8 +186,11 @@ impl MemoryManager {
 
     pub fn delete_session(&self, session_id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM messages WHERE session_id = ?1", params![session_id])
-            .map_err(|e| JarvisError::Memory(format!("Failed to delete messages: {}", e)))?;
+        conn.execute(
+            "DELETE FROM messages WHERE session_id = ?1",
+            params![session_id],
+        )
+        .map_err(|e| JarvisError::Memory(format!("Failed to delete messages: {}", e)))?;
         conn.execute("DELETE FROM sessions WHERE id = ?1", params![session_id])
             .map_err(|e| JarvisError::Memory(format!("Failed to delete session: {}", e)))?;
         Ok(())
@@ -203,6 +206,63 @@ impl MemoryManager {
             .map_err(|e| JarvisError::Memory(format!("Query failed: {}", e)))?;
         Ok(count)
     }
+
+    pub fn get_all_messages(&self, session_id: &str) -> Result<Vec<Message>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, session_id, role, content, created_at 
+                 FROM messages 
+                 WHERE session_id = ?1 
+                 ORDER BY created_at ASC, id ASC",
+            )
+            .map_err(|e| JarvisError::Memory(format!("Query failed: {}", e)))?;
+
+        let rows = stmt
+            .query_map(params![session_id], |row| {
+                let created_at_str: String = row.get(4)?;
+                let created_at = DateTime::parse_from_rfc3339(&created_at_str)
+                    .unwrap_or_else(|_| Utc::now().into())
+                    .with_timezone(&Utc);
+                Ok(Message {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    role: row.get(2)?,
+                    content: row.get(3)?,
+                    created_at,
+                })
+            })
+            .map_err(|e| JarvisError::Memory(format!("Query map failed: {}", e)))?;
+
+        let mut messages = Vec::new();
+        for msg in rows {
+            messages.push(msg.map_err(|e| JarvisError::Memory(format!("Row error: {}", e)))?);
+        }
+        Ok(messages)
+    }
+
+    pub fn prune_empty_sessions(&self) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT s.id FROM sessions s LEFT JOIN messages m ON m.session_id = s.id GROUP BY s.id HAVING COUNT(m.id) = 0",
+            )
+            .map_err(|e| JarvisError::Memory(format!("Query failed: {}", e)))?;
+
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| JarvisError::Memory(format!("Query failed: {}", e)))?;
+
+        let mut to_delete: Vec<String> = Vec::new();
+        for r in rows.flatten() {
+            to_delete.push(r);
+        }
+        let count = to_delete.len();
+        for id in to_delete {
+            let _ = conn.execute("DELETE FROM sessions WHERE id = ?1", params![id]);
+        }
+        Ok(count)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -212,4 +272,20 @@ pub struct SessionInfo {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub message_count: i64,
+}
+
+pub fn format_relative_time(dt: &DateTime<Utc>) -> String {
+    let now = Utc::now();
+    let diff = now.signed_duration_since(*dt);
+    if diff.num_seconds() < 60 {
+        "just now".to_string()
+    } else if diff.num_minutes() < 60 {
+        format!("{}m ago", diff.num_minutes())
+    } else if diff.num_hours() < 24 {
+        format!("{}h ago", diff.num_hours())
+    } else if diff.num_days() < 7 {
+        format!("{}d ago", diff.num_days())
+    } else {
+        dt.format("%Y-%m-%d").to_string()
+    }
 }

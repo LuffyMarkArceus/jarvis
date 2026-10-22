@@ -4,7 +4,9 @@ use crate::config::Config;
 use crate::error::Result;
 use crate::memory::MemoryManager;
 use crate::model::OllamaClient;
-use crate::tools::{filesystem::ListDirTool, shell::RunShellTool, system::GetSystemInfoTool, ToolRegistry};
+use crate::tools::{
+    filesystem::ListDirTool, shell::RunShellTool, system::GetSystemInfoTool, ToolRegistry,
+};
 use tracing::info;
 use uuid::Uuid;
 
@@ -71,7 +73,7 @@ impl Orchestrator {
 
     pub async fn run(&self, input: &str) -> Result<String> {
         info!("Processing: {}", input);
-        
+
         // Save user message
         if let Some(ref m) = self.memory {
             let _ = m.add_message(&self.session_id, "user", input);
@@ -84,12 +86,15 @@ impl Orchestrator {
                 if !history.is_empty() {
                     context.push_str("Previous conversation:\n");
                     for msg in &history {
-                        if msg.id == history.last().map(|h| h.id).unwrap_or(0) && msg.role == "user" && msg.content == input {
+                        if msg.id == history.last().map(|h| h.id).unwrap_or(0)
+                            && msg.role == "user"
+                            && msg.content == input
+                        {
                             continue;
                         }
                         context.push_str(&format!("{}: {}\n", msg.role, msg.content));
                     }
-                    context.push_str("\n");
+                    context.push('\n');
                 }
             }
         }
