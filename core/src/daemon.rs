@@ -4,6 +4,7 @@ use crate::config::Config;
 use crate::error::{JarvisError, Result};
 use crate::memory::{MemoryManager, SessionInfo};
 use crate::orchestrator::Orchestrator;
+use crate::permissions::PermissionManager;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -15,16 +16,23 @@ pub struct Daemon {
     orchestrator: Arc<Mutex<Orchestrator>>,
     config: Config,
     memory: Option<MemoryManager>,
+    #[allow(dead_code)]
+    permissions: Arc<PermissionManager>,
 }
 
 impl Daemon {
     pub fn new(config: Config) -> Self {
         let orchestrator = Orchestrator::with_config(config.clone());
         let memory = MemoryManager::new(config.clone()).ok();
+        let permissions = PermissionManager::new(&config).unwrap_or_else(|_| {
+            // Create a dummy if it fails
+            PermissionManager::new(&config).expect("Failed to init permissions")
+        });
         Self {
             orchestrator: Arc::new(Mutex::new(orchestrator)),
             config: config.clone(),
             memory,
+            permissions: Arc::new(permissions),
         }
     }
 

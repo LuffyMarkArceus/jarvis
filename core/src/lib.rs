@@ -7,6 +7,7 @@ pub mod ipc;
 pub mod memory;
 pub mod model;
 pub mod orchestrator;
+pub mod permissions;
 pub mod tools;
 
 pub fn init_tracing() {
