@@ -36,6 +36,14 @@
 //! Tool *results* are rendered deterministically too. The model is used for
 //! conversation, where it adds value; it is not used to describe facts it
 //! could get wrong.
+//!
+//! ## Confirmation
+//!
+//! A tool with an `ask` policy needs a human decision. The orchestrator does
+//! not know how to reach a human, so it takes an optional
+//! [`ConfirmationHandler`]: the daemon supplies one backed by the client
+//! socket, the CLI supplies one backed by the terminal. When no handler is
+//! present (a headless run) the call is denied, never silently allowed.
 
 use crate::config::Config;
 use crate::error::Result;
@@ -54,6 +62,16 @@ use serde_json::Value;
 use tracing::info;
 use uuid::Uuid;
 
+/// Asked when a tool call needs the user's approval before it runs.
+///
+/// Implementations block until they have an answer. Returning `false` is
+/// always safe: the call is treated as declined and nothing executes.
+#[async_trait::async_trait]
+pub trait ConfirmationHandler: Send + Sync {
+    /// `true` if the user approved running `tool` with `args`.
+    async fn confirm(&self, tool: &str, args: &Value) -> bool;
+}
+
 /// Maximum number of model round-trips inside a single user turn.
 const MAX_ITERATIONS: usize = 4;
 
@@ -70,6 +88,8 @@ enum OutcomeStatus {
     Failed,
     /// Explicitly denied by the permission policy.
     Denied,
+    /// The user was asked and said no.
+    Declined,
     /// Requires confirmation; auto-denied because the agent runs headless.
     NeedsConfirmation,
 }
@@ -78,7 +98,7 @@ impl OutcomeStatus {
     fn is_blocked(&self) -> bool {
         matches!(
             self,
-            OutcomeStatus::Denied | OutcomeStatus::NeedsConfirmation
+            OutcomeStatus::Denied | OutcomeStatus::Declined | OutcomeStatus::NeedsConfirmation
         )
     }
 
@@ -87,6 +107,7 @@ impl OutcomeStatus {
             OutcomeStatus::Succeeded => "executed",
             OutcomeStatus::Failed => "failed",
             OutcomeStatus::Denied => "denied by policy",
+            OutcomeStatus::Declined => "declined",
             OutcomeStatus::NeedsConfirmation => {
                 "requires confirmation (auto-denied in non-interactive mode)"
             }
@@ -153,8 +174,21 @@ impl Orchestrator {
         }
     }
 
-    /// Handle one user turn.
+    /// Handle one user turn with no way to reach a human.
+    ///
+    /// Any tool with an `ask` policy is denied. Use [`Orchestrator::run_with`]
+    /// when a front-end is present and can prompt.
     pub async fn run(&self, input: &str) -> Result<String> {
+        self.run_with(input, None).await
+    }
+
+    /// Handle one user turn, asking `confirm` before an `ask`-policy tool
+    /// runs.
+    pub async fn run_with(
+        &self,
+        input: &str,
+        confirm: Option<&dyn ConfirmationHandler>,
+    ) -> Result<String> {
         info!("Processing: {}", input);
 
         // Snapshot history *before* persisting the new user message so the
@@ -174,12 +208,12 @@ impl Orchestrator {
 
             // A confidently identified tool call: run it and report the facts.
             Route::Tool { name, args } => {
-                let outcome = self.execute_call(name, args).await;
+                let outcome = self.execute_call(name, args, confirm).await;
                 self.answer_from_outcome(&outcome)
             }
 
             // Ambiguous: let the model pick from the catalogue.
-            Route::Model => self.model_with_tools(input, &history).await,
+            Route::Model => self.model_with_tools(input, &history, confirm).await,
         };
 
         self.persist_assistant(&answer);
@@ -225,7 +259,12 @@ impl Orchestrator {
 
     /// The ambiguous case: the model may call a tool, and the result is
     /// rendered deterministically.
-    async fn model_with_tools(&self, input: &str, history: &[Message]) -> String {
+    async fn model_with_tools(
+        &self,
+        input: &str,
+        history: &[Message],
+        confirm: Option<&dyn ConfirmationHandler>,
+    ) -> String {
         let mut messages = self.build_messages(input, history);
         let tools = self.tools.schemas();
         let mut trace: Vec<ToolOutcome> = Vec::new();
@@ -261,7 +300,7 @@ impl Orchestrator {
                     calls.clone(),
                 ));
                 for call in calls {
-                    let outcome = self.execute_native_call(call).await;
+                    let outcome = self.execute_native_call(call, confirm).await;
                     messages.push(ChatMessage::tool_result(&outcome.name, &outcome.output));
                     trace.push(outcome);
                 }
@@ -276,7 +315,7 @@ impl Orchestrator {
             if !text_calls.is_empty() {
                 messages.push(ChatMessage::text("assistant", &turn.content));
                 for call in &text_calls {
-                    let outcome = self.execute_text_call(call).await;
+                    let outcome = self.execute_text_call(call, confirm).await;
                     messages.push(ChatMessage::text(
                         "user",
                         &format!("Result of {}:\n{}", outcome.name, outcome.output),
@@ -407,20 +446,33 @@ impl Orchestrator {
     // -------------------------------------------------------------- execution
 
     /// Execute a native tool call through the permission gate and registry.
-    async fn execute_native_call(&self, call: &ModelToolCall) -> ToolOutcome {
+    async fn execute_native_call(
+        &self,
+        call: &ModelToolCall,
+        confirm: Option<&dyn ConfirmationHandler>,
+    ) -> ToolOutcome {
         let name = call.function.name.clone();
         let args = normalize_arguments(call.function.arguments.clone());
-        self.execute_call(name, args).await
+        self.execute_call(name, args, confirm).await
     }
 
     /// Execute a tool call parsed out of the model's text.
-    async fn execute_text_call(&self, call: &parser::ToolCall) -> ToolOutcome {
+    async fn execute_text_call(
+        &self,
+        call: &parser::ToolCall,
+        confirm: Option<&dyn ConfirmationHandler>,
+    ) -> ToolOutcome {
         let args = normalize_arguments(call.args.clone());
-        self.execute_call(call.name.clone(), args).await
+        self.execute_call(call.name.clone(), args, confirm).await
     }
 
     /// Run a single tool call through the permission gate and the registry.
-    async fn execute_call(&self, name: String, args: Value) -> ToolOutcome {
+    async fn execute_call(
+        &self,
+        name: String,
+        args: Value,
+        confirm: Option<&dyn ConfirmationHandler>,
+    ) -> ToolOutcome {
         let args = self.sanitize_args(&name, args);
 
         match self.permissions.check_permission(&name, &args) {
@@ -444,60 +496,95 @@ impl Orchestrator {
                     output: msg,
                 }
             }
-            PermissionAction::Ask => {
-                let msg = format!(
-                    "Tool {} requires confirmation and was auto-denied in non-interactive mode. Args: {}",
-                    name,
-                    compact_args(&args)
-                );
-                let _ = self.permissions.log_audit(
-                    Some(&self.session_id),
-                    &name,
-                    &args,
-                    "ask_auto_denied",
-                    Some(&msg),
-                );
-                ToolOutcome {
-                    name,
-                    args,
-                    status: OutcomeStatus::NeedsConfirmation,
-                    output: msg,
-                }
-            }
-            PermissionAction::Allow => match self.tools.execute(&name, args.clone()).await {
-                Ok(res) => {
-                    let compact = compact_output(&name, &res);
-                    let _ = self.permissions.log_audit(
-                        Some(&self.session_id),
-                        &name,
-                        &args,
-                        "allowed",
-                        Some(&compact),
-                    );
-                    ToolOutcome {
-                        name,
-                        args,
-                        status: OutcomeStatus::Succeeded,
-                        output: compact,
+            PermissionAction::Ask => match confirm {
+                Some(handler) => {
+                    if handler.confirm(&name, &args).await {
+                        self.run_tool(name, args, "confirmed").await
+                    } else {
+                        let msg = format!(
+                            "Tool {} was declined by the user. Args: {}",
+                            name,
+                            compact_args(&args)
+                        );
+                        let _ = self.permissions.log_audit(
+                            Some(&self.session_id),
+                            &name,
+                            &args,
+                            "declined_by_user",
+                            Some(&msg),
+                        );
+                        ToolOutcome {
+                            name,
+                            args,
+                            status: OutcomeStatus::Declined,
+                            output: msg,
+                        }
                     }
                 }
-                Err(e) => {
-                    let msg = format!("Tool {} failed: {}", name, e);
+                None => {
+                    let msg = format!(
+                        "Tool {} requires confirmation and was auto-denied in non-interactive mode. Args: {}",
+                        name,
+                        compact_args(&args)
+                    );
                     let _ = self.permissions.log_audit(
                         Some(&self.session_id),
                         &name,
                         &args,
-                        "allowed_failed",
+                        "ask_auto_denied",
                         Some(&msg),
                     );
                     ToolOutcome {
                         name,
                         args,
-                        status: OutcomeStatus::Failed,
+                        status: OutcomeStatus::NeedsConfirmation,
                         output: msg,
                     }
                 }
             },
+            PermissionAction::Allow => self.run_tool(name, args, "allowed").await,
+        }
+    }
+
+    /// Execute an approved tool and record the outcome.
+    ///
+    /// `decision` is what lands in the audit log, so a call a human approved
+    /// is distinguishable after the fact from one the policy allowed
+    /// outright.
+    async fn run_tool(&self, name: String, args: Value, decision: &str) -> ToolOutcome {
+        match self.tools.execute(&name, args.clone()).await {
+            Ok(res) => {
+                let compact = compact_output(&name, &res);
+                let _ = self.permissions.log_audit(
+                    Some(&self.session_id),
+                    &name,
+                    &args,
+                    decision,
+                    Some(&compact),
+                );
+                ToolOutcome {
+                    name,
+                    args,
+                    status: OutcomeStatus::Succeeded,
+                    output: compact,
+                }
+            }
+            Err(e) => {
+                let msg = format!("Tool {} failed: {}", name, e);
+                let _ = self.permissions.log_audit(
+                    Some(&self.session_id),
+                    &name,
+                    &args,
+                    &format!("{}_failed", decision),
+                    Some(&msg),
+                );
+                ToolOutcome {
+                    name,
+                    args,
+                    status: OutcomeStatus::Failed,
+                    output: msg,
+                }
+            }
         }
     }
 
@@ -742,11 +829,16 @@ fn render_blocked_report(trace: &[ToolOutcome]) -> String {
 
     let mut out = String::new();
     if done.is_empty() {
-        out.push_str("I did not run that - it was blocked by the permission policy.\n\n");
+        // Say *why* nothing ran. "Blocked by policy" is wrong when the user
+        // themselves clicked no.
+        let only_declined = blocked.iter().all(|t| t.status == OutcomeStatus::Declined);
+        if only_declined {
+            out.push_str("I did not run that - you declined the confirmation prompt.\n\n");
+        } else {
+            out.push_str("I did not run that - it was blocked by the permission policy.\n\n");
+        }
     } else {
-        out.push_str(
-            "I ran part of your request, but one action was blocked by the permission policy.\n\n",
-        );
+        out.push_str("I ran part of your request, but one action was not completed.\n\n");
     }
 
     for t in &blocked {
@@ -766,13 +858,22 @@ fn render_blocked_report(trace: &[ToolOutcome]) -> String {
         }
     }
 
-    let mut names: Vec<&str> = blocked.iter().map(|t| t.name.as_str()).collect();
-    names.sort_unstable();
-    names.dedup();
-    out.push_str(&format!(
-        "\nNo action was taken for the blocked item(s). To permit them, run:\n  jarvis permissions allow {}\n",
-        names.join(" ")
-    ));
+    // Only suggest loosening the policy when the policy is what stopped it.
+    // After an explicit "no" the useful guidance is nothing at all.
+    let policy_blocked: Vec<&ToolOutcome> = blocked
+        .iter()
+        .copied()
+        .filter(|t| t.status != OutcomeStatus::Declined)
+        .collect();
+    if !policy_blocked.is_empty() {
+        let mut names: Vec<&str> = policy_blocked.iter().map(|t| t.name.as_str()).collect();
+        names.sort_unstable();
+        names.dedup();
+        out.push_str(&format!(
+            "\nNo action was taken for the blocked item(s). To permit them, run:\n  jarvis permissions allow {}\n",
+            names.join(" ")
+        ));
+    }
     out
 }
 

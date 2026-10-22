@@ -1,15 +1,50 @@
 use clap::{Parser, Subcommand};
-use jarvis_common::ipc::{Request, Response};
+use jarvis_common::ipc::{ConfirmationRequest, Message, Request, Response};
 use jarvis_core::{
+    confirm::confirmation_prompt,
     init_tracing,
-    orchestrator::Orchestrator,
+    orchestrator::{ConfirmationHandler, Orchestrator},
     permissions::{PermissionAction, PermissionManager},
 };
 use serde_json::json;
+use std::io::Write as _;
 use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tracing::info;
+
+/// Asks the user, on the terminal, before a tool call runs.
+///
+/// Used in direct mode, where there is no daemon to relay the prompt. The
+/// prompt goes to stderr so `jarvis ask ... > file` still captures only the
+/// answer.
+struct TerminalConfirmer;
+
+#[async_trait::async_trait]
+impl ConfirmationHandler for TerminalConfirmer {
+    async fn confirm(&self, tool: &str, args: &serde_json::Value) -> bool {
+        ask_yn(&confirmation_prompt(tool, args))
+    }
+}
+
+/// Show a prompt and read a yes/no answer. Anything but an explicit yes is no.
+fn ask_yn(prompt: &str) -> bool {
+    eprintln!();
+    eprintln!("{}", prompt);
+    eprint!("Allow? [y/N] ");
+    let _ = std::io::stderr().flush();
+
+    let mut answer = String::new();
+    if std::io::stdin().read_line(&mut answer).is_err() {
+        return false;
+    }
+    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+/// Answer a confirmation prompt that arrived over the daemon socket.
+fn answer_confirmation(request: &ConfirmationRequest) -> bool {
+    ask_yn(&request.prompt)
+}
 
 /// The short name of a permission action.
 fn action_name(action: &PermissionAction) -> &'static str {
@@ -156,18 +191,38 @@ async fn send_request(request: Request) -> anyhow::Result<Response> {
     let stream = UnixStream::connect(&socket_path).await?;
     let (reader, mut writer) = stream.into_split();
 
-    let request_json = serde_json::to_string(&request)?;
     writer
-        .write_all(format!("{}\n", request_json).as_bytes())
+        .write_all(format!("{}\n", Message::Request(request).encode()).as_bytes())
         .await?;
     writer.flush().await?;
 
     let mut reader = BufReader::new(reader);
     let mut line = String::new();
-    reader.read_line(&mut line).await?;
-
-    let response: Response = serde_json::from_str(&line)?;
-    Ok(response)
+    loop {
+        line.clear();
+        if reader.read_line(&mut line).await? == 0 {
+            anyhow::bail!("Daemon closed the connection");
+        }
+        match Message::decode(&line)? {
+            // The daemon needs a decision before it can answer. Prompt, send
+            // the answer back, and keep reading for the real response.
+            Message::ConfirmationRequest(request) => {
+                let approved = answer_confirmation(&request);
+                let reply = Message::ConfirmationReply(jarvis_common::ipc::ConfirmationReply {
+                    id: request.id,
+                    approved,
+                });
+                writer
+                    .write_all(format!("{}\n", reply.encode()).as_bytes())
+                    .await?;
+                writer.flush().await?;
+            }
+            Message::Response(response) => return Ok(response),
+            other => {
+                info!("ignoring unexpected message from daemon: {:?}", other);
+            }
+        }
+    }
 }
 
 #[tokio::main]
@@ -213,7 +268,7 @@ async fn main() -> anyhow::Result<()> {
                     // Fallback to direct mode
                     info!("Daemon not running, using direct mode");
                     let orch = Orchestrator::new();
-                    let response = orch.run(&prompt).await?;
+                    let response = orch.run_with(&prompt, Some(&TerminalConfirmer)).await?;
                     println!("{}", response);
                 }
             }

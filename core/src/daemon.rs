@@ -3,7 +3,7 @@
 use crate::config::Config;
 use crate::error::{JarvisError, Result};
 use crate::memory::{MemoryManager, SessionInfo};
-use crate::orchestrator::Orchestrator;
+use crate::orchestrator::{ConfirmationHandler, Orchestrator};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -28,10 +28,20 @@ impl Daemon {
         }
     }
 
+    /// Handle one turn with no way to reach a human (headless callers).
     pub async fn ask(&self, prompt: &str) -> Result<String> {
+        self.ask_with(prompt, None).await
+    }
+
+    /// Handle one turn, asking `confirm` before an `ask`-policy tool runs.
+    pub async fn ask_with(
+        &self,
+        prompt: &str,
+        confirm: Option<&dyn ConfirmationHandler>,
+    ) -> Result<String> {
         let orch = self.orchestrator.lock().await;
         let session_id = orch.session_id().to_string();
-        let result = orch.run(prompt).await?;
+        let result = orch.run_with(prompt, confirm).await?;
         // Auto-title if this is a new session with few messages
         if let Some(ref mem) = self.memory {
             if let Ok(count) = mem.get_message_count(&session_id) {
@@ -124,14 +134,10 @@ impl Daemon {
     }
 
     pub fn list_tools(&self) -> Vec<String> {
-        vec![
-            "filesystem.list_dir".to_string(),
-            "filesystem.read".to_string(),
-            "filesystem.write".to_string(),
-            "filesystem.edit".to_string(),
-            "shell.run".to_string(),
-            "system.info".to_string(),
-        ]
+        crate::tools::known_tool_names()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect()
     }
 
     pub async fn session_id(&self) -> String {

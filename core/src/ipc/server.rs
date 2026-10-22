@@ -1,14 +1,32 @@
 //! Unix socket IPC server
+//!
+//! One connection is handled by one task. A request normally produces one
+//! response, but a tool with an `ask` policy makes the daemon send a
+//! confirmation prompt to the client and wait for the answer before it can
+//! finish. The prompt and the answer travel on the same socket as tagged
+//! [`Message`]s, so the client never has to open a second connection.
 
+use crate::confirm::confirmation_prompt;
 use crate::daemon::Daemon;
 use crate::error::{JarvisError, Result};
-use jarvis_common::ipc::{Request, Response};
+use crate::orchestrator::ConfirmationHandler;
+use jarvis_common::ipc::{ConfirmationRequest, Message, Request, Response};
+use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 use tracing::{error, info};
+use uuid::Uuid;
+
+/// How long the daemon waits for a client to answer a confirmation prompt.
+///
+/// A client that has gone away (closed laptop, killed terminal) must not
+/// hold the orchestrator lock forever, and the safe default is "no".
+const CONFIRM_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub struct IpcServer {
     socket_path: PathBuf,
@@ -59,40 +77,129 @@ impl IpcServer {
     }
 }
 
+/// Sends confirmation prompts to the client and reads its answers.
+struct SocketConfirmer {
+    reader: Arc<Mutex<BufReader<OwnedReadHalf>>>,
+    writer: Arc<Mutex<OwnedWriteHalf>>,
+}
+
+#[async_trait::async_trait]
+impl ConfirmationHandler for SocketConfirmer {
+    async fn confirm(&self, tool: &str, args: &Value) -> bool {
+        let request = ConfirmationRequest {
+            id: Uuid::new_v4(),
+            tool: tool.to_string(),
+            args: args.clone(),
+            prompt: confirmation_prompt(tool, args),
+        };
+        let id = request.id;
+
+        {
+            let mut writer = self.writer.lock().await;
+            let line = Message::ConfirmationRequest(request).encode();
+            if let Err(e) = writer.write_all(format!("{}\n", line).as_bytes()).await {
+                error!("Failed to send confirmation prompt: {}", e);
+                return false;
+            }
+            if let Err(e) = writer.flush().await {
+                error!("Failed to flush confirmation prompt: {}", e);
+                return false;
+            }
+        }
+
+        let answer = tokio::time::timeout(CONFIRM_TIMEOUT, async {
+            let mut reader = self.reader.lock().await;
+            let mut line = String::new();
+            loop {
+                line.clear();
+                let read = reader.read_line(&mut line).await.ok()?;
+                if read == 0 {
+                    // The client hung up without answering.
+                    return None;
+                }
+                match Message::decode(&line) {
+                    Ok(Message::ConfirmationReply(reply)) if reply.id == id => {
+                        return Some(reply.approved)
+                    }
+                    // Anything else is stale or unrelated; keep waiting for
+                    // the answer to *this* prompt.
+                    Ok(_) => continue,
+                    Err(e) => {
+                        error!("Ignoring unparseable message during confirmation: {}", e);
+                        continue;
+                    }
+                }
+            }
+        })
+        .await;
+
+        match answer {
+            Ok(Some(approved)) => approved,
+            Ok(None) => {
+                info!("Client disconnected while confirming {}", tool);
+                false
+            }
+            Err(_) => {
+                info!(
+                    "Timed out after {}s waiting for confirmation of {}",
+                    CONFIRM_TIMEOUT.as_secs(),
+                    tool
+                );
+                false
+            }
+        }
+    }
+}
+
 async fn handle_client(stream: UnixStream, daemon: Arc<Mutex<Daemon>>) -> Result<()> {
-    let (reader, mut writer) = stream.into_split();
-    let mut reader = BufReader::new(reader);
+    let (reader, writer) = stream.into_split();
+    let reader = Arc::new(Mutex::new(BufReader::new(reader)));
+    let writer = Arc::new(Mutex::new(writer));
     let mut line = String::new();
 
-    while reader.read_line(&mut line).await? > 0 {
-        // Try to parse request
-        let request: Request = match serde_json::from_str(&line) {
-            Ok(req) => req,
+    loop {
+        line.clear();
+        let read = {
+            let mut guard = reader.lock().await;
+            guard.read_line(&mut line).await?
+        };
+        if read == 0 {
+            break;
+        }
+
+        let request = match Message::decode(&line) {
+            Ok(Message::Request(request)) => request,
+            Ok(other) => {
+                error!("Ignoring unexpected message from client: {:?}", other);
+                continue;
+            }
             Err(e) => {
-                error!("Failed to parse request: {}", e);
-                line.clear();
+                error!("Failed to parse message: {}", e);
                 continue;
             }
         };
 
-        // Handle request
-        let response = handle_request(request, &daemon).await;
+        let confirmer = SocketConfirmer {
+            reader: Arc::clone(&reader),
+            writer: Arc::clone(&writer),
+        };
+        let response = handle_request(request, &daemon, Some(&confirmer)).await;
 
-        // Send response
-        let response_json = serde_json::to_string(&response)
-            .map_err(|e| JarvisError::Ipc(format!("Failed to serialize response: {}", e)))?;
-        writer
-            .write_all(format!("{}\n", response_json).as_bytes())
+        let mut guard = writer.lock().await;
+        guard
+            .write_all(format!("{}\n", Message::Response(response).encode()).as_bytes())
             .await?;
-        writer.flush().await?;
-
-        line.clear();
+        guard.flush().await?;
     }
 
     Ok(())
 }
 
-async fn handle_request(request: Request, daemon: &Arc<Mutex<Daemon>>) -> Response {
+async fn handle_request(
+    request: Request,
+    daemon: &Arc<Mutex<Daemon>>,
+    confirm: Option<&dyn ConfirmationHandler>,
+) -> Response {
     let daemon_lock = daemon.lock().await;
 
     match request.method.as_str() {
@@ -101,7 +208,7 @@ async fn handle_request(request: Request, daemon: &Arc<Mutex<Daemon>>) -> Respon
                 Some(p) => p.to_string(),
                 None => return Response::err(request.id, "Missing 'prompt' parameter".to_string()),
             };
-            match daemon_lock.ask(&prompt).await {
+            match daemon_lock.ask_with(&prompt, confirm).await {
                 Ok(response) => Response::ok(request.id, serde_json::json!({"response": response})),
                 Err(e) => Response::err(request.id, e.to_string()),
             }

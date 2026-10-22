@@ -1,6 +1,7 @@
 //! Jarvis Core - Orchestrator, tools, memory, and IPC
 
 pub mod config;
+pub mod confirm;
 pub mod daemon;
 pub mod error;
 pub mod ipc;
