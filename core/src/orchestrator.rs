@@ -290,7 +290,10 @@ impl Orchestrator {
                 return Ok(summary);
             }
 
-            current_context = format!("{}\n\n{}", tool_results, response);
+            current_context = format!(
+                "{}\n\nBased on tool results above, provide a clear, concise answer to the user.",
+                tool_results
+            );
             if let Some(ref m) = self.memory {
                 let _ = m.add_message(&self.session_id, "assistant", &response);
             }
