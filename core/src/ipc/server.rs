@@ -102,16 +102,54 @@ async fn handle_request(request: Request, daemon: &Arc<Mutex<Daemon>>) -> Respon
             }
         }
         "status" => {
+            let sid = daemon_lock.session_id().await;
             Response::ok(request.id, serde_json::json!({
                 "status": "running",
                 "tools": daemon_lock.list_tools(),
-                "session_id": daemon_lock.session_id(),
+                "session_id": sid,
             }))
         }
         "tools.list" => {
             Response::ok(request.id, serde_json::json!({
                 "tools": daemon_lock.list_tools(),
             }))
+        }
+        "session.list" => {
+            let limit = request.params.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+            match daemon_lock.list_sessions(limit).await {
+                Ok(sessions) => Response::ok(request.id, serde_json::json!({"sessions": sessions})),
+                Err(e) => Response::err(request.id, e.to_string()),
+            }
+        }
+        "session.new" => {
+            match daemon_lock.new_session().await {
+                Ok(sid) => Response::ok(request.id, serde_json::json!({"session_id": sid})),
+                Err(e) => Response::err(request.id, e.to_string()),
+            }
+        }
+        "session.switch" => {
+            let sid = match request.params.get("session_id").and_then(|p| p.as_str()) {
+                Some(p) => p.to_string(),
+                None => return Response::err(request.id, "Missing 'session_id' parameter".to_string()),
+            };
+            match daemon_lock.set_session(&sid).await {
+                Ok(_) => Response::ok(request.id, serde_json::json!({"session_id": sid})),
+                Err(e) => Response::err(request.id, e.to_string()),
+            }
+        }
+        "session.current" => {
+            let sid = daemon_lock.session_id().await;
+            Response::ok(request.id, serde_json::json!({"session_id": sid}))
+        }
+        "session.delete" => {
+            let sid = match request.params.get("session_id").and_then(|p| p.as_str()) {
+                Some(p) => p.to_string(),
+                None => return Response::err(request.id, "Missing 'session_id' parameter".to_string()),
+            };
+            match daemon_lock.delete_session(&sid).await {
+                Ok(_) => Response::ok(request.id, serde_json::json!({"ok": true})),
+                Err(e) => Response::err(request.id, e.to_string()),
+            }
         }
         "ping" => {
             Response::ok(request.id, serde_json::json!({"pong": true}))

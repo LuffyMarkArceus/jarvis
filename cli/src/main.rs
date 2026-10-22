@@ -28,6 +28,25 @@ enum Commands {
     Status,
     /// List available tools
     Tools,
+    /// Manage sessions
+    Session {
+        #[command(subcommand)]
+        action: SessionCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum SessionCommands {
+    /// List all sessions
+    List { #[arg(short, long, default_value = "20")] limit: usize },
+    /// Create a new session
+    New,
+    /// Switch to a session
+    Switch { session_id: String },
+    /// Show current session
+    Current,
+    /// Delete a session
+    Delete { session_id: String },
 }
 
 #[derive(Subcommand)]
@@ -190,6 +209,97 @@ async fn main() -> anyhow::Result<()> {
                 }
                 Err(_) => {
                     println!("Daemon not running, cannot list tools");
+                }
+            }
+        }
+        Commands::Session { action } => {
+            match action {
+                SessionCommands::List { limit } => {
+                    let request = Request::new("session.list", json!({"limit": limit}));
+                    match send_request(request).await {
+                        Ok(response) => {
+                            if response.ok {
+                                if let Some(result) = response.result {
+                                    if let Some(sessions) = result.get("sessions").and_then(|s| s.as_array()) {
+                                        if sessions.is_empty() {
+                                            println!("No sessions found");
+                                        } else {
+                                            println!("Sessions:");
+                                            for s in sessions {
+                                                let id = s.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                                                let title = s.get("title").and_then(|v| v.as_str()).unwrap_or("Untitled");
+                                                let count = s.get("message_count").and_then(|v| v.as_i64()).unwrap_or(0);
+                                                println!("  {} - {} ({} messages)", &id[..8.min(id.len())], title, count);
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                println!("Error: {}", response.error.unwrap_or_default());
+                            }
+                        }
+                        Err(_) => println!("Daemon not running"),
+                    }
+                }
+                SessionCommands::New => {
+                    let request = Request::new("session.new", json!({}));
+                    match send_request(request).await {
+                        Ok(response) => {
+                            if response.ok {
+                                if let Some(result) = response.result {
+                                    if let Some(sid) = result.get("session_id").and_then(|v| v.as_str()) {
+                                        println!("Created new session: {}", sid);
+                                    }
+                                }
+                            } else {
+                                println!("Error: {}", response.error.unwrap_or_default());
+                            }
+                        }
+                        Err(_) => println!("Daemon not running"),
+                    }
+                }
+                SessionCommands::Switch { session_id } => {
+                    let request = Request::new("session.switch", json!({"session_id": session_id}));
+                    match send_request(request).await {
+                        Ok(response) => {
+                            if response.ok {
+                                println!("Switched to session: {}", session_id);
+                            } else {
+                                println!("Error: {}", response.error.unwrap_or_default());
+                            }
+                        }
+                        Err(_) => println!("Daemon not running"),
+                    }
+                }
+                SessionCommands::Current => {
+                    let request = Request::new("session.current", json!({}));
+                    match send_request(request).await {
+                        Ok(response) => {
+                            if response.ok {
+                                if let Some(result) = response.result {
+                                    if let Some(sid) = result.get("session_id").and_then(|v| v.as_str()) {
+                                        println!("Current session: {}", sid);
+                                    }
+                                }
+                            } else {
+                                println!("Error: {}", response.error.unwrap_or_default());
+                            }
+                        }
+                        Err(_) => println!("Daemon not running"),
+                    }
+                }
+                SessionCommands::Delete { session_id } => {
+                    let request = Request::new("session.delete", json!({"session_id": session_id}));
+                    match send_request(request).await {
+                        Ok(response) => {
+                            if response.ok {
+                                println!("Deleted session: {}", session_id);
+                            } else {
+                                println!("Error: {}", response.error.unwrap_or_default());
+                            }
+                        }
+                        Err(_) => println!("Daemon not running"),
+                    }
                 }
             }
         }

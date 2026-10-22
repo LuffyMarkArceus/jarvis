@@ -132,3 +132,84 @@ impl MemoryManager {
         &self.config.memory.db_path
     }
 }
+
+impl MemoryManager {
+    pub fn list_sessions(&self, limit: usize) -> Result<Vec<SessionInfo>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT s.id, s.title, s.created_at, s.updated_at, COUNT(m.id) as msg_count
+                 FROM sessions s
+                 LEFT JOIN messages m ON m.session_id = s.id
+                 GROUP BY s.id
+                 ORDER BY s.updated_at DESC
+                 LIMIT ?1",
+            )
+            .map_err(|e| JarvisError::Memory(format!("Query failed: {}", e)))?;
+
+        let rows = stmt
+            .query_map(params![limit as i64], |row| {
+                let created_at_str: String = row.get(2)?;
+                let updated_at_str: String = row.get(3)?;
+                let created_at = DateTime::parse_from_rfc3339(&created_at_str)
+                    .unwrap_or_else(|_| Utc::now().into())
+                    .with_timezone(&Utc);
+                let updated_at = DateTime::parse_from_rfc3339(&updated_at_str)
+                    .unwrap_or_else(|_| Utc::now().into())
+                    .with_timezone(&Utc);
+                Ok(SessionInfo {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    created_at,
+                    updated_at,
+                    message_count: row.get(4)?,
+                })
+            })
+            .map_err(|e| JarvisError::Memory(format!("Query map failed: {}", e)))?;
+
+        let mut sessions = Vec::new();
+        for s in rows {
+            sessions.push(s.map_err(|e| JarvisError::Memory(format!("Row error: {}", e)))?);
+        }
+        Ok(sessions)
+    }
+
+    pub fn update_session_title(&self, session_id: &str, title: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sessions SET title = ?1 WHERE id = ?2",
+            params![title, session_id],
+        )
+        .map_err(|e| JarvisError::Memory(format!("Failed to update title: {}", e)))?;
+        Ok(())
+    }
+
+    pub fn delete_session(&self, session_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM messages WHERE session_id = ?1", params![session_id])
+            .map_err(|e| JarvisError::Memory(format!("Failed to delete messages: {}", e)))?;
+        conn.execute("DELETE FROM sessions WHERE id = ?1", params![session_id])
+            .map_err(|e| JarvisError::Memory(format!("Failed to delete session: {}", e)))?;
+        Ok(())
+    }
+
+    pub fn get_message_count(&self, session_id: &str) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT COUNT(*) FROM messages WHERE session_id = ?1")
+            .map_err(|e| JarvisError::Memory(format!("Query failed: {}", e)))?;
+        let count: i64 = stmt
+            .query_row(params![session_id], |row| row.get(0))
+            .map_err(|e| JarvisError::Memory(format!("Query failed: {}", e)))?;
+        Ok(count)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionInfo {
+    pub id: String,
+    pub title: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub message_count: i64,
+}

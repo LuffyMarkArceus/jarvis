@@ -62,6 +62,13 @@ impl Orchestrator {
         &self.session_id
     }
 
+    pub fn set_session(&mut self, session_id: String) {
+        self.session_id = session_id.clone();
+        if let Some(ref m) = self.memory {
+            let _ = m.create_session(&session_id);
+        }
+    }
+
     pub async fn run(&self, input: &str) -> Result<String> {
         info!("Processing: {}", input);
         
