@@ -4,7 +4,6 @@ use crate::config::Config;
 use crate::error::{JarvisError, Result};
 use crate::memory::{MemoryManager, SessionInfo};
 use crate::orchestrator::Orchestrator;
-use crate::permissions::PermissionManager;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -16,23 +15,16 @@ pub struct Daemon {
     orchestrator: Arc<Mutex<Orchestrator>>,
     config: Config,
     memory: Option<MemoryManager>,
-    #[allow(dead_code)]
-    permissions: Arc<PermissionManager>,
 }
 
 impl Daemon {
     pub fn new(config: Config) -> Self {
         let orchestrator = Orchestrator::with_config(config.clone());
         let memory = MemoryManager::new(config.clone()).ok();
-        let permissions = PermissionManager::new(&config).unwrap_or_else(|_| {
-            // Create a dummy if it fails
-            PermissionManager::new(&config).expect("Failed to init permissions")
-        });
         Self {
             orchestrator: Arc::new(Mutex::new(orchestrator)),
             config: config.clone(),
             memory,
-            permissions: Arc::new(permissions),
         }
     }
 
@@ -44,25 +36,11 @@ impl Daemon {
         if let Some(ref mem) = self.memory {
             if let Ok(count) = mem.get_message_count(&session_id) {
                 if count == 2 {
-                    // First exchange (user + assistant) - generate title from first user message
                     if let Ok(messages) = mem.get_recent_messages(&session_id, 2) {
                         if let Some(first) = messages.first() {
                             if first.role == "user" {
                                 let title = first
                                     .content
-                                    .chars()
-                                    .take(40)
-                                    .collect::<String>()
-                                    .trim()
-                                    .to_string();
-                                let title = if title.is_empty() {
-                                    "New Session".to_string()
-                                } else {
-                                    title
-                                };
-                                let _ = mem.update_session_title(&session_id, &title);
-                            } else {
-                                let title = prompt
                                     .chars()
                                     .take(40)
                                     .collect::<String>()
