@@ -12,7 +12,7 @@ impl Tool for GetSystemInfoTool {
     }
 
     fn description(&self) -> &str {
-        "Get basic system information"
+        "Get OS/architecture/hostname only. Do NOT use to list files or directories."
     }
 
     fn schema(&self) -> Value {

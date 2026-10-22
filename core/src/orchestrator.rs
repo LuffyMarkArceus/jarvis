@@ -115,11 +115,13 @@ impl Orchestrator {
             );
             context.push_str("Tool usage rules:\n");
             context.push_str("- Use tools ONLY when necessary. For simple questions (math, general knowledge), answer directly.\n");
-            context.push_str("- Use filesystem.list_dir to list directory contents. Do NOT use system.info for listing files.\n");
+            context.push_str("- Use filesystem.list_dir ONLY to list directory contents. Do NOT use system.info for listing files/directories.\n");
             context.push_str("- Use filesystem.read to read files.\n");
             context.push_str("- Use filesystem.write/filesystem.edit to modify files.\n");
             context.push_str("- Use shell.run for shell commands (requires confirmation).\n");
-            context.push_str("- Use system.info only for OS/arch/hostname.\n\n");
+            context.push_str(
+                "- Use system.info ONLY for OS/arch/hostname. Never pass paths to system.info.\n\n",
+            );
             context.push_str(
                 "When you need a tool, respond with ONLY a JSON block in one of these formats:\n",
             );
