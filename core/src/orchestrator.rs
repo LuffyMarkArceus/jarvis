@@ -291,7 +291,7 @@ impl Orchestrator {
             }
 
             current_context = format!(
-                "{}\n\nBased on tool results above, provide a clear, concise answer to the user.",
+                "{}\n\nThe tool results are shown above. Summarize them clearly and concisely for the user, showing actual file/directory names.",
                 tool_results
             );
             if let Some(ref m) = self.memory {
