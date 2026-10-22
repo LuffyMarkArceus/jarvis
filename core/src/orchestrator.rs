@@ -110,13 +110,26 @@ impl Orchestrator {
 
             // Build context with history (token-aware truncation)
             let mut context = String::new();
-            context.push_str("You are Jarvis, a helpful personal assistant. You have access to tools. When you need to use a tool, respond with a JSON block containing tool_calls. You can use any of these formats:\n");
+            context.push_str(
+                "You are Jarvis, a helpful personal assistant. You have access to tools.\n\n",
+            );
+            context.push_str("Tool usage rules:\n");
+            context.push_str("- Use tools ONLY when necessary. For simple questions (math, general knowledge), answer directly.\n");
+            context.push_str("- Use filesystem.list_dir to list directory contents. Do NOT use system.info for listing files.\n");
+            context.push_str("- Use filesystem.read to read files.\n");
+            context.push_str("- Use filesystem.write/filesystem.edit to modify files.\n");
+            context.push_str("- Use shell.run for shell commands (requires confirmation).\n");
+            context.push_str("- Use system.info only for OS/arch/hostname.\n\n");
+            context.push_str(
+                "When you need a tool, respond with ONLY a JSON block in one of these formats:\n",
+            );
             context.push_str(
                 "1. Custom: {\"tool_calls\": [{\"name\": \"tool.name\", \"args\": {...}}]}\n",
             );
-            context.push_str("2. OpenAI style: {\"tool_calls\": [{\"type\": \"function\", \"function\": {\"name\": \"...\", \"arguments\": \"{...}\"}}]}\n");
-            context.push_str("3. Anthropic style: {\"content\": [{\"type\": \"tool_use\", \"name\": \"...\", \"input\": {...}}]}\n");
-            context.push_str(&format!("Available tools: {:?}\n\n", self.tools.list()));
+            context.push_str("2. OpenAI: {\"tool_calls\": [{\"type\": \"function\", \"function\": {\"name\": \"...\", \"arguments\": \"{...}\"}}]}\n");
+            context.push_str("3. Anthropic: {\"content\": [{\"type\": \"tool_use\", \"name\": \"...\", \"input\": {...}}]}\n\n");
+            context.push_str(&format!("Available tools: {:?}\n", self.tools.list()));
+            context.push_str("Example: To list /tmp -> {\"tool_calls\": [{\"name\": \"filesystem.list_dir\", \"args\": {\"path\": \"/tmp\"}}]}\n\n");
             if let Some(ref m) = self.memory {
                 if let Ok(history) =
                     m.get_recent_messages(&self.session_id, self.config.context.max_history_fetch)
@@ -193,6 +206,8 @@ impl Orchestrator {
             // Execute tool calls
             let mut tool_results = String::new();
             tool_results.push_str("\n\nTool Results:\n");
+            let mut any_executed = false;
+            let mut all_blocked = true;
             for tc in &tool_calls {
                 let perm = self.permissions.check_permission(&tc.name, &tc.args);
                 match perm {
@@ -222,8 +237,10 @@ impl Orchestrator {
                         );
                     }
                     PermissionAction::Allow => {
+                        all_blocked = false;
                         match self.tools.execute(&tc.name, tc.args.clone()).await {
                             Ok(res) => {
+                                any_executed = true;
                                 let res_str =
                                     serde_json::to_string_pretty(&res).unwrap_or_default();
                                 tool_results.push_str(&format!(
@@ -254,7 +271,26 @@ impl Orchestrator {
                 }
             }
 
-            current_context = format!("{}{}", response, tool_results);
+            if all_blocked && !tool_calls.is_empty() {
+                let summary = format!("{}\n\nNote: All requested tool calls were blocked by permissions (denied or require confirmation). I cannot execute them in non-interactive mode.", tool_results);
+                if let Some(ref m) = self.memory {
+                    let _ = m.add_message(&self.session_id, "assistant", &summary);
+                }
+                return Ok(summary);
+            }
+
+            if !any_executed && all_blocked {
+                let summary = format!(
+                    "{}\n\nNote: Tool calls were not executed due to permissions.",
+                    tool_results
+                );
+                if let Some(ref m) = self.memory {
+                    let _ = m.add_message(&self.session_id, "assistant", &summary);
+                }
+                return Ok(summary);
+            }
+
+            current_context = format!("{}\n\n{}", tool_results, response);
             if let Some(ref m) = self.memory {
                 let _ = m.add_message(&self.session_id, "assistant", &response);
             }
