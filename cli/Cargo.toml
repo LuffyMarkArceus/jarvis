@@ -1,0 +1,13 @@
+[package]
+name = "jarvis-cli"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+jarvis-core = { path = "../core" }
+jarvis-common = { path = "../common" }
+tokio.workspace = true
+clap = { version = "4.5", features = ["derive"] }
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

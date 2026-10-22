@@ -1,0 +1,12 @@
+[package]
+name = "jarvis-tui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+jarvis-core = { path = "../core" }
+jarvis-common = { path = "../common" }
+tokio.workspace = true
+ratatui = "0.28"
+crossterm = "0.28"
+anyhow.workspace = true
