@@ -148,6 +148,9 @@ impl Daemon {
     pub fn list_tools(&self) -> Vec<String> {
         vec![
             "filesystem.list_dir".to_string(),
+            "filesystem.read".to_string(),
+            "filesystem.write".to_string(),
+            "filesystem.edit".to_string(),
             "shell.run".to_string(),
             "system.info".to_string(),
         ]

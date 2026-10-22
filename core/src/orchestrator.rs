@@ -5,7 +5,10 @@ use crate::error::Result;
 use crate::memory::MemoryManager;
 use crate::model::OllamaClient;
 use crate::tools::{
-    filesystem::ListDirTool, shell::RunShellTool, system::GetSystemInfoTool, ToolRegistry,
+    filesystem::{EditFileTool, ListDirTool, ReadFileTool, WriteFileTool},
+    shell::RunShellTool,
+    system::GetSystemInfoTool,
+    ToolRegistry,
 };
 use tracing::info;
 use uuid::Uuid;
@@ -24,6 +27,9 @@ impl Orchestrator {
         let client = OllamaClient::new(&config.model.base_url);
         let mut tools = ToolRegistry::new();
         tools.register(Box::new(ListDirTool));
+        tools.register(Box::new(ReadFileTool));
+        tools.register(Box::new(WriteFileTool));
+        tools.register(Box::new(EditFileTool));
         tools.register(Box::new(RunShellTool));
         tools.register(Box::new(GetSystemInfoTool));
         let session_id = Uuid::new_v4().to_string();
@@ -44,6 +50,9 @@ impl Orchestrator {
         let client = OllamaClient::new(&config.model.base_url);
         let mut tools = ToolRegistry::new();
         tools.register(Box::new(ListDirTool));
+        tools.register(Box::new(ReadFileTool));
+        tools.register(Box::new(WriteFileTool));
+        tools.register(Box::new(EditFileTool));
         tools.register(Box::new(RunShellTool));
         tools.register(Box::new(GetSystemInfoTool));
         let session_id = Uuid::new_v4().to_string();
