@@ -1,11 +1,53 @@
 use clap::{Parser, Subcommand};
 use jarvis_common::ipc::{Request, Response};
-use jarvis_core::{init_tracing, orchestrator::Orchestrator};
+use jarvis_core::{
+    init_tracing,
+    orchestrator::Orchestrator,
+    permissions::{PermissionAction, PermissionManager},
+};
 use serde_json::json;
 use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tracing::info;
+
+/// The short name of a permission action.
+fn action_name(action: &PermissionAction) -> &'static str {
+    match action {
+        PermissionAction::Allow => "allow",
+        PermissionAction::Ask => "ask",
+        PermissionAction::Deny => "deny",
+    }
+}
+
+/// Set a permission rule, rejecting tool names that do not exist.
+///
+/// A rule for a misspelled tool name would never match anything, so it
+/// would look like it took effect while silently doing nothing.
+fn set_permission(
+    manager: &PermissionManager,
+    tool: &str,
+    action: PermissionAction,
+) -> anyhow::Result<()> {
+    let known = jarvis_core::tools::known_tool_names();
+    if !known.contains(&tool) {
+        anyhow::bail!("unknown tool '{}'. Known tools: {}", tool, known.join(", "));
+    }
+    manager.set_rule(tool, action.clone())?;
+    println!("{} will {}.", tool, action.label());
+    Ok(())
+}
+
+/// A short, single-line rendering of tool arguments.
+fn compact_args(args: &serde_json::Value) -> String {
+    let rendered = args.to_string();
+    if rendered.chars().count() <= 60 {
+        return rendered;
+    }
+    let mut out: String = rendered.chars().take(60).collect();
+    out.push_str("...");
+    out
+}
 
 #[derive(Parser)]
 #[command(name = "jarvis")]
@@ -32,6 +74,11 @@ enum Commands {
     Session {
         #[command(subcommand)]
         action: SessionCommands,
+    },
+    /// Manage the permission policy
+    Permissions {
+        #[command(subcommand)]
+        action: PermissionsCommands,
     },
 }
 
@@ -66,6 +113,25 @@ enum DaemonCommands {
     Stop,
     /// Check daemon status
     Status,
+}
+
+#[derive(Subcommand)]
+enum PermissionsCommands {
+    /// Show the current rules
+    Show,
+    /// Let a tool run without asking
+    Allow { tool: String },
+    /// Ask for confirmation before a tool runs
+    Ask { tool: String },
+    /// Never run a tool
+    Deny { tool: String },
+    /// Remove a rule, restoring the default behaviour
+    Reset { tool: String },
+    /// Show recent tool decisions
+    Audit {
+        #[arg(short, long, default_value = "20")]
+        limit: usize,
+    },
 }
 
 fn get_socket_path() -> PathBuf {
@@ -238,6 +304,62 @@ async fn main() -> anyhow::Result<()> {
                 }
                 Err(_) => {
                     println!("Daemon not running, cannot list tools");
+                }
+            }
+        }
+        Commands::Permissions { action } => {
+            let config = jarvis_core::config::Config::load();
+            let manager = PermissionManager::new(&config)?;
+            match action {
+                PermissionsCommands::Show => {
+                    println!("Policy file: {}", manager.get_config_path().display());
+                    println!();
+                    println!("{:<22} {:<6} EFFECT", "TOOL", "ACTION");
+                    for rule in manager.rules() {
+                        println!(
+                            "{:<22} {:<6} {}",
+                            rule.tool,
+                            action_name(&rule.action),
+                            rule.action.label()
+                        );
+                    }
+                    println!();
+                    println!("A tool with no rule defaults to 'ask'.");
+                }
+                PermissionsCommands::Allow { tool } => {
+                    set_permission(&manager, &tool, PermissionAction::Allow)?;
+                }
+                PermissionsCommands::Ask { tool } => {
+                    set_permission(&manager, &tool, PermissionAction::Ask)?;
+                }
+                PermissionsCommands::Deny { tool } => {
+                    set_permission(&manager, &tool, PermissionAction::Deny)?;
+                }
+                PermissionsCommands::Reset { tool } => {
+                    if manager.remove_rule(&tool)? {
+                        println!(
+                            "Removed the rule for {}. It now falls back to the default (ask).",
+                            tool
+                        );
+                    } else {
+                        println!("There was no rule for {}.", tool);
+                    }
+                }
+                PermissionsCommands::Audit { limit } => {
+                    let entries = manager.get_audit_log(limit)?;
+                    if entries.is_empty() {
+                        println!("No tool decisions recorded yet.");
+                    } else {
+                        println!("{:<20} {:<16} ARGS", "TOOL", "DECISION");
+                        for entry in entries {
+                            println!(
+                                "{:<20} {:<16} {}",
+                                entry.tool,
+                                entry.decision,
+                                compact_args(&entry.args)
+                            );
+                        }
+                    }
                 }
             }
         }

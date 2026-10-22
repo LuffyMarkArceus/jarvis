@@ -16,6 +16,33 @@ pub enum PermissionAction {
     Deny,
 }
 
+impl PermissionAction {
+    /// A human-readable description of what the action means.
+    pub fn label(&self) -> &'static str {
+        match self {
+            PermissionAction::Allow => "run without asking",
+            PermissionAction::Ask => "ask for confirmation",
+            PermissionAction::Deny => "never run",
+        }
+    }
+}
+
+impl std::str::FromStr for PermissionAction {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.trim().to_lowercase().as_str() {
+            "allow" => Ok(PermissionAction::Allow),
+            "ask" => Ok(PermissionAction::Ask),
+            "deny" => Ok(PermissionAction::Deny),
+            other => Err(format!(
+                "unknown action '{}' - expected allow, ask or deny",
+                other
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermissionRule {
     pub tool: String,
@@ -74,7 +101,6 @@ impl Default for PermissionsConfig {
 
 #[derive(Debug, Clone)]
 pub struct PermissionManager {
-    config: PermissionsConfig,
     config_path: PathBuf,
     audit_conn: Arc<Mutex<Connection>>,
 }
@@ -100,25 +126,34 @@ impl PermissionManager {
         std::fs::create_dir_all(&config_dir).map_err(JarvisError::Io)?;
 
         let config_path = config_dir.join("permissions.toml");
-        let permissions_config = if config_path.exists() {
-            let content = std::fs::read_to_string(&config_path).map_err(JarvisError::Io)?;
-            toml::from_str(&content).unwrap_or_default()
-        } else {
+        if !config_path.exists() {
             let default_cfg = PermissionsConfig::default();
             let toml_str = toml::to_string_pretty(&default_cfg).unwrap_or_default();
             let _ = std::fs::write(&config_path, toml_str);
-            default_cfg
-        };
+        }
 
         let db_path = config.general.data_dir.join("audit.db");
         let conn = Connection::open(&db_path).map_err(|e| JarvisError::Memory(e.to_string()))?;
         let mgr = Self {
-            config: permissions_config,
             config_path,
             audit_conn: Arc::new(Mutex::new(conn)),
         };
         mgr.init_audit_schema()?;
         Ok(mgr)
+    }
+
+    /// Read the policy from disk.
+    ///
+    /// The file is re-read on every call rather than cached. It is a few
+    /// hundred bytes and tool decisions are rare, so the cost is
+    /// negligible - and it means a policy change takes effect immediately,
+    /// without restarting the daemon. A cached policy would silently keep
+    /// applying stale rules after an operator changed them.
+    fn load(&self) -> PermissionsConfig {
+        match std::fs::read_to_string(&self.config_path) {
+            Ok(content) => toml::from_str(&content).unwrap_or_default(),
+            Err(_) => PermissionsConfig::default(),
+        }
     }
 
     fn init_audit_schema(&self) -> Result<()> {
@@ -144,13 +179,52 @@ impl PermissionManager {
 
     pub fn check_permission(&self, tool: &str, _args: &Value) -> PermissionAction {
         // Check for exact match first
-        for rule in &self.config.rules {
+        for rule in &self.load().rules {
             if rule.tool == tool {
                 return rule.action.clone();
             }
         }
         // Default: ask for unknown tools (safe by default)
         PermissionAction::Ask
+    }
+
+    /// The rules currently in force.
+    pub fn rules(&self) -> Vec<PermissionRule> {
+        self.load().rules
+    }
+
+    /// Set the action for a tool, adding a rule if the tool is not listed.
+    pub fn set_rule(&self, tool: &str, action: PermissionAction) -> Result<()> {
+        let mut config = self.load();
+        match config.rules.iter_mut().find(|r| r.tool == tool) {
+            Some(rule) => rule.action = action,
+            None => config.rules.push(PermissionRule {
+                tool: tool.to_string(),
+                action,
+                patterns: None,
+            }),
+        }
+        self.save(&config)
+    }
+
+    /// Drop a rule, restoring the default behaviour for that tool.
+    ///
+    /// Returns whether a rule was actually removed.
+    pub fn remove_rule(&self, tool: &str) -> Result<bool> {
+        let mut config = self.load();
+        let before = config.rules.len();
+        config.rules.retain(|r| r.tool != tool);
+        if config.rules.len() == before {
+            return Ok(false);
+        }
+        self.save(&config)?;
+        Ok(true)
+    }
+
+    fn save(&self, config: &PermissionsConfig) -> Result<()> {
+        let toml_str = toml::to_string_pretty(config)
+            .map_err(|e| JarvisError::Config(format!("Could not serialise permissions: {}", e)))?;
+        std::fs::write(&self.config_path, toml_str).map_err(JarvisError::Io)
     }
 
     pub fn log_audit(
@@ -175,7 +249,7 @@ impl PermissionManager {
         let conn = self.audit_conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
-                "SELECT id, session_id, tool, args, decision, result, timestamp FROM tool_audit ORDER BY timestamp DESC LIMIT ?1",
+                "SELECT id, session_id, tool, args, decision, result, timestamp FROM tool_audit ORDER BY id DESC LIMIT ?1",
             )
             .map_err(|e| JarvisError::Memory(e.to_string()))?;
         let rows = stmt

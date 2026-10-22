@@ -770,8 +770,8 @@ fn render_blocked_report(trace: &[ToolOutcome]) -> String {
     names.sort_unstable();
     names.dedup();
     out.push_str(&format!(
-        "\nNo action was taken for the blocked item(s). To permit them, set `{}` to \"allow\" in ~/.config/jarvis/permissions.toml\n",
-        names.join("`, `")
+        "\nNo action was taken for the blocked item(s). To permit them, run:\n  jarvis permissions allow {}\n",
+        names.join(" ")
     ));
     out
 }

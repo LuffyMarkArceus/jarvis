@@ -17,6 +17,22 @@ pub trait Tool: Send + Sync {
     async fn execute(&self, args: Value) -> Result<Value>;
 }
 
+/// The names of the tools Jarvis ships with.
+///
+/// Kept next to the registry so the CLI can validate a permission rule
+/// against the real tool catalogue instead of accepting a typo that would
+/// never match anything.
+pub fn known_tool_names() -> Vec<&'static str> {
+    vec![
+        "filesystem.list_dir",
+        "filesystem.read",
+        "filesystem.write",
+        "filesystem.edit",
+        "shell.run",
+        "system.info",
+    ]
+}
+
 pub struct ToolRegistry {
     tools: std::collections::HashMap<String, Box<dyn Tool>>,
 }
