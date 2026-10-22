@@ -91,7 +91,9 @@ impl Orchestrator {
         // Build context with history (token-aware truncation)
         let mut context = String::new();
         if let Some(ref m) = self.memory {
-            if let Ok(history) = m.get_recent_messages(&self.session_id, 50) {
+            if let Ok(history) =
+                m.get_recent_messages(&self.session_id, self.config.context.max_history_fetch)
+            {
                 if !history.is_empty() {
                     context.push_str("Previous conversation:\n");
                     let mut messages_to_include: Vec<_> = Vec::new();
@@ -108,7 +110,9 @@ impl Orchestrator {
                     let mut included = Vec::new();
                     for msg in messages_to_include.iter().rev() {
                         let msg_chars = msg.content.len() + msg.role.len() + 3;
-                        if total_chars + msg_chars > 2000 && !included.is_empty() {
+                        if total_chars + msg_chars > self.config.context.max_context_chars
+                            && !included.is_empty()
+                        {
                             break;
                         }
                         included.push(*msg);
