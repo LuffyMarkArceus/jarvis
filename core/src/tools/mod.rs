@@ -1,6 +1,7 @@
 //! Tool registry and execution system
 
 pub mod filesystem;
+pub mod parser;
 pub mod shell;
 pub mod system;
 
