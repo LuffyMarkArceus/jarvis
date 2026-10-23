@@ -123,9 +123,10 @@ pub fn assemble(
     // 1. The current request. Kept whole unless it cannot fit; a very long
     //    paste is shortened in the middle so both the context at the top and
     //    the actual question at the bottom survive.
-    let request_room = budget.saturating_sub(used + MESSAGE_OVERHEAD_TOKENS);
+    let request_room =
+        budget.saturating_sub(used + MESSAGE_OVERHEAD_TOKENS + estimate_tokens("user"));
     let (request, request_truncated) = clamp_request(input, request_room);
-    used += MESSAGE_OVERHEAD_TOKENS + estimate_tokens(&request);
+    used += MESSAGE_OVERHEAD_TOKENS + estimate_tokens("user") + estimate_tokens(&request);
 
     // 2. Only the last `max_history_messages` may appear verbatim.
     let window_start = history.len().saturating_sub(config.max_history_messages);
@@ -145,9 +146,15 @@ pub fn assemble(
     let mut verbatim_used = 0usize;
     for message in recent.iter().rev() {
         let cost = estimate_message(&message.role, &message.content);
-        // Always keep the newest message, even if it alone is over budget:
-        // dropping it would leave the model without a conversation.
-        if verbatim_used + cost > verbatim_cap && !kept.is_empty() {
+        // The newest turn may use everything that is left - recency matters
+        // most - but it may not push the prompt over the budget. Older turns
+        // are capped lower so the condensed block keeps some room.
+        let cap = if kept.is_empty() {
+            remaining
+        } else {
+            verbatim_cap
+        };
+        if verbatim_used + cost > cap {
             break;
         }
         verbatim_used += cost;
@@ -439,6 +446,21 @@ mod tests {
         // Four verbatim turns plus the current request.
         assert_eq!(plan.messages.len(), 5);
         assert!(plan.system.contains("Background from earlier"));
+    }
+
+    #[test]
+    fn a_huge_request_leaves_no_room_for_history_and_no_overspend() {
+        let history = history(4, 100);
+        let input = "A".repeat(40_000);
+        let plan = assemble("rules", &input, &history, &config(), 0);
+
+        assert_eq!(plan.messages.len(), 1, "only the request should remain");
+        assert!(
+            plan.estimated_tokens <= config().prompt_budget() + 5,
+            "estimate {} over budget {}",
+            plan.estimated_tokens,
+            config().prompt_budget()
+        );
     }
 
     #[test]

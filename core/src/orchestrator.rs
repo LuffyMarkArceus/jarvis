@@ -204,7 +204,8 @@ impl Orchestrator {
         input: &str,
         confirm: Option<&dyn ConfirmationHandler>,
     ) -> Result<String> {
-        info!("Processing: {}", input);
+        // Bound the log line: a pasted document should not fill the log.
+        info!("Processing: {}", context::truncate_with_marker(input, 200));
 
         // Snapshot history *before* persisting the new user message so the
         // prompt never contains the request twice.

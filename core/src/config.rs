@@ -1,24 +1,51 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(default)]
     pub general: GeneralConfig,
+    #[serde(default)]
     pub model: ModelConfig,
+    #[serde(default)]
     pub memory: MemoryConfig,
+    #[serde(default)]
     pub tools: ToolsConfig,
     #[serde(default)]
     pub context: ContextConfig,
 }
 
+/// Default data directory, shared by the config sections that need it.
+fn default_data_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("jarvis")
+}
+
+/// Every section has defaults, so a config file only needs the settings it
+/// actually wants to change. Requiring every field meant one missing key
+/// silently discarded the whole file - which is how a real config ended up
+/// ignored for weeks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct GeneralConfig {
     pub name: String,
     pub log_level: String,
     pub data_dir: PathBuf,
 }
 
+impl Default for GeneralConfig {
+    fn default() -> Self {
+        Self {
+            name: "Jarvis".to_string(),
+            log_level: "info".to_string(),
+            data_dir: default_data_dir(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ModelConfig {
     pub provider: String,
     pub base_url: String,
@@ -46,16 +73,50 @@ fn default_true() -> bool {
     true
 }
 
+impl Default for ModelConfig {
+    fn default() -> Self {
+        Self {
+            provider: "ollama".to_string(),
+            base_url: "http://127.0.0.1:11434".to_string(),
+            default_model: "llama3.2:1b".to_string(),
+            routing_model: "llama3.2:1b".to_string(),
+            embedding_model: "nomic-embed-text".to_string(),
+            native_tool_calling: true,
+            temperature: 0.0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MemoryConfig {
     pub db_path: PathBuf,
     pub vector_dim: usize,
 }
 
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            db_path: default_data_dir().join("memory.db"),
+            vector_dim: 768,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ToolsConfig {
     pub require_confirmation: bool,
     pub allowed_shell_commands: Vec<String>,
+}
+
+impl Default for ToolsConfig {
+    fn default() -> Self {
+        Self {
+            require_confirmation: true,
+            allowed_shell_commands: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,39 +165,6 @@ impl ContextConfig {
         let hard_limit = self.num_ctx / 2;
         self.max_prompt_tokens
             .min(hard_limit.saturating_sub(hard_limit / 8))
-    }
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        let data_dir = dirs::data_local_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("jarvis");
-        Self {
-            general: GeneralConfig {
-                name: "Jarvis".to_string(),
-                log_level: "info".to_string(),
-                data_dir: data_dir.clone(),
-            },
-            model: ModelConfig {
-                provider: "ollama".to_string(),
-                base_url: "http://127.0.0.1:11434".to_string(),
-                default_model: "llama3.2:1b".to_string(),
-                routing_model: "llama3.2:1b".to_string(),
-                embedding_model: "nomic-embed-text".to_string(),
-                native_tool_calling: true,
-                temperature: 0.0,
-            },
-            memory: MemoryConfig {
-                db_path: data_dir.join("memory.db"),
-                vector_dim: 768,
-            },
-            tools: ToolsConfig {
-                require_confirmation: true,
-                allowed_shell_commands: vec![],
-            },
-            context: ContextConfig::default(),
-        }
     }
 }
 
@@ -204,5 +232,63 @@ impl Config {
         }
 
         config
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_partial_config_keeps_every_other_default() {
+        // No [memory] section, and no most fields: this used to fail to
+        // parse and silently discard the user's whole file.
+        let text = r#"
+            [general]
+            name = "Jarvis"
+
+            [model]
+            default_model = "tiny"
+
+            [context]
+            max_prompt_tokens = 900
+        "#;
+        let config: Config = toml::from_str(text).expect("partial config should parse");
+
+        assert_eq!(config.model.default_model, "tiny");
+        assert_eq!(config.model.base_url, "http://127.0.0.1:11434");
+        assert!(config.model.native_tool_calling);
+        assert_eq!(config.memory.vector_dim, 768);
+        assert!(config.memory.db_path.ends_with("memory.db"));
+        assert!(config.tools.require_confirmation);
+        assert_eq!(config.context.max_prompt_tokens, 900);
+        assert_eq!(config.context.num_ctx, 8192);
+    }
+
+    #[test]
+    fn an_unknown_key_is_ignored_rather_than_discarding_the_file() {
+        let text = r#"
+            [context]
+            max_context_chars = 2000
+
+            [model]
+            default_model = "tiny"
+        "#;
+        let config: Config = toml::from_str(text).expect("unknown keys should not fail");
+        assert_eq!(config.model.default_model, "tiny");
+    }
+
+    #[test]
+    fn the_prompt_budget_stays_below_the_provider_limit() {
+        let default = ContextConfig::default();
+        assert!(default.prompt_budget() < default.num_ctx / 2);
+
+        // A budget larger than the provider allows is clamped, not honoured.
+        let greedy = ContextConfig {
+            num_ctx: 4096,
+            max_prompt_tokens: 4000,
+            ..ContextConfig::default()
+        };
+        assert_eq!(greedy.prompt_budget(), 4096 / 2 - 4096 / 2 / 8);
     }
 }
