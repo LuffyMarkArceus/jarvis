@@ -59,19 +59,51 @@ pub struct ToolsConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ContextConfig {
-    pub max_context_chars: usize,
+    /// Context window requested from the provider. Ollama truncates the
+    /// prompt at half of this, so raising it is the only way to allow a
+    /// larger prompt.
+    pub num_ctx: usize,
+    /// Token budget for one request: system prompt, tool schemas, history
+    /// and the current request together.
+    pub max_prompt_tokens: usize,
+    /// Past messages kept word-for-word. Older messages are condensed.
     pub max_history_messages: usize,
+    /// Past messages read from memory at all.
     pub max_history_fetch: usize,
+    /// Characters kept per older message when condensing.
+    pub summary_message_chars: usize,
+    /// Characters of a tool result allowed back into the prompt.
+    pub max_tool_result_chars: usize,
 }
 
 impl Default for ContextConfig {
     fn default() -> Self {
         Self {
-            max_context_chars: 2000,
-            max_history_messages: 20,
+            num_ctx: 8192,
+            max_prompt_tokens: 2800,
+            max_history_messages: 12,
             max_history_fetch: 50,
+            summary_message_chars: 160,
+            max_tool_result_chars: 1200,
         }
+    }
+}
+
+impl ContextConfig {
+    /// Tokens we allow ourselves to send in one request.
+    ///
+    /// Measured on Ollama 0.40: the prompt is truncated at `num_ctx / 2`
+    /// (2048 with the default 4096 window), and the truncation removes the
+    /// *front* of the prompt, where the system prompt lives. Staying well
+    /// below that limit is what keeps the honesty rules in front of the
+    /// model. The eighth of headroom absorbs the error in estimating tokens
+    /// as `chars / 4`.
+    pub fn prompt_budget(&self) -> usize {
+        let hard_limit = self.num_ctx / 2;
+        self.max_prompt_tokens
+            .min(hard_limit.saturating_sub(hard_limit / 8))
     }
 }
 
@@ -118,14 +150,28 @@ impl Config {
             .join("jarvis");
         let config_path = config_dir.join("config.toml");
         if config_path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&config_path) {
-                if let Ok(file_config) = toml::from_str::<Config>(&content) {
-                    config = file_config;
-                    // Recompute db_path if using default data_dir structure
-                    let data_dir = config.general.data_dir.clone();
-                    if config.memory.db_path.to_string_lossy().is_empty() {
-                        config.memory.db_path = data_dir.join("memory.db");
+            match std::fs::read_to_string(&config_path) {
+                Ok(content) => match toml::from_str::<Config>(&content) {
+                    Ok(file_config) => {
+                        config = file_config;
+                        // Recompute db_path if using default data_dir structure
+                        let data_dir = config.general.data_dir.clone();
+                        if config.memory.db_path.to_string_lossy().is_empty() {
+                            config.memory.db_path = data_dir.join("memory.db");
+                        }
                     }
+                    // Silently falling back to defaults hides real mistakes,
+                    // such as a renamed field, behind behaviour that looks
+                    // like the user's settings were respected when they were
+                    // not.
+                    Err(e) => tracing::warn!(
+                        "Ignoring unreadable config at {}: {}",
+                        config_path.display(),
+                        e
+                    ),
+                },
+                Err(e) => {
+                    tracing::warn!("Could not read config at {}: {}", config_path.display(), e)
                 }
             }
         }
@@ -141,9 +187,9 @@ impl Config {
                 config.model.base_url = val;
             }
         }
-        if let Ok(val) = std::env::var("JARVIS_MAX_CONTEXT_CHARS") {
+        if let Ok(val) = std::env::var("JARVIS_MAX_PROMPT_TOKENS") {
             if let Ok(v) = val.parse::<usize>() {
-                config.context.max_context_chars = v;
+                config.context.max_prompt_tokens = v;
             }
         }
         if let Ok(val) = std::env::var("JARVIS_MAX_HISTORY_FETCH") {

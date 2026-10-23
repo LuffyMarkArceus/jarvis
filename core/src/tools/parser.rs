@@ -6,6 +6,8 @@
 //! 3. Anthropic:      `{"content": [{"type": "tool_use", "name": "t", "input": {...}}]}`
 //! 4. Alias:          `{"tools": [{"name": "t", "args": {...}}]}`  (small models emit this)
 //! 5. Root level:     `{"type": "tool_use", "name": "t", "input": {...}}`
+//! 6. Bare function:  `{"type": "function", "function": {"name": "t", "parameters": {...}}}`
+//!    - what llama3.2 emits when it echoes a tool definition as a call.
 //!
 //! Design principle: be permissive when parsing, strict when executing.
 //! The parser never executes anything - it only extracts intent. Actual
@@ -182,6 +184,16 @@ fn try_parse_formats(json_str: &str) -> Result<Vec<ToolCall>, ()> {
         }
     }
 
+    // Format 6: a bare OpenAI-style function object at the root. Small
+    // models sometimes mistake the tool definition for the call and reply
+    // with it directly. Treating it as a call is the honest reading: it is
+    // an attempt to act, and permissions decide whether it happens.
+    if root_type == Some("function") {
+        if let Some(call) = parse_single_call(&v) {
+            calls.push(call);
+        }
+    }
+
     if calls.is_empty() {
         Err(())
     } else {
@@ -284,4 +296,103 @@ pub fn strip_tool_artifacts(response: &str) -> String {
     }
 
     cleaned.trim().to_string()
+}
+
+/// True when text looks like a tool call that could not be parsed, such as
+/// a JSON object truncated mid-way by the model.
+///
+/// Used to avoid presenting protocol fragments as if they were an answer.
+/// Deliberately narrow: an object that merely contains braces is not enough.
+pub fn looks_like_tool_call(response: &str) -> bool {
+    let trimmed = response.trim();
+    if !trimmed.starts_with('{') {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let mentions_protocol = lower.contains("\"function\"")
+        || lower.contains("\"tool_calls\"")
+        || lower.contains("\"tool_use\"");
+    mentions_protocol && lower.contains("\"name\"")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn single(response: &str) -> ToolCall {
+        let mut calls = parse_tool_calls(response);
+        assert_eq!(calls.len(), 1, "expected one call from {response}");
+        calls.remove(0)
+    }
+
+    #[test]
+    fn parses_the_custom_flat_shape() {
+        let call = single(r#"{"tool_calls":[{"name":"filesystem.read","args":{"path":"/tmp"}}]}"#);
+        assert_eq!(call.name, "filesystem.read");
+        assert_eq!(call.args["path"], "/tmp");
+    }
+
+    #[test]
+    fn parses_the_openai_array_shape() {
+        let call = single(
+            r#"{"tool_calls":[{"type":"function","function":{"name":"system.info","arguments":"{}"}}]}"#,
+        );
+        assert_eq!(call.name, "system.info");
+        assert!(call.args.is_object());
+    }
+
+    #[test]
+    fn parses_a_bare_function_object() {
+        // This exact output used to leak to the user as raw JSON.
+        let call = single(
+            r#"{"type":"function","function":{"name":"filesystem.edit","parameters":{"path":"/tmp/x","old_string":"a","new_string":"b"}}}"#,
+        );
+        assert_eq!(call.name, "filesystem.edit");
+        assert_eq!(call.args["new_string"], "b");
+    }
+
+    #[test]
+    fn parses_an_anthropic_tool_use_block() {
+        let call = single(
+            r#"{"content":[{"type":"tool_use","name":"filesystem.stat","input":{"path":"/tmp"}}]}"#,
+        );
+        assert_eq!(call.name, "filesystem.stat");
+        assert_eq!(call.args["path"], "/tmp");
+    }
+
+    #[test]
+    fn parses_a_root_level_tool_call() {
+        let call = single(r#"{"type":"tool_call","name":"process.list","args":{"limit":3}}"#);
+        assert_eq!(call.name, "process.list");
+        assert_eq!(call.args["limit"], 3);
+    }
+
+    #[test]
+    fn finds_a_call_embedded_in_prose() {
+        let call = single(
+            "I will check that now.\n{\"tool_calls\": [{\"name\": \"filesystem.list_dir\", \"args\": {\"path\": \"/tmp\"}}]}\nDone.",
+        );
+        assert_eq!(call.name, "filesystem.list_dir");
+    }
+
+    #[test]
+    fn truncated_tool_json_is_recognised_as_such() {
+        // The exact 153-byte reply a 1B model gave for "install docker":
+        // a function call with the final brace missing.
+        let truncated = r#"{"type":"function","function":{"name":"filesystem.edit","parameters": {"path": "/usr/local/bin/docker", "old_string": "docker", "new_string": "docker2"}}"#;
+        assert!(parse_tool_calls(truncated).is_empty());
+        assert!(looks_like_tool_call(truncated));
+    }
+
+    #[test]
+    fn ordinary_json_is_not_mistaken_for_a_tool_call() {
+        assert!(!looks_like_tool_call(r#"{"name": "Shrey", "age": 30}"#));
+        assert!(!looks_like_tool_call("The capital of France is Paris."));
+    }
+
+    #[test]
+    fn plain_text_yields_no_calls() {
+        assert!(parse_tool_calls("The capital of France is Paris.").is_empty());
+        assert!(parse_tool_calls("{\"not\": \"a call\"}").is_empty());
+    }
 }

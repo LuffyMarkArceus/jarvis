@@ -95,9 +95,27 @@ struct ChatRequest {
     options: Option<Value>,
 }
 
+/// One model turn plus the token accounting the provider reports.
+///
+/// The counts are what the provider actually measured, not an estimate. They
+/// are the only honest way to know how close a prompt is to the context
+/// window, so they are surfaced rather than discarded.
+#[derive(Debug, Clone)]
+pub struct ChatTurn {
+    pub message: ChatMessage,
+    /// Tokens in everything we sent: system prompt, history, tools, request.
+    pub prompt_tokens: Option<u64>,
+    /// Tokens the model generated.
+    pub completion_tokens: Option<u64>,
+}
+
 #[derive(Debug, Deserialize)]
 struct ChatResponse {
     message: ChatMessage,
+    #[serde(default)]
+    prompt_eval_count: Option<u64>,
+    #[serde(default)]
+    eval_count: Option<u64>,
 }
 
 impl OllamaClient {
@@ -111,7 +129,7 @@ impl OllamaClient {
     pub async fn chat(&self, model: &str, user_message: &str) -> Result<String> {
         let messages = vec![ChatMessage::text("user", user_message)];
         let turn = self.chat_turn(model, None, &messages, None).await?;
-        Ok(turn.content)
+        Ok(turn.message.content)
     }
 
     /// Send a chat request with an optional system prompt.
@@ -135,7 +153,7 @@ impl OllamaClient {
         }
         messages.push(ChatMessage::text("user", user_message));
         let turn = self.chat_turn(model, None, &messages, None).await?;
-        Ok(turn.content)
+        Ok(turn.message.content)
     }
 
     /// Run a full conversation turn, optionally exposing tools to the model.
@@ -147,7 +165,7 @@ impl OllamaClient {
         system: Option<&str>,
         messages: &[ChatMessage],
         tools: Option<&[Value]>,
-    ) -> Result<ChatMessage> {
+    ) -> Result<ChatTurn> {
         self.chat_turn_with_options(model, system, messages, tools, None)
             .await
     }
@@ -160,7 +178,7 @@ impl OllamaClient {
         messages: &[ChatMessage],
         tools: Option<&[Value]>,
         options: Option<Value>,
-    ) -> Result<ChatMessage> {
+    ) -> Result<ChatTurn> {
         let mut all_messages: Vec<ChatMessage> = Vec::new();
         if let Some(s) = system {
             let s = s.trim();
@@ -195,7 +213,11 @@ impl OllamaClient {
             .await
             .map_err(|e| JarvisError::Model(format!("Parse error: {}", e)))?;
 
-        Ok(chat_resp.message)
+        Ok(ChatTurn {
+            message: chat_resp.message,
+            prompt_tokens: chat_resp.prompt_eval_count,
+            completion_tokens: chat_resp.eval_count,
+        })
     }
 
     pub async fn list_models(&self) -> Result<Vec<String>> {

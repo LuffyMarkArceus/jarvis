@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod confirm;
+pub mod context;
 pub mod daemon;
 pub mod error;
 pub mod ipc;

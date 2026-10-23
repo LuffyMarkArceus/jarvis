@@ -46,6 +46,7 @@
 //! present (a headless run) the call is denied, never silently allowed.
 
 use crate::config::Config;
+use crate::context::{self, ContextPlan};
 use crate::error::Result;
 use crate::memory::{MemoryManager, Message};
 use crate::model::{ChatMessage, ModelToolCall, OllamaClient};
@@ -61,7 +62,7 @@ use crate::tools::{
     ToolRegistry,
 };
 use serde_json::Value;
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 /// Asked when a tool call needs the user's approval before it runs.
@@ -243,13 +244,20 @@ impl Orchestrator {
     /// Plain conversation. The model is given no tools, so it cannot try to
     /// use one - which is exactly what we want for "who are you?".
     async fn converse(&self, input: &str, history: &[Message]) -> String {
-        let messages = self.build_messages(input, history);
+        let plan = context::assemble(
+            &self.conversation_system_prompt(),
+            input,
+            history,
+            &self.config.context,
+            0,
+        );
+        self.log_plan(&plan);
         let turn = match self
             .client
             .chat_turn_with_options(
                 &self.config.model.default_model,
-                Some(&self.conversation_system_prompt()),
-                &messages,
+                Some(&plan.system),
+                &plan.messages,
                 None,
                 Some(self.model_options()),
             )
@@ -261,9 +269,12 @@ impl Orchestrator {
                 return self.fallback_answer(input);
             }
         };
-        info!("model turn: {:?}", turn.content);
+        info!(
+            "model turn: prompt_tokens={:?} completion_tokens={:?} content={:?}",
+            turn.prompt_tokens, turn.completion_tokens, turn.message.content
+        );
 
-        let answer = final_answer(&turn.content);
+        let answer = final_answer(&turn.message.content);
         if answer.is_empty() {
             self.empty_answer(input)
         } else {
@@ -279,16 +290,34 @@ impl Orchestrator {
         history: &[Message],
         confirm: Option<&dyn ConfirmationHandler>,
     ) -> String {
-        let mut messages = self.build_messages(input, history);
         let tools = self.tools.schemas();
+        let reserved = self.tool_schema_tokens(&tools);
+        let plan = context::assemble(
+            &self.tool_system_prompt(),
+            input,
+            history,
+            &self.config.context,
+            reserved,
+        );
+        self.log_plan(&plan);
+
+        let system = plan.system;
+        let mut messages = plan.messages;
+        // How many leading messages are history. Everything after them is the
+        // current request and the tool trace, which must never be dropped.
+        let mut history_len = messages.len().saturating_sub(1);
         let mut trace: Vec<ToolOutcome> = Vec::new();
 
         for _ in 0..MAX_ITERATIONS {
+            // Tool results grow the prompt. Shed the oldest history until it
+            // fits again rather than letting the provider truncate the front.
+            self.fit_prompt(&system, &mut messages, &mut history_len, reserved);
+
             let turn = match self
                 .client
                 .chat_turn_with_options(
                     &self.config.model.default_model,
-                    Some(&self.tool_system_prompt()),
+                    Some(&system),
                     &messages,
                     Some(&tools),
                     Some(self.model_options()),
@@ -302,37 +331,24 @@ impl Orchestrator {
                 }
             };
             info!(
-                "model turn: content={:?} tool_calls={}",
-                turn.content,
-                turn.tool_calls.is_some()
+                "model turn: prompt_tokens={:?} completion_tokens={:?} content={:?} tool_calls={}",
+                turn.prompt_tokens,
+                turn.completion_tokens,
+                turn.message.content,
+                turn.message.tool_calls.is_some()
             );
 
             // Native function calling.
-            if let Some(calls) = turn.tool_calls.as_ref().filter(|c| !c.is_empty()) {
+            if let Some(calls) = turn.message.tool_calls.as_ref().filter(|c| !c.is_empty()) {
                 messages.push(ChatMessage::assistant_with_tool_calls(
-                    &turn.content,
+                    &turn.message.content,
                     calls.clone(),
                 ));
                 for call in calls {
                     let outcome = self.execute_native_call(call, confirm).await;
-                    messages.push(ChatMessage::tool_result(&outcome.name, &outcome.output));
-                    trace.push(outcome);
-                }
-                if let Some(report) = blocked_report(&trace) {
-                    return report;
-                }
-                continue;
-            }
-
-            // Tool calls embedded in the reply text.
-            let text_calls = parser::parse_tool_calls(&turn.content);
-            if !text_calls.is_empty() {
-                messages.push(ChatMessage::text("assistant", &turn.content));
-                for call in &text_calls {
-                    let outcome = self.execute_text_call(call, confirm).await;
-                    messages.push(ChatMessage::text(
-                        "user",
-                        &format!("Result of {}:\n{}", outcome.name, outcome.output),
+                    messages.push(ChatMessage::tool_result(
+                        &outcome.name,
+                        &self.prompt_tool_output(&outcome.output),
                     ));
                     trace.push(outcome);
                 }
@@ -342,8 +358,37 @@ impl Orchestrator {
                 continue;
             }
 
+            // Tool calls embedded in the reply text.
+            let text_calls = parser::parse_tool_calls(&turn.message.content);
+            if !text_calls.is_empty() {
+                messages.push(ChatMessage::text("assistant", &turn.message.content));
+                for call in &text_calls {
+                    let outcome = self.execute_text_call(call, confirm).await;
+                    messages.push(ChatMessage::text(
+                        "user",
+                        &format!(
+                            "Result of {}:\n{}",
+                            outcome.name,
+                            self.prompt_tool_output(&outcome.output)
+                        ),
+                    ));
+                    trace.push(outcome);
+                }
+                if let Some(report) = blocked_report(&trace) {
+                    return report;
+                }
+                continue;
+            }
+
+            // A reply that is only a malformed tool call is not an answer.
+            // Showing it would put protocol JSON in front of the user, and
+            // silently ignoring it would hide that nothing was executed.
+            if parser::looks_like_tool_call(&turn.message.content) {
+                return "I tried to use a tool, but the model's instruction was malformed, so nothing was run. Try rephrasing the request.".to_string();
+            }
+
             // A plain answer.
-            let answer = final_answer(&turn.content);
+            let answer = final_answer(&turn.message.content);
             if answer.is_empty() {
                 return if trace.is_empty() {
                     self.empty_answer(input)
@@ -368,8 +413,82 @@ impl Orchestrator {
     // ---------------------------------------------------------------- prompts
 
     /// Provider tuning options for a single request.
+    ///
+    /// `num_ctx` is set explicitly instead of relying on the provider's
+    /// default, which changes between versions and is what decides how much
+    /// of the prompt survives.
     fn model_options(&self) -> Value {
-        serde_json::json!({ "temperature": self.config.model.temperature })
+        serde_json::json!({
+            "temperature": self.config.model.temperature,
+            "num_ctx": self.config.context.num_ctx,
+        })
+    }
+
+    /// Tokens the tool schemas will cost in this request.
+    fn tool_schema_tokens(&self, schemas: &[Value]) -> usize {
+        schemas
+            .iter()
+            .map(|schema| context::estimate_tokens(&schema.to_string()) + 8)
+            .sum()
+    }
+
+    /// A tool result as the model should see it: bounded, and honest about
+    /// what was cut. The user-facing rendering uses the full output.
+    fn prompt_tool_output(&self, output: &str) -> String {
+        context::truncate_with_marker(output, self.config.context.max_tool_result_chars)
+    }
+
+    /// Record what was sent and what it cost. This is the measurement that
+    /// keeps the estimate honest against the provider's real token counts.
+    fn log_plan(&self, plan: &ContextPlan) {
+        let budget = self.config.context.prompt_budget();
+        info!(
+            "context: est_prompt_tokens={} budget={} messages={} condensed={} omitted={} request_truncated={}",
+            plan.estimated_tokens,
+            budget,
+            plan.messages.len(),
+            plan.condensed_messages,
+            plan.omitted_messages,
+            plan.request_truncated
+        );
+        if plan.estimated_tokens > budget {
+            warn!(
+                "estimated prompt ({} tokens) exceeds budget ({}); the provider may drop the start of the prompt",
+                plan.estimated_tokens, budget
+            );
+        }
+    }
+
+    /// Drop whole leading history turns until the prompt fits the budget.
+    ///
+    /// Only messages before `history_len` are candidates, so the current
+    /// request and the in-flight tool trace are never touched.
+    fn fit_prompt(
+        &self,
+        system: &str,
+        messages: &mut Vec<ChatMessage>,
+        history_len: &mut usize,
+        reserved: usize,
+    ) {
+        let budget = self.config.context.prompt_budget();
+        let mut dropped = 0usize;
+        while *history_len > 0 && context::total_tokens(system, messages, reserved) > budget {
+            messages.remove(0);
+            *history_len -= 1;
+            dropped += 1;
+            // Start the window on a user turn so the roles stay coherent.
+            while *history_len > 0 && messages.first().is_some_and(|m| m.role != "user") {
+                messages.remove(0);
+                *history_len -= 1;
+                dropped += 1;
+            }
+        }
+        if dropped > 0 {
+            warn!(
+                "dropped {} earlier message(s) from the prompt to fit the token budget",
+                dropped
+            );
+        }
     }
 
     /// System prompt for plain conversation.
@@ -396,41 +515,14 @@ impl Orchestrator {
         p
     }
 
-    /// The conversation handed to the model: history, then the request.
-    fn build_messages(&self, input: &str, history: &[Message]) -> Vec<ChatMessage> {
-        let mut messages: Vec<ChatMessage> = Vec::new();
-        for msg in history {
-            messages.push(ChatMessage::text(&msg.role, &msg.content));
-        }
-        messages.push(ChatMessage::text("user", input));
-        messages
-    }
-
-    /// Recent history, trimmed to the context budget (oldest first when
-    /// rendered).
+    /// Recent history, oldest first. How much of it reaches the model is
+    /// decided by [`crate::context::assemble`], not here.
     fn history_for_prompt(&self) -> Vec<Message> {
         let Some(ref m) = self.memory else {
             return Vec::new();
         };
-        let Ok(messages) =
-            m.get_recent_messages(&self.session_id, self.config.context.max_history_fetch)
-        else {
-            return Vec::new();
-        };
-
-        let budget = self.config.context.max_context_chars;
-        let mut total = 0usize;
-        let mut kept: Vec<&Message> = Vec::new();
-        for msg in messages.iter().rev() {
-            let size = msg.content.len() + msg.role.len() + 3;
-            if total + size > budget && !kept.is_empty() {
-                break;
-            }
-            total += size;
-            kept.push(msg);
-        }
-        kept.reverse();
-        kept.into_iter().cloned().collect()
+        m.get_recent_messages(&self.session_id, self.config.context.max_history_fetch)
+            .unwrap_or_default()
     }
 
     fn fallback_answer(&self, input: &str) -> String {
