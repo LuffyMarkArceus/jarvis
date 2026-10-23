@@ -75,6 +75,20 @@ impl MemoryManager {
         Ok(())
     }
 
+    /// Does this session still exist?
+    ///
+    /// Used when resuming the saved active session: the file outlives a
+    /// `session delete`, so its id alone is not proof the conversation is
+    /// still there.
+    pub fn session_exists(&self, session_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT 1 FROM sessions WHERE id = ?1")
+            .map_err(|e| JarvisError::Memory(format!("Query failed: {}", e)))?;
+        stmt.exists(params![session_id])
+            .map_err(|e| JarvisError::Memory(format!("Query failed: {}", e)))
+    }
+
     pub fn add_message(&self, session_id: &str, role: &str, content: &str) -> Result<i64> {
         self.create_session(session_id)?;
         let conn = self.conn.lock().unwrap();
