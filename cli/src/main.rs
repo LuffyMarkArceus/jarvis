@@ -162,11 +162,31 @@ enum PermissionsCommands {
     Deny { tool: String },
     /// Remove a rule, restoring the default behaviour
     Reset { tool: String },
+    /// Manage per-command rules for shell.run
+    Command {
+        #[command(subcommand)]
+        action: CommandRuleCommands,
+    },
     /// Show recent tool decisions
     Audit {
         #[arg(short, long, default_value = "20")]
         limit: usize,
     },
+}
+
+#[derive(Subcommand)]
+enum CommandRuleCommands {
+    /// Run matching commands without asking
+    Allow {
+        /// Glob over the whole command, e.g. "git status" or "git *"
+        pattern: String,
+    },
+    /// Ask before running matching commands
+    Ask { pattern: String },
+    /// Never run matching commands
+    Deny { pattern: String },
+    /// Remove a command rule
+    Forget { pattern: String },
 }
 
 fn get_socket_path() -> PathBuf {
@@ -377,10 +397,42 @@ async fn main() -> anyhow::Result<()> {
                             action_name(&rule.action),
                             rule.action.label()
                         );
+                        for p in rule.patterns.iter().flatten() {
+                            println!(
+                                "  {:<20} {:<6} {}",
+                                format!("\"{}\"", p.pattern),
+                                action_name(&p.action),
+                                p.action.label()
+                            );
+                        }
                     }
                     println!();
                     println!("A tool with no rule defaults to 'ask'.");
+                    println!(
+                        "For shell.run, if several patterns match, the most restrictive wins."
+                    );
                 }
+                PermissionsCommands::Command { action } => match action {
+                    CommandRuleCommands::Allow { pattern } => {
+                        manager.set_pattern("shell.run", &pattern, PermissionAction::Allow)?;
+                        println!("Commands matching \"{}\" will run without asking.", pattern);
+                    }
+                    CommandRuleCommands::Ask { pattern } => {
+                        manager.set_pattern("shell.run", &pattern, PermissionAction::Ask)?;
+                        println!("Commands matching \"{}\" will ask first.", pattern);
+                    }
+                    CommandRuleCommands::Deny { pattern } => {
+                        manager.set_pattern("shell.run", &pattern, PermissionAction::Deny)?;
+                        println!("Commands matching \"{}\" will never run.", pattern);
+                    }
+                    CommandRuleCommands::Forget { pattern } => {
+                        if manager.remove_pattern("shell.run", &pattern)? {
+                            println!("Removed the rule for \"{}\".", pattern);
+                        } else {
+                            println!("There was no rule for \"{}\".", pattern);
+                        }
+                    }
+                },
                 PermissionsCommands::Allow { tool } => {
                     set_permission(&manager, &tool, PermissionAction::Allow)?;
                 }

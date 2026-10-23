@@ -122,6 +122,8 @@ struct ToolOutcome {
     args: Value,
     status: OutcomeStatus,
     output: String,
+    /// The command pattern that decided the outcome, if one did.
+    pattern: Option<String>,
 }
 
 pub struct Orchestrator {
@@ -474,14 +476,23 @@ impl Orchestrator {
         confirm: Option<&dyn ConfirmationHandler>,
     ) -> ToolOutcome {
         let args = self.sanitize_args(&name, args);
+        let verdict = self.permissions.check_permission(&name, &args);
 
-        match self.permissions.check_permission(&name, &args) {
+        match verdict.action {
             PermissionAction::Deny => {
-                let msg = format!(
-                    "Tool {} denied by policy. Args: {}",
-                    name,
-                    compact_args(&args)
-                );
+                let msg = match &verdict.pattern {
+                    Some(p) => format!(
+                        "Tool {} denied by pattern \"{}\". Args: {}",
+                        name,
+                        p,
+                        compact_args(&args)
+                    ),
+                    None => format!(
+                        "Tool {} denied by policy. Args: {}",
+                        name,
+                        compact_args(&args)
+                    ),
+                };
                 let _ = self.permissions.log_audit(
                     Some(&self.session_id),
                     &name,
@@ -494,12 +505,14 @@ impl Orchestrator {
                     args,
                     status: OutcomeStatus::Denied,
                     output: msg,
+                    pattern: verdict.pattern,
                 }
             }
             PermissionAction::Ask => match confirm {
                 Some(handler) => {
                     if handler.confirm(&name, &args).await {
-                        self.run_tool(name, args, "confirmed").await
+                        self.run_tool(name, args, "confirmed", verdict.pattern)
+                            .await
                     } else {
                         let msg = format!(
                             "Tool {} was declined by the user. Args: {}",
@@ -518,6 +531,7 @@ impl Orchestrator {
                             args,
                             status: OutcomeStatus::Declined,
                             output: msg,
+                            pattern: verdict.pattern,
                         }
                     }
                 }
@@ -539,10 +553,11 @@ impl Orchestrator {
                         args,
                         status: OutcomeStatus::NeedsConfirmation,
                         output: msg,
+                        pattern: verdict.pattern,
                     }
                 }
             },
-            PermissionAction::Allow => self.run_tool(name, args, "allowed").await,
+            PermissionAction::Allow => self.run_tool(name, args, "allowed", verdict.pattern).await,
         }
     }
 
@@ -551,7 +566,13 @@ impl Orchestrator {
     /// `decision` is what lands in the audit log, so a call a human approved
     /// is distinguishable after the fact from one the policy allowed
     /// outright.
-    async fn run_tool(&self, name: String, args: Value, decision: &str) -> ToolOutcome {
+    async fn run_tool(
+        &self,
+        name: String,
+        args: Value,
+        decision: &str,
+        pattern: Option<String>,
+    ) -> ToolOutcome {
         match self.tools.execute(&name, args.clone()).await {
             Ok(res) => {
                 let compact = compact_output(&name, &res);
@@ -567,6 +588,7 @@ impl Orchestrator {
                     args,
                     status: OutcomeStatus::Succeeded,
                     output: compact,
+                    pattern,
                 }
             }
             Err(e) => {
@@ -583,6 +605,7 @@ impl Orchestrator {
                     args,
                     status: OutcomeStatus::Failed,
                     output: msg,
+                    pattern,
                 }
             }
         }
@@ -843,6 +866,9 @@ fn render_blocked_report(trace: &[ToolOutcome]) -> String {
 
     for t in &blocked {
         out.push_str(&format!("  {}\n", t.name));
+        if let Some(pattern) = &t.pattern {
+            out.push_str(&format!("    matched: \"{}\"\n", pattern));
+        }
         out.push_str(&format!("    args:   {}\n", compact_args(&t.args)));
         out.push_str(&format!("    status: {}\n", t.status.label()));
     }
@@ -858,15 +884,16 @@ fn render_blocked_report(trace: &[ToolOutcome]) -> String {
         }
     }
 
-    // Only suggest loosening the policy when the policy is what stopped it.
-    // After an explicit "no" the useful guidance is nothing at all.
-    let policy_blocked: Vec<&ToolOutcome> = blocked
+    // Only suggest loosening the policy when the policy is what stopped it,
+    // and only at tool level: when a *pattern* denied the call, telling the
+    // user to allow the whole tool is the opposite of useful advice.
+    let tool_level: Vec<&ToolOutcome> = blocked
         .iter()
         .copied()
-        .filter(|t| t.status != OutcomeStatus::Declined)
+        .filter(|t| t.pattern.is_none() && t.status != OutcomeStatus::Declined)
         .collect();
-    if !policy_blocked.is_empty() {
-        let mut names: Vec<&str> = policy_blocked.iter().map(|t| t.name.as_str()).collect();
+    if !tool_level.is_empty() {
+        let mut names: Vec<&str> = tool_level.iter().map(|t| t.name.as_str()).collect();
         names.sort_unstable();
         names.dedup();
         out.push_str(&format!(
