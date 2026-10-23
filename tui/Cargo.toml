@@ -7,6 +7,9 @@ edition.workspace = true
 jarvis-core = { path = "../core" }
 jarvis-common = { path = "../common" }
 tokio.workspace = true
+serde_json.workspace = true
 ratatui = "0.28"
 crossterm = "0.28"
 anyhow.workspace = true
+uuid = { version = "1.10", features = ["v4"] }
+unicode-width = "0.1"

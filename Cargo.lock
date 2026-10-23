@@ -958,7 +958,10 @@ dependencies = [
  "jarvis-common",
  "jarvis-core",
  "ratatui",
+ "serde_json",
  "tokio",
+ "unicode-width",
+ "uuid",
 ]
 
 [[package]]
