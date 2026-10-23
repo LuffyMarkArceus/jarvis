@@ -42,8 +42,16 @@ impl IpcServer {
     }
 
     pub async fn start(&self) -> Result<()> {
-        // Remove old socket if exists
+        // Remove a socket left behind by a crash, but never one that a live
+        // daemon is still listening on: unlinking it would make that daemon
+        // unreachable and leave two servers running with one address.
         if self.socket_path.exists() {
+            if UnixStream::connect(&self.socket_path).await.is_ok() {
+                return Err(JarvisError::Ipc(format!(
+                    "another daemon is already listening on {}",
+                    self.socket_path.display()
+                )));
+            }
             std::fs::remove_file(&self.socket_path)
                 .map_err(|e| JarvisError::Ipc(format!("Failed to remove old socket: {}", e)))?;
         }

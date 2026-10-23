@@ -26,8 +26,11 @@ pub fn known_tool_names() -> Vec<&'static str> {
     vec![
         "filesystem.list_dir",
         "filesystem.read",
+        "filesystem.search",
+        "filesystem.stat",
         "filesystem.write",
         "filesystem.edit",
+        "process.list",
         "shell.run",
         "system.info",
     ]

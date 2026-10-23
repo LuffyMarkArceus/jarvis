@@ -52,10 +52,12 @@ use crate::model::{ChatMessage, ModelToolCall, OllamaClient};
 use crate::permissions::{PermissionAction, PermissionManager};
 use crate::router::{self, Route};
 use crate::tools::{
-    filesystem::{EditFileTool, ListDirTool, ReadFileTool, WriteFileTool},
+    filesystem::{
+        EditFileTool, ListDirTool, ReadFileTool, SearchFilesTool, StatFileTool, WriteFileTool,
+    },
     parser,
     shell::RunShellTool,
-    system::GetSystemInfoTool,
+    system::{GetSystemInfoTool, ListProcessesTool},
     ToolRegistry,
 };
 use serde_json::Value;
@@ -122,6 +124,13 @@ struct ToolOutcome {
     args: Value,
     status: OutcomeStatus,
     output: String,
+    /// The structured result, when the tool ran.
+    ///
+    /// `output` is the compact string that goes to the model and the audit
+    /// log; `result` is the untouched JSON. New renderers read `result`
+    /// instead of re-parsing `output`, which older ones have to do because
+    /// they predate this field.
+    result: Option<Value>,
     /// The command pattern that decided the outcome, if one did.
     pattern: Option<String>,
 }
@@ -145,10 +154,13 @@ impl Orchestrator {
         let mut tools = ToolRegistry::new();
         tools.register(Box::new(ListDirTool));
         tools.register(Box::new(ReadFileTool));
+        tools.register(Box::new(SearchFilesTool));
+        tools.register(Box::new(StatFileTool));
         tools.register(Box::new(WriteFileTool));
         tools.register(Box::new(EditFileTool));
         tools.register(Box::new(RunShellTool));
         tools.register(Box::new(GetSystemInfoTool));
+        tools.register(Box::new(ListProcessesTool));
         let session_id = Uuid::new_v4().to_string();
         let memory = MemoryManager::new(config.clone()).ok();
         if let Some(ref m) = memory {
@@ -505,6 +517,7 @@ impl Orchestrator {
                     args,
                     status: OutcomeStatus::Denied,
                     output: msg,
+                    result: None,
                     pattern: verdict.pattern,
                 }
             }
@@ -531,6 +544,7 @@ impl Orchestrator {
                             args,
                             status: OutcomeStatus::Declined,
                             output: msg,
+                            result: None,
                             pattern: verdict.pattern,
                         }
                     }
@@ -553,6 +567,7 @@ impl Orchestrator {
                         args,
                         status: OutcomeStatus::NeedsConfirmation,
                         output: msg,
+                        result: None,
                         pattern: verdict.pattern,
                     }
                 }
@@ -588,6 +603,7 @@ impl Orchestrator {
                     args,
                     status: OutcomeStatus::Succeeded,
                     output: compact,
+                    result: Some(res),
                     pattern,
                 }
             }
@@ -605,6 +621,7 @@ impl Orchestrator {
                     args,
                     status: OutcomeStatus::Failed,
                     output: msg,
+                    result: None,
                     pattern,
                 }
             }
@@ -749,6 +766,70 @@ fn compact_output(tool: &str, res: &Value) -> String {
             }
             out
         }
+        "filesystem.search" => {
+            let Some(matches) = res.get("matches").and_then(|m| m.as_array()) else {
+                return serde_json::to_string(res).unwrap_or_default();
+            };
+            if matches.is_empty() {
+                return format!(
+                    "no matches ({} entries searched)",
+                    res.get("scanned").and_then(|s| s.as_u64()).unwrap_or(0)
+                );
+            }
+            let mut out = matches
+                .iter()
+                .map(|m| {
+                    let path = m.get("path").and_then(|p| p.as_str()).unwrap_or("?");
+                    match m.get("line").and_then(|l| l.as_u64()) {
+                        Some(line) => format!("{}:{}", path, line),
+                        None => path.to_string(),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if res
+                .get("truncated")
+                .and_then(|t| t.as_bool())
+                .unwrap_or(false)
+            {
+                out.push_str("\n(results were capped)");
+            }
+            out
+        }
+        "filesystem.stat" => {
+            let path = res.get("path").and_then(|p| p.as_str()).unwrap_or("?");
+            let kind = if res.get("is_dir").and_then(|d| d.as_bool()).unwrap_or(false) {
+                "directory"
+            } else {
+                "file"
+            };
+            format!(
+                "{} is a {}, {} bytes",
+                path,
+                kind,
+                res.get("size").and_then(|s| s.as_u64()).unwrap_or(0)
+            )
+        }
+        "process.list" => {
+            let Some(processes) = res.get("processes").and_then(|p| p.as_array()) else {
+                return serde_json::to_string(res).unwrap_or_default();
+            };
+            processes
+                .iter()
+                .map(|p| {
+                    format!(
+                        "{} {} cpu={:.1}% mem={:.1}%",
+                        p.get("pid").and_then(|v| v.as_u64()).unwrap_or(0),
+                        p.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
+                        p.get("cpu_percent").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                        p.get("memory_percent")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
         _ => match res.as_object() {
             Some(map) if !map.is_empty() => {
                 let parts: Vec<String> = map
@@ -816,6 +897,101 @@ fn render_tool_output(outcome: &ToolOutcome) -> String {
         }
         "system.info" => {
             out.push_str(&format!("System: {}\n", outcome.output));
+        }
+        "filesystem.search" => {
+            let root = outcome.args["path"].as_str().unwrap_or(".");
+            let res = outcome.result.as_ref();
+            let matches = res
+                .and_then(|r| r.get("matches"))
+                .and_then(|m| m.as_array())
+                .cloned()
+                .unwrap_or_default();
+
+            if matches.is_empty() {
+                out.push_str(&format!("No matches under {}.\n", root));
+                let scanned = res
+                    .and_then(|r| r.get("scanned"))
+                    .and_then(|s| s.as_u64())
+                    .unwrap_or(0);
+                out.push_str(&format!("Searched {} entries.\n", scanned));
+            } else {
+                out.push_str(&format!("{} match(es) under {}:\n", matches.len(), root));
+                for m in &matches {
+                    let path = m.get("path").and_then(|p| p.as_str()).unwrap_or("?");
+                    match (
+                        m.get("line").and_then(|l| l.as_u64()),
+                        m.get("preview").and_then(|p| p.as_str()),
+                    ) {
+                        (Some(line), Some(preview)) => {
+                            out.push_str(&format!("  {}:{}\n      {}\n", path, line, preview));
+                        }
+                        _ => out.push_str(&format!("  {}\n", path)),
+                    }
+                }
+                if res
+                    .and_then(|r| r.get("truncated"))
+                    .and_then(|t| t.as_bool())
+                    .unwrap_or(false)
+                {
+                    out.push_str(
+                        "\nThe search stopped at its result limit; narrow it to see the rest.\n",
+                    );
+                }
+            }
+        }
+        "filesystem.stat" => {
+            let res = outcome.result.as_ref();
+            let field = |key: &str| res.and_then(|r| r.get(key)).cloned().unwrap_or(Value::Null);
+            let path = field("path");
+            let path = path.as_str().unwrap_or("?");
+            let kind = if field("is_dir").as_bool().unwrap_or(false) {
+                "directory"
+            } else {
+                "file"
+            };
+            out.push_str(&format!("{}:\n", path));
+            out.push_str(&format!("  type: {}\n", kind));
+            out.push_str(&format!(
+                "  size: {} bytes\n",
+                field("size").as_u64().unwrap_or(0)
+            ));
+            if let Some(modified) = field("modified").as_str() {
+                out.push_str(&format!("  modified: {}\n", modified));
+            }
+            if let Some(permissions) = field("permissions").as_str() {
+                out.push_str(&format!("  permissions: {}\n", permissions));
+            }
+        }
+        "process.list" => {
+            let res = outcome.result.as_ref();
+            let processes = res
+                .and_then(|r| r.get("processes"))
+                .and_then(|p| p.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if processes.is_empty() {
+                out.push_str("Could not read the process list.\n");
+            } else {
+                out.push_str(&format!(
+                    "{:<8} {:<28} {:>6} {:>6}\n",
+                    "PID", "PROCESS", "CPU%", "MEM%"
+                ));
+                for p in &processes {
+                    out.push_str(&format!(
+                        "{:<8} {:<28} {:>6.1} {:>6.1}\n",
+                        p.get("pid").and_then(|v| v.as_u64()).unwrap_or(0),
+                        p.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
+                        p.get("cpu_percent").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                        p.get("memory_percent")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0)
+                    ));
+                }
+                // `ps` reports CPU time averaged over the process lifetime.
+                // Presenting that as current load would be a lie the user
+                // could not detect from the numbers alone.
+                out.push_str("\nCPU% is each process's lifetime average, not a live sample.\n");
+            }
         }
         _ => {
             out.push_str(&format!("{}:\n", outcome.name));

@@ -9,9 +9,10 @@ use jarvis_core::{
 use serde_json::json;
 use std::io::Write as _;
 use std::path::PathBuf;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
-use tracing::info;
+use tracing::{error, info};
 
 /// Asks the user, on the terminal, before a tool call runs.
 ///
@@ -203,6 +204,53 @@ fn get_pid_path() -> PathBuf {
         .join("jarvis.pid")
 }
 
+fn get_log_path() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("jarvis")
+        .join("jarvis.log")
+}
+
+/// Is a daemon actually listening, rather than just having left a PID file?
+///
+/// A successful connect is the only honest evidence: the PID file survives a
+/// crash, and a shell that exited can leave a stale socket behind.
+async fn daemon_responds() -> bool {
+    let path = get_socket_path();
+    if !path.exists() {
+        return false;
+    }
+    tokio::net::UnixStream::connect(&path).await.is_ok()
+}
+
+/// Wait until the socket answers, or the timeout passes.
+async fn wait_for_daemon(timeout: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if daemon_responds().await {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Wait until nothing answers on the socket, or the timeout passes.
+async fn wait_for_daemon_to_stop(timeout: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if !daemon_responds().await {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 async fn send_request(request: Request) -> anyhow::Result<Response> {
     let socket_path = get_socket_path();
     if !socket_path.exists() {
@@ -303,47 +351,85 @@ async fn main() -> anyhow::Result<()> {
                 let server =
                     jarvis_core::ipc::server::IpcServer::new(daemon_arc, daemon.get_socket_path());
                 tokio::select! {
-                    _ = server.start() => {},
+                    result = server.start() => {
+                        if let Err(e) = result {
+                            // The daemon is useless without a listener, so
+                            // say why and exit instead of appearing alive.
+                            error!("IPC server stopped: {}", e);
+                            let _ = daemon.remove_pid().await;
+                            std::process::exit(1);
+                        }
+                    }
                     _ = tokio::signal::ctrl_c() => {
                         info!("Shutting down daemon...");
                         let _ = daemon.remove_pid().await;
+                        let _ = std::fs::remove_file(daemon.get_socket_path());
                     }
                 }
             }
             DaemonCommands::Start => {
-                println!("Starting daemon in background...");
-                std::process::Command::new(std::env::current_exe()?)
-                    .arg("daemon")
-                    .arg("run")
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .spawn()?;
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                println!("Daemon started");
+                // A second daemon would unlink the live one's socket and
+                // leave that process unreachable, so refuse outright.
+                if daemon_responds().await {
+                    println!("Daemon is already running.");
+                } else {
+                    println!("Starting daemon in background...");
+                    std::process::Command::new(std::env::current_exe()?)
+                        .arg("daemon")
+                        .arg("run")
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()?;
+
+                    // "Started" has to mean the socket answers. Reporting
+                    // success because a process was spawned is how a dead
+                    // daemon ends up looking healthy.
+                    if wait_for_daemon(Duration::from_secs(5)).await {
+                        println!("Daemon started");
+                    } else {
+                        println!("Daemon did not start. Check the log:");
+                        println!("  {}", get_log_path().display());
+                        std::process::exit(1);
+                    }
+                }
             }
             DaemonCommands::Stop => {
                 let pid_path = get_pid_path();
+                let socket_path = get_socket_path();
+
+                let mut killed = false;
                 if pid_path.exists() {
-                    let pid = std::fs::read_to_string(&pid_path)?;
-                    println!("Stopping daemon (PID: {})...", pid.trim());
-                    let _ = std::process::Command::new("kill").arg(pid.trim()).spawn();
-                    std::fs::remove_file(&pid_path)?;
-                    let socket_path = get_socket_path();
-                    if socket_path.exists() {
-                        let _ = std::fs::remove_file(&socket_path);
-                    }
+                    let pid = std::fs::read_to_string(&pid_path)?.trim().to_string();
+                    println!("Stopping daemon (PID: {})...", pid);
+                    let _ = std::process::Command::new("kill").arg(&pid).status();
+                    killed = true;
+                }
+
+                let gone = wait_for_daemon_to_stop(Duration::from_secs(3)).await;
+                let _ = std::fs::remove_file(&pid_path);
+                if gone {
+                    // Only remove the socket once nothing is listening on it.
+                    let _ = std::fs::remove_file(&socket_path);
+                }
+
+                if gone && (killed || !socket_path.exists()) {
                     println!("Daemon stopped");
+                } else if !gone {
+                    println!("A daemon is still answering on {}", socket_path.display());
                 } else {
                     println!("Daemon not running");
                 }
             }
             DaemonCommands::Status => {
                 let pid_path = get_pid_path();
-                if pid_path.exists() {
-                    println!(
-                        "Daemon is running (PID: {})",
-                        std::fs::read_to_string(&pid_path)?.trim()
-                    );
+                if daemon_responds().await {
+                    let pid = std::fs::read_to_string(&pid_path)
+                        .map(|p| p.trim().to_string())
+                        .unwrap_or_else(|_| "unknown".to_string());
+                    println!("Daemon is running (PID: {})", pid);
+                    println!("Socket: {:?}", get_socket_path());
+                } else if pid_path.exists() {
+                    println!("Daemon is not running (stale PID file)");
                     println!("Socket: {:?}", get_socket_path());
                 } else {
                     println!("Daemon is not running");

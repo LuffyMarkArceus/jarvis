@@ -131,7 +131,7 @@ fn restrictiveness(action: &PermissionAction) -> u8 {
 ///
 /// Deliberately tiny: no character classes, no escaping, no regex. A policy
 /// file should be readable by a human deciding whether to trust it.
-fn glob_match(pattern: &str, text: &str) -> bool {
+pub(crate) fn glob_match(pattern: &str, text: &str) -> bool {
     let p: Vec<char> = pattern.chars().collect();
     let t: Vec<char> = text.chars().collect();
     let (mut pi, mut ti) = (0usize, 0usize);
@@ -238,6 +238,23 @@ fn default_rules() -> Vec<PermissionRule> {
         },
         PermissionRule {
             tool: "filesystem.read".to_string(),
+            action: PermissionAction::Allow,
+            patterns: None,
+        },
+        // Searching and stat-ing are read-only, and `filesystem.read` is
+        // already allowed, so allowing them grants no new capability.
+        PermissionRule {
+            tool: "filesystem.search".to_string(),
+            action: PermissionAction::Allow,
+            patterns: None,
+        },
+        PermissionRule {
+            tool: "filesystem.stat".to_string(),
+            action: PermissionAction::Allow,
+            patterns: None,
+        },
+        PermissionRule {
+            tool: "process.list".to_string(),
             action: PermissionAction::Allow,
             patterns: None,
         },

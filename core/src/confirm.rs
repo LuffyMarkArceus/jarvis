@@ -42,6 +42,26 @@ pub fn describe_action(tool: &str, args: &Value) -> String {
             Some(path) => format!("List directory: {}", shorten(path)),
             None => "List a directory".to_string(),
         },
+        "filesystem.search" => {
+            let root = str_arg(args, "path").unwrap_or(".");
+            let mut what = Vec::new();
+            if let Some(name) = str_arg(args, "name") {
+                what.push(format!("named {}", shorten(name)));
+            }
+            if let Some(content) = str_arg(args, "content") {
+                what.push(format!("containing {}", shorten(content)));
+            }
+            if what.is_empty() {
+                format!("Search files under: {}", shorten(root))
+            } else {
+                format!("Search {} under: {}", what.join(" and "), shorten(root))
+            }
+        }
+        "filesystem.stat" => match str_arg(args, "path") {
+            Some(path) => format!("Inspect path: {}", shorten(path)),
+            None => "Inspect a path".to_string(),
+        },
+        "process.list" => "List running processes".to_string(),
         _ => format!("Run {}", tool),
     }
 }

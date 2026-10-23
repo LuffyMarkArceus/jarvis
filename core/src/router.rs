@@ -16,12 +16,15 @@
 //!
 //! # Precedence
 //!
-//! 1. Explicit slash commands (`/list /tmp`, `/read <file>`, `/run <cmd>`)
-//! 2. System-information requests
-//! 3. `run` / `execute` / `eval` followed by a command
-//! 4. A path mentioned in the request -> list it or read it
-//! 5. `open` / `launch` / `start` followed by an application
-//! 6. "list the files" with no path -> the current directory
+//! 1. Explicit slash commands (`/list /tmp`, `/find *.rs`, `/run <cmd>`)
+//! 2. `run` / `execute` / `eval` followed by a command
+//! 3. A search (`find files containing X`, `grep for X in <dir>`)
+//! 4. A question about one path's size or metadata
+//! 5. A path mentioned in the request -> list it or read it
+//! 6. System-information requests
+//! 7. Questions about running processes
+//! 8. `open` / `launch` / `start` followed by an application
+//! 9. "list the files" with no path -> the current directory
 //! 7. Anything that smells like a machine action -> `Route::Model`
 //! 8. Everything else -> `Route::Direct` (pure conversation)
 
@@ -163,11 +166,14 @@ const SYSTEM_INFO_PHRASES: &[&str] = &[
 ];
 
 /// Tokens that suggest the user wants something done on the machine.
+///
+/// `find`, `search` and `grep` are deliberately absent: the search route
+/// above already claims every phrasing they can honestly handle, and what
+/// remains ("find me a joke") is conversation. Sending that to the model
+/// with a tool catalogue is how a request for a joke ends up reading a
+/// README.
 const ACTION_WORDS: &[&str] = &[
     "check",
-    "find",
-    "search",
-    "grep",
     "install",
     "download",
     "fetch",
@@ -220,7 +226,25 @@ pub fn route(input: &str) -> Route {
         };
     }
 
-    // 3. A path was mentioned. This is checked before the system-info rules
+    // 3. A search. Checked before the path rule because "search for X in
+    //    /some/dir" mentions a path that must become the search root, not the
+    //    thing to list.
+    if let Some(request) = parse_search(raw) {
+        if looks_like_a_search(&lower, raw) {
+            return Route::Tool {
+                name: "filesystem.search".to_string(),
+                args: request.to_args(),
+            };
+        }
+    }
+
+    // 4. A question about one path's size or metadata. Also before the path
+    //    rule: "how big is /var/log" is not a request to list it.
+    if let Some(r) = route_stat(raw, &lower) {
+        return r;
+    }
+
+    // 5. A path was mentioned. This is checked before the system-info rules
     //    because a path such as /etc/hostname contains the word "hostname".
     if let Some(path) = first_path(raw, &lower) {
         return Route::Tool {
@@ -229,7 +253,7 @@ pub fn route(input: &str) -> Route {
         };
     }
 
-    // 4. System information.
+    // 6. System information.
     if is_system_info(&strip_paths(&lower)) {
         return Route::Tool {
             name: "system.info".to_string(),
@@ -237,7 +261,12 @@ pub fn route(input: &str) -> Route {
         };
     }
 
-    // 5. An application was named.
+    // 7. Questions about running processes and what is using the machine.
+    if let Some(r) = route_processes(&lower) {
+        return r;
+    }
+
+    // 8. An application was named.
     if let Some(app) = app_after(raw) {
         return Route::Tool {
             name: "shell.run".to_string(),
@@ -245,7 +274,7 @@ pub fn route(input: &str) -> Route {
         };
     }
 
-    // 6. "list the files" with no path.
+    // 9. "list the files" with no path.
     if mentions_listing(&lower) && mentions_files(&lower) {
         return Route::Tool {
             name: "filesystem.list_dir".to_string(),
@@ -253,26 +282,46 @@ pub fn route(input: &str) -> Route {
         };
     }
 
-    // 7. Looks like a machine action the router cannot pin down.
+    // 10. Looks like a machine action the router cannot pin down.
     if has_action_word(&lower) {
         return Route::Model;
     }
 
-    // 8. Conversation.
+    // 11. Conversation.
     Route::Direct
 }
 
-/// Handle `/list`, `/read`, `/run`, `/info`, `/ls`, `/cat`.
+/// Handle `/list`, `/read`, `/run`, `/info`, `/ls`, `/cat`, `/find`, `/stat`.
 fn route_command(rest: &str) -> Option<Route> {
     let mut parts = rest.splitn(2, char::is_whitespace);
     let verb = parts.next()?.trim().to_lowercase();
     let arg = parts.next().unwrap_or("").trim().to_string();
+
+    // `/find` and `/stat` need the whole remainder, not just one argument.
+    match verb.as_str() {
+        "find" | "search" | "grep" => {
+            let full = rest.trim();
+            let request = parse_search(full)?;
+            return Some(Route::Tool {
+                name: "filesystem.search".to_string(),
+                args: request.to_args(),
+            });
+        }
+        "stat" => {
+            return Some(Route::Tool {
+                name: "filesystem.stat".to_string(),
+                args: json!({ "path": if arg.is_empty() { "." } else { &arg } }),
+            });
+        }
+        _ => {}
+    }
 
     let tool = match verb.as_str() {
         "list" | "ls" => "filesystem.list_dir",
         "read" | "cat" => "filesystem.read",
         "run" | "sh" | "shell" => "shell.run",
         "info" | "system" => "system.info",
+        "processes" | "ps" | "top" => "process.list",
         _ => return None,
     };
 
@@ -285,6 +334,229 @@ fn route_command(rest: &str) -> Option<Route> {
 
     Some(Route::Tool {
         name: tool.to_string(),
+        args,
+    })
+}
+
+/// Whether the request to search looks like it is about files at all.
+///
+/// Without this, "find me a joke" would be routed into a filesystem search.
+/// The verb alone is not enough evidence of intent.
+fn looks_like_a_search(lower: &str, raw: &str) -> bool {
+    mentions_files(lower)
+        || lower.contains("contain")
+        || lower.contains("grep")
+        || lower.contains("inside")
+        || lower.contains("search")
+        || first_path(raw, lower).is_some()
+        || raw
+            .split_whitespace()
+            .any(|t| t.contains('*') || t.contains('?'))
+}
+
+/// Whether a search should match file names or file contents.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SearchMode {
+    Name,
+    Content,
+}
+
+/// A parsed search request.
+struct SearchRequest {
+    query: String,
+    root: String,
+    mode: SearchMode,
+}
+
+impl SearchRequest {
+    fn to_args(&self) -> Value {
+        let mut args = json!({
+            "path": expand_tilde(&self.root),
+        });
+        match self.mode {
+            SearchMode::Name => args["name"] = json!(self.query),
+            SearchMode::Content => args["content"] = json!(self.query),
+        }
+        args
+    }
+}
+
+/// Words that carry no information in a search query.
+const SEARCH_FILLER: &[&str] = &[
+    "for", "the", "a", "an", "all", "any", "some", "me", "please", "my", "files", "file",
+    "folders", "folder", "text", "string", "lines", "line", "matches", "match", "that", "which",
+    "whose",
+];
+
+/// Parse `find files containing X in <dir>` and its relatives.
+///
+/// This is a deliberately small vocabulary, not a natural-language parser.
+/// It handles the phrasings a person actually types for this task and
+/// returns `None` for everything else, which sends the request down the
+/// normal fallback path instead of guessing.
+fn parse_search(raw: &str) -> Option<SearchRequest> {
+    let tokens: Vec<&str> = raw.split_whitespace().collect();
+    let (verb_index, verb) = tokens.iter().enumerate().find_map(|(i, t)| {
+        let w = clean_word(t);
+        if matches!(
+            w.as_str(),
+            "find" | "search" | "grep" | "locate" | "contain"
+        ) {
+            Some((i, w))
+        } else {
+            None
+        }
+    })?;
+
+    let mut mode = match verb.as_str() {
+        "grep" | "contain" => Some(SearchMode::Content),
+        _ => None,
+    };
+
+    // Split at an "in"/"inside" that introduces the directory to search.
+    let mut root: Option<String> = None;
+    let mut query_end = tokens.len();
+    for j in (verb_index + 1)..tokens.len() {
+        let w = clean_word(tokens[j]);
+        if (w == "in" || w == "inside") && j + 1 < tokens.len() {
+            root = Some(tokens[j + 1..].join(" "));
+            query_end = j;
+            break;
+        }
+    }
+
+    let mut query_tokens: Vec<String> = tokens[verb_index + 1..query_end]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+    // "find files in /tmp named *.rs": the qualifier follows the root.
+    if let Some(root_text) = root.clone() {
+        let root_parts: Vec<String> = root_text.split_whitespace().map(String::from).collect();
+        if let Some(k) = root_parts.iter().position(|t| {
+            matches!(
+                clean_word(t).as_str(),
+                "named" | "called" | "matching" | "containing" | "contains" | "with"
+            )
+        }) {
+            mode = Some(match clean_word(&root_parts[k]).as_str() {
+                "containing" | "contains" | "with" => SearchMode::Content,
+                _ => SearchMode::Name,
+            });
+            query_tokens = root_parts[k + 1..].to_vec();
+            root = Some(root_parts[..k].join(" "));
+        }
+    }
+
+    // Strip filler and pick up qualifiers that sit before the root.
+    let mut kept: Vec<String> = Vec::new();
+    for token in &query_tokens {
+        match clean_word(token).as_str() {
+            "named" | "called" | "matching" => mode = Some(SearchMode::Name),
+            "containing" | "contains" | "with" => mode = Some(SearchMode::Content),
+            other if SEARCH_FILLER.contains(&other) => {}
+            _ => kept.push(token.clone()),
+        }
+    }
+
+    let query = kept
+        .join(" ")
+        .trim()
+        .trim_matches(|c| matches!(c, '"' | '\'' | '`'))
+        .trim_end_matches(['.', '!', '?', ',', ';'])
+        .trim()
+        .to_string();
+    if query.is_empty() {
+        return None;
+    }
+
+    let root = root
+        .map(|r| {
+            r.trim()
+                .trim_matches(|c| matches!(c, '"' | '\'' | '`'))
+                .to_string()
+        })
+        .filter(|r| !r.is_empty())
+        .unwrap_or_else(|| ".".to_string());
+
+    let mode = mode.unwrap_or_else(|| {
+        if query.contains('*') || query.contains('?') || looks_like_a_filename(&query) {
+            SearchMode::Name
+        } else {
+            // A bare word is far more likely to be text to find than a file
+            // called "TODO".
+            SearchMode::Content
+        }
+    });
+
+    Some(SearchRequest { query, root, mode })
+}
+
+/// Does this token read like a file name rather than a word to search for?
+fn looks_like_a_filename(query: &str) -> bool {
+    if query.chars().any(char::is_whitespace) {
+        return false;
+    }
+    match query.rfind('.') {
+        None | Some(0) => false,
+        Some(_) => true,
+    }
+}
+
+/// Route "how big is /x", "size of /x", "stat /x".
+fn route_stat(raw: &str, lower: &str) -> Option<Route> {
+    let wants_metadata = lower.contains("how big")
+        || lower.contains("how large")
+        || lower.contains("size of")
+        || lower.contains("file info")
+        || lower.contains("file details")
+        || lower.starts_with("stat ")
+        || lower.contains("permissions of")
+        || lower.contains("modified");
+    if !wants_metadata {
+        return None;
+    }
+    let path = first_path(raw, lower)?;
+    Some(Route::Tool {
+        name: "filesystem.stat".to_string(),
+        args: json!({ "path": path }),
+    })
+}
+
+/// Route "what processes are running" and "what is using my cpu".
+fn route_processes(lower: &str) -> Option<Route> {
+    let tokens = words(lower);
+    // Word-level matching, not substring: "because" contains "use", and a
+    // sentence that happens to include that must not become a process list.
+    let consuming = tokens.iter().any(|w| {
+        matches!(
+            w.as_str(),
+            "using" | "use" | "uses" | "consuming" | "hogging"
+        )
+    });
+    let resource = tokens
+        .iter()
+        .any(|w| matches!(w.as_str(), "cpu" | "ram" | "memory" | "processor"));
+
+    let wants = lower.contains("process")
+        || (consuming && resource)
+        || lower.contains("cpu usage")
+        || lower.contains("memory usage")
+        || lower.contains("ram usage");
+    if !wants {
+        return None;
+    }
+
+    // "top 5 processes" asks for a count. Anything else gets the default.
+    let mut args = json!({});
+    if lower.contains("top") || lower.contains("first") {
+        if let Some(n) = tokens.iter().find_map(|w| w.parse::<u64>().ok()) {
+            args["limit"] = json!(n.clamp(1, 100));
+        }
+    }
+
+    Some(Route::Tool {
+        name: "process.list".to_string(),
         args,
     })
 }
@@ -585,7 +857,142 @@ mod tests {
 
     #[test]
     fn unknown_action_falls_back_to_the_model() {
-        assert_eq!(route("find all files containing TODO"), Route::Model);
+        assert_eq!(route("install docker"), Route::Model);
+    }
+
+    // ------------------------------------------------------------- searching
+
+    #[test]
+    fn finds_files_containing_text() {
+        let r = route("find all files containing TODO");
+        let (name, args) = tool_of(&r).unwrap();
+        assert_eq!(name, "filesystem.search");
+        assert_eq!(args["content"], "TODO");
+        assert_eq!(args["path"], ".");
+        assert!(args.get("name").is_none());
+    }
+
+    #[test]
+    fn finds_files_by_name() {
+        let r = route("find files named *.rs");
+        let (name, args) = tool_of(&r).unwrap();
+        assert_eq!(name, "filesystem.search");
+        assert_eq!(args["name"], "*.rs");
+        assert_eq!(args["path"], ".");
+    }
+
+    #[test]
+    fn searches_a_specific_directory() {
+        let r = route("search for router.rs in /mnt/storage/CS/jarvis");
+        let (name, args) = tool_of(&r).unwrap();
+        assert_eq!(name, "filesystem.search");
+        assert_eq!(args["path"], "/mnt/storage/CS/jarvis");
+        // A dotted token reads as a file name, not as text to find.
+        assert_eq!(args["name"], "router.rs");
+    }
+
+    #[test]
+    fn grep_searches_contents() {
+        let r = route("grep for PermissionManager in core");
+        let (name, args) = tool_of(&r).unwrap();
+        assert_eq!(name, "filesystem.search");
+        assert_eq!(args["content"], "PermissionManager");
+        assert_eq!(args["path"], "core");
+    }
+
+    #[test]
+    fn search_root_can_come_before_the_qualifier() {
+        let r = route("find files in /tmp named *.log");
+        let (name, args) = tool_of(&r).unwrap();
+        assert_eq!(name, "filesystem.search");
+        assert_eq!(args["path"], "/tmp");
+        assert_eq!(args["name"], "*.log");
+    }
+
+    #[test]
+    fn a_bare_word_is_searched_in_contents() {
+        // "TODO" is far more likely text to find than a file called TODO.
+        let r = route("search for TODO");
+        let (name, args) = tool_of(&r).unwrap();
+        assert_eq!(name, "filesystem.search");
+        assert_eq!(args["content"], "TODO");
+    }
+
+    #[test]
+    fn a_search_verb_alone_is_not_a_search() {
+        // "find me a joke" has no file or text signal; it must not walk the
+        // filesystem looking for the word "joke", and it is not a machine
+        // action either - it is conversation.
+        assert_eq!(route("find me a joke"), Route::Direct);
+    }
+
+    #[test]
+    fn slash_find_works() {
+        let r = route("/find *.toml in /mnt/storage/CS/jarvis");
+        let (name, args) = tool_of(&r).unwrap();
+        assert_eq!(name, "filesystem.search");
+        assert_eq!(args["path"], "/mnt/storage/CS/jarvis");
+        assert_eq!(args["name"], "*.toml");
+    }
+
+    // ------------------------------------------------------------ file detail
+
+    #[test]
+    fn size_questions_use_stat() {
+        let r = route("how big is /var/log");
+        let (name, args) = tool_of(&r).unwrap();
+        assert_eq!(name, "filesystem.stat");
+        assert_eq!(args["path"], "/var/log");
+    }
+
+    #[test]
+    fn slash_stat_works() {
+        let r = route("/stat /etc/hostname");
+        let (name, args) = tool_of(&r).unwrap();
+        assert_eq!(name, "filesystem.stat");
+        assert_eq!(args["path"], "/etc/hostname");
+    }
+
+    #[test]
+    fn reading_is_not_mistaken_for_stat() {
+        let r = route("read /etc/hostname");
+        let (name, _) = tool_of(&r).unwrap();
+        assert_eq!(name, "filesystem.read");
+    }
+
+    // --------------------------------------------------------------- processes
+
+    #[test]
+    fn process_questions_list_processes() {
+        let r = route("what processes are running?");
+        let (name, _) = tool_of(&r).unwrap();
+        assert_eq!(name, "process.list");
+    }
+
+    #[test]
+    fn cpu_questions_list_processes() {
+        let r = route("what's using my CPU right now?");
+        let (name, _) = tool_of(&r).unwrap();
+        assert_eq!(name, "process.list");
+    }
+
+    #[test]
+    fn a_process_count_is_passed_through() {
+        let r = route("show me the top 5 processes");
+        let (name, args) = tool_of(&r).unwrap();
+        assert_eq!(name, "process.list");
+        assert_eq!(args["limit"], 5);
+    }
+
+    #[test]
+    fn memory_size_questions_are_not_process_questions() {
+        // "how much memory does this machine have" is not "what is using
+        // memory right now", and answering it with a process list would be
+        // wrong.
+        assert_eq!(
+            route("how much memory does this machine have"),
+            Route::Direct
+        );
     }
 
     #[test]
