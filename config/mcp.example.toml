@@ -1,0 +1,19 @@
+# Example MCP configuration for Jarvis
+#
+# Copy to ~/.config/jarvis/mcp.toml or merge into your config.
+# MCP servers are started at daemon startup (stdio). Tools are namespaced as
+# `mcp.<server>.<tool>` and go through the permission system like built-in tools.
+
+[mcp]
+[[mcp.servers]]
+name = "fetch"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-fetch"]
+enabled = true
+env = {}
+
+# [[mcp.servers]]
+# name = "filesystem"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/shrey"]
+# enabled = true
