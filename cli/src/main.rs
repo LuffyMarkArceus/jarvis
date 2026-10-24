@@ -117,6 +117,14 @@ enum Commands {
         #[command(subcommand)]
         action: PermissionsCommands,
     },
+    /// Search memory across all sessions
+    Recall {
+        query: String,
+        #[arg(short, long, default_value = "10")]
+        limit: usize,
+    },
+    /// Backfill FTS index for existing messages
+    MemoryBackfill,
 }
 
 #[derive(Subcommand)]
@@ -805,6 +813,50 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         },
+        Commands::Recall { query, limit } => {
+            let request = Request::new("memory.recall", json!({"query": query, "limit": limit}));
+            match send_request(request).await {
+                Ok(response) => {
+                    if response.ok {
+                        if let Some(result) = response.result {
+                            if let Some(results) = result.get("results").and_then(|r| r.as_array()) {
+                                if results.is_empty() {
+                                    println!("No memories found.");
+                                    return Ok(());
+                                }
+                                for r in results {
+                                    let session = r.get("session_id").and_then(|s| s.as_str()).unwrap_or("?");
+                                    let role = r.get("role").and_then(|s| s.as_str()).unwrap_or("?");
+                                    let snip = r.get("snippet").and_then(|s| s.as_str()).unwrap_or("");
+                                    let sid = if session.len() > 8 { &session[..8] } else { session };
+                                    println!("[{}] {}: {}", sid, role, snip);
+                                }
+                                return Ok(());
+                            }
+                        }
+                    }
+                    println!("Error: {}", response.error.unwrap_or_default());
+                }
+                Err(_) => println!("Daemon not running"),
+            }
+        }
+        Commands::MemoryBackfill => {
+            let request = Request::new("memory.backfill", json!({}));
+            match send_request(request).await {
+                Ok(response) => {
+                    if response.ok {
+                        if let Some(result) = response.result {
+                            if let Some(count) = result.get("indexed").and_then(|c| c.as_u64()) {
+                                println!("Indexed {} messages.", count);
+                                return Ok(());
+                            }
+                        }
+                    }
+                    println!("Error: {}", response.error.unwrap_or_default());
+                }
+                Err(_) => println!("Daemon not running"),
+            }
+        }
     }
 
     Ok(())

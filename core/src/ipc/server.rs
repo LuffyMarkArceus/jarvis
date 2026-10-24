@@ -371,6 +371,26 @@ async fn handle_request(
             Ok(count) => Response::ok(request.id, serde_json::json!({"pruned": count})),
             Err(e) => Response::err(request.id, e.to_string()),
         },
+        "memory.recall" => {
+            let query = request
+                .params
+                .get("query")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let limit = request
+                .params
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(10) as usize;
+            match daemon_lock.recall_memory(query, limit).await {
+                Ok(results) => Response::ok(request.id, serde_json::json!({"results": results})),
+                Err(e) => Response::err(request.id, e.to_string()),
+            }
+        }
+        "memory.backfill" => match daemon_lock.backfill_memory().await {
+            Ok(count) => Response::ok(request.id, serde_json::json!({"indexed": count})),
+            Err(e) => Response::err(request.id, e.to_string()),
+        },
         "ping" => Response::ok(request.id, serde_json::json!({"pong": true})),
         _ => Response::err(request.id, format!("Unknown method: {}", request.method)),
     }

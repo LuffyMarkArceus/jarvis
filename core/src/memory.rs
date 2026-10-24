@@ -59,6 +59,26 @@ impl MemoryManager {
             );
             CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
             CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at);
+            CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+                session_id UNINDEXED,
+                role UNINDEXED,
+                content,
+                tokenize = 'porter unicode61'
+            );
+            CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+                INSERT INTO messages_fts(rowid, session_id, role, content)
+                VALUES (new.id, new.session_id, new.role, new.content);
+            END;
+            CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+                INSERT INTO messages_fts(messages_fts, rowid, session_id, role, content)
+                VALUES('delete', old.id, old.session_id, old.role, old.content);
+            END;
+            CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
+                INSERT INTO messages_fts(messages_fts, rowid, session_id, role, content)
+                VALUES('delete', old.id, old.session_id, old.role, old.content);
+                INSERT INTO messages_fts(rowid, session_id, role, content)
+                VALUES (new.id, new.session_id, new.role, new.content);
+            END;
             ",
         )
         .map_err(|e| JarvisError::Memory(format!("Schema init failed: {}", e)))?;
@@ -280,7 +300,122 @@ impl MemoryManager {
         }
         Ok(count)
     }
+
+    /// Backfill FTS for messages that exist but aren't indexed.
+    pub fn backfill_fts(&self) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT m.id, m.session_id, m.role, m.content FROM messages m
+                 LEFT JOIN messages_fts f ON f.rowid = m.id
+                 WHERE f.rowid IS NULL",
+            )
+            .map_err(|e| JarvisError::Memory(format!("Query failed: {}", e)))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(|e| JarvisError::Memory(format!("Query failed: {}", e)))?;
+        let mut items = Vec::new();
+        for r in rows {
+            items.push(r.map_err(|e| JarvisError::Memory(format!("Row error: {}", e)))?);
+        }
+        let count = items.len();
+        for (id, session_id, role, content) in items {
+            let _ = conn.execute(
+                "INSERT INTO messages_fts(rowid, session_id, role, content) VALUES (?1, ?2, ?3, ?4)",
+                params![id, session_id, role, content],
+            );
+        }
+        Ok(count)
+    }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecallResult {
+    pub session_id: String,
+    pub message_id: i64,
+    pub role: String,
+    pub content: String,
+    pub snippet: String,
+    pub rank: f64,
+}
+
+impl MemoryManager {
+    /// Recall relevant messages across all sessions using FTS5.
+    pub fn recall(&self, query: &str, limit: usize) -> Result<Vec<RecallResult>> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock().unwrap();
+        // Use FTS5 match with porter stemming; fall back to LIKE if query is invalid
+        let mut stmt = match conn.prepare(
+            "SELECT session_id, role, content, rowid, rank,
+                    snippet(messages_fts, 2, '«', '»', ' ... ', 40) as snip
+             FROM messages_fts
+             WHERE messages_fts MATCH ?1
+             ORDER BY rank
+             LIMIT ?2",
+        ) {
+            Ok(s) => s,
+            Err(_) => {
+                // Fallback to LIKE search
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT session_id, role, content, id, 0.0 as rank, content as snip
+                         FROM messages
+                         WHERE content LIKE '%' || ?1 || '%'
+                         ORDER BY created_at DESC
+                         LIMIT ?2",
+                    )
+                    .map_err(|e| JarvisError::Memory(format!("Query failed: {}", e)))?;
+                let rows = stmt
+                    .query_map(params![query, limit as i64], |row| {
+                        let content: String = row.get(2)?;
+                        let snip = content.chars().take(120).collect::<String>();
+                        Ok(RecallResult {
+                            session_id: row.get(0)?,
+                            role: row.get(1)?,
+                            content,
+                            snippet: snip,
+                            rank: row.get(4)?,
+                            message_id: row.get(3)?,
+                        })
+                    })
+                    .map_err(|e| JarvisError::Memory(format!("Query map failed: {}", e)))?;
+                let mut results = Vec::new();
+                for r in rows {
+                    results.push(r.map_err(|e| JarvisError::Memory(format!("Row error: {}", e)))?);
+                }
+                return Ok(results);
+            }
+        };
+        let rows = stmt
+            .query_map(params![query, limit as i64], |row| {
+                Ok(RecallResult {
+                    session_id: row.get(0)?,
+                    role: row.get(1)?,
+                    content: row.get(2)?,
+                    message_id: row.get(3)?,
+                    rank: row.get(4)?,
+                    snippet: row.get(5)?,
+                })
+            })
+            .map_err(|e| JarvisError::Memory(format!("Query map failed: {}", e)))?;
+        let mut results = Vec::new();
+        for r in rows {
+            results.push(r.map_err(|e| JarvisError::Memory(format!("Row error: {}", e)))?);
+        }
+        Ok(results)
+    }
+}
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfo {
