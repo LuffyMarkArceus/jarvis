@@ -391,6 +391,17 @@ async fn handle_request(
             Ok(count) => Response::ok(request.id, serde_json::json!({"indexed": count})),
             Err(e) => Response::err(request.id, e.to_string()),
         },
+        "memory.stats" => match daemon_lock.memory_stats().await {
+            Ok(stats) => Response::ok(
+                request.id,
+                serde_json::json!({
+                    "total_messages": stats.total_messages,
+                    "total_sessions": stats.total_sessions,
+                    "db_size_bytes": stats.db_size_bytes,
+                }),
+            ),
+            Err(e) => Response::err(request.id, e.to_string()),
+        },
         "ping" => Response::ok(request.id, serde_json::json!({"pong": true})),
         _ => Response::err(request.id, format!("Unknown method: {}", request.method)),
     }

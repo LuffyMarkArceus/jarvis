@@ -347,6 +347,25 @@ pub struct RecallResult {
 }
 
 impl MemoryManager {
+    pub fn stats(&self) -> Result<MemoryStats> {
+        let conn = self.conn.lock().unwrap();
+        let total_messages: i64 = conn
+            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+            .unwrap_or(0);
+        let total_sessions: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+            .unwrap_or(0);
+        drop(conn);
+        let db_size_bytes = std::fs::metadata(&self.config.memory.db_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        Ok(MemoryStats {
+            total_messages,
+            total_sessions,
+            db_size_bytes,
+        })
+    }
+
     /// Recall relevant messages across all sessions using FTS5.
     pub fn recall(&self, query: &str, limit: usize) -> Result<Vec<RecallResult>> {
         let query = query.trim();
@@ -414,6 +433,13 @@ impl MemoryManager {
         }
         Ok(results)
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryStats {
+    pub total_messages: i64,
+    pub total_sessions: i64,
+    pub db_size_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

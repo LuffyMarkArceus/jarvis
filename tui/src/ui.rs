@@ -387,4 +387,3 @@ fn draw_recall(frame: &mut Frame, rows: &[crate::app::RecallRow], area: Rect) {
     frame.render_widget(Clear, popup);
     frame.render_widget(list, popup);
 }
-

@@ -3,7 +3,7 @@
 use crate::cancel::Cancellation;
 use crate::config::Config;
 use crate::error::{JarvisError, Result};
-use crate::memory::{MemoryManager, RecallResult, SessionInfo};
+use crate::memory::{MemoryManager, MemoryStats, RecallResult, SessionInfo};
 use crate::orchestrator::{ConfirmationHandler, Orchestrator};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -187,6 +187,18 @@ impl Daemon {
             mem.backfill_fts()
         } else {
             Ok(0)
+        }
+    }
+
+    pub async fn memory_stats(&self) -> Result<MemoryStats> {
+        if let Some(ref mem) = self.memory {
+            mem.stats()
+        } else {
+            Ok(MemoryStats {
+                total_messages: 0,
+                total_sessions: 0,
+                db_size_bytes: 0,
+            })
         }
     }
 

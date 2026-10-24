@@ -125,6 +125,8 @@ enum Commands {
     },
     /// Backfill FTS index for existing messages
     MemoryBackfill,
+    /// Show memory statistics
+    MemoryStats,
 }
 
 #[derive(Subcommand)]
@@ -858,6 +860,35 @@ async fn main() -> anyhow::Result<()> {
                                 println!("Indexed {} messages.", count);
                                 return Ok(());
                             }
+                        }
+                    }
+                    println!("Error: {}", response.error.unwrap_or_default());
+                }
+                Err(_) => println!("Daemon not running"),
+            }
+        }
+        Commands::MemoryStats => {
+            let request = Request::new("memory.stats", json!({}));
+            match send_request(request).await {
+                Ok(response) => {
+                    if response.ok {
+                        if let Some(result) = response.result {
+                            let msgs = result
+                                .get("total_messages")
+                                .and_then(|c| c.as_u64())
+                                .unwrap_or(0);
+                            let sessions = result
+                                .get("total_sessions")
+                                .and_then(|c| c.as_u64())
+                                .unwrap_or(0);
+                            let size = result
+                                .get("db_size_bytes")
+                                .and_then(|c| c.as_u64())
+                                .unwrap_or(0);
+                            println!("Messages: {}", msgs);
+                            println!("Sessions: {}", sessions);
+                            println!("DB size: {} bytes ({:.2} KB)", size, size as f64 / 1024.0);
+                            return Ok(());
                         }
                     }
                     println!("Error: {}", response.error.unwrap_or_default());

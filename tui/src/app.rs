@@ -646,7 +646,10 @@ impl App {
                         arr.iter()
                             .filter_map(|r| {
                                 Some(RecallRow {
-                                    session_id: r.get("session_id").and_then(Value::as_str)?.to_string(),
+                                    session_id: r
+                                        .get("session_id")
+                                        .and_then(Value::as_str)?
+                                        .to_string(),
                                     role: r.get("role").and_then(Value::as_str)?.to_string(),
                                     snippet: r.get("snippet").and_then(Value::as_str)?.to_string(),
                                 })
