@@ -1,5 +1,6 @@
 //! Jarvis Core - Orchestrator, tools, memory, and IPC
 
+pub mod cancel;
 pub mod config;
 pub mod confirm;
 pub mod context;

@@ -10,9 +10,12 @@
 //!   any of the common shapes (see `tools::parser`). Used for providers or
 //!   models without a native function-calling interface.
 
+use crate::cancel::Cancellation;
 use crate::error::{JarvisError, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::future::Future;
+use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Clone)]
 pub struct OllamaClient {
@@ -118,6 +121,127 @@ struct ChatResponse {
     eval_count: Option<u64>,
 }
 
+/// One newline-delimited event from Ollama's streaming `/api/chat`.
+#[derive(Debug, Deserialize)]
+struct ChatStreamResponse {
+    #[serde(default)]
+    message: Option<ChatMessage>,
+    #[serde(default)]
+    done: bool,
+    #[serde(default)]
+    prompt_eval_count: Option<u64>,
+    #[serde(default)]
+    eval_count: Option<u64>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+/// Accumulated state while reading a streamed chat response.
+#[derive(Debug, Default)]
+struct StreamState {
+    content: String,
+    tool_calls: Vec<ModelToolCall>,
+    prompt_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
+    done: bool,
+}
+
+impl StreamState {
+    /// Apply one decoded NDJSON line, forwarding new text to `sink`.
+    fn apply(&mut self, line: &str, sink: Option<&UnboundedSender<String>>) -> Result<()> {
+        let chunk: ChatStreamResponse = serde_json::from_str(line)
+            .map_err(|e| JarvisError::Model(format!("Parse error: {e}")))?;
+
+        if let Some(error) = chunk.error {
+            return Err(JarvisError::Model(error));
+        }
+
+        if let Some(message) = chunk.message {
+            if !message.content.is_empty() {
+                self.content.push_str(&message.content);
+                if let Some(sink) = sink {
+                    // A closed receiver only means the client went away; the
+                    // turn itself can still finish and be recorded.
+                    let _ = sink.send(message.content);
+                }
+            }
+            if let Some(calls) = message.tool_calls {
+                self.tool_calls.extend(calls);
+            }
+        }
+
+        if let Some(count) = chunk.prompt_eval_count {
+            self.prompt_tokens = Some(count);
+        }
+        if let Some(count) = chunk.eval_count {
+            self.completion_tokens = Some(count);
+        }
+        self.done |= chunk.done;
+        Ok(())
+    }
+
+    fn into_turn(self) -> ChatTurn {
+        ChatTurn {
+            message: ChatMessage {
+                role: "assistant".to_string(),
+                content: self.content,
+                tool_calls: if self.tool_calls.is_empty() {
+                    None
+                } else {
+                    Some(self.tool_calls)
+                },
+                tool_name: None,
+            },
+            prompt_tokens: self.prompt_tokens,
+            completion_tokens: self.completion_tokens,
+        }
+    }
+}
+
+/// Build the wire request shared by the buffered and streaming paths.
+fn build_request(
+    model: &str,
+    system: Option<&str>,
+    messages: &[ChatMessage],
+    tools: Option<&[Value]>,
+    options: Option<Value>,
+    stream: bool,
+) -> ChatRequest {
+    let mut all_messages: Vec<ChatMessage> = Vec::new();
+    if let Some(system) = system {
+        let system = system.trim();
+        if !system.is_empty() {
+            all_messages.push(ChatMessage::text("system", system));
+        }
+    }
+    all_messages.extend(messages.iter().cloned());
+
+    ChatRequest {
+        model: model.to_string(),
+        messages: all_messages,
+        stream,
+        tools: tools.map(|tools| tools.to_vec()),
+        options,
+    }
+}
+
+/// Await `future`, abandoning it when `cancel` fires.
+async fn cancellable<T>(
+    future: impl Future<Output = T>,
+    cancel: Option<&Cancellation>,
+) -> Result<T> {
+    match cancel {
+        None => Ok(future.await),
+        Some(cancel) => {
+            let mut cancel = cancel.clone();
+            tokio::select! {
+                _ = cancel.cancelled() => Err(JarvisError::Cancelled),
+                value = future => Ok(value),
+            }
+        }
+    }
+}
+
 impl OllamaClient {
     pub fn new(base_url: &str) -> Self {
         Self {
@@ -179,38 +303,37 @@ impl OllamaClient {
         tools: Option<&[Value]>,
         options: Option<Value>,
     ) -> Result<ChatTurn> {
-        let mut all_messages: Vec<ChatMessage> = Vec::new();
-        if let Some(s) = system {
-            let s = s.trim();
-            if !s.is_empty() {
-                all_messages.push(ChatMessage::text("system", s));
-            }
-        }
-        all_messages.extend(messages.iter().cloned());
-
-        let req = ChatRequest {
-            model: model.to_string(),
-            messages: all_messages,
-            stream: false,
-            tools: tools.map(|t| t.to_vec()),
-            options,
-        };
-
-        let resp = self
-            .client
-            .post(format!("{}/api/chat", self.base_url))
-            .json(&req)
-            .send()
+        self.chat_turn_cancellable(model, system, messages, tools, options, None)
             .await
-            .map_err(|e| JarvisError::Model(format!("Request failed: {}", e)))?;
+    }
+
+    /// As [`Self::chat_turn_with_options`], but stops if `cancel` fires.
+    pub async fn chat_turn_cancellable(
+        &self,
+        model: &str,
+        system: Option<&str>,
+        messages: &[ChatMessage],
+        tools: Option<&[Value]>,
+        options: Option<Value>,
+        cancel: Option<&Cancellation>,
+    ) -> Result<ChatTurn> {
+        let req = build_request(model, system, messages, tools, options, false);
+
+        let resp = cancellable(
+            self.client
+                .post(format!("{}/api/chat", self.base_url))
+                .json(&req)
+                .send(),
+            cancel,
+        )
+        .await??;
 
         if !resp.status().is_success() {
             return Err(JarvisError::Model(format!("HTTP {}", resp.status())));
         }
 
-        let chat_resp: ChatResponse = resp
-            .json()
-            .await
+        let chat_resp: ChatResponse = cancellable(resp.json(), cancel)
+            .await?
             .map_err(|e| JarvisError::Model(format!("Parse error: {}", e)))?;
 
         Ok(ChatTurn {
@@ -218,6 +341,76 @@ impl OllamaClient {
             prompt_tokens: chat_resp.prompt_eval_count,
             completion_tokens: chat_resp.eval_count,
         })
+    }
+
+    /// Stream one model turn, forwarding text deltas to `sink`.
+    ///
+    /// The complete message is still returned at the end: the caller needs
+    /// it for tool-call handling and token accounting. Cancellation stops the
+    /// HTTP stream at the next chunk boundary.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn chat_turn_streaming(
+        &self,
+        model: &str,
+        system: Option<&str>,
+        messages: &[ChatMessage],
+        tools: Option<&[Value]>,
+        options: Option<Value>,
+        cancel: Option<&Cancellation>,
+        sink: &UnboundedSender<String>,
+    ) -> Result<ChatTurn> {
+        let req = build_request(model, system, messages, tools, options, true);
+
+        let mut response = cancellable(
+            self.client
+                .post(format!("{}/api/chat", self.base_url))
+                .json(&req)
+                .send(),
+            cancel,
+        )
+        .await??;
+
+        if !response.status().is_success() {
+            return Err(JarvisError::Model(format!("HTTP {}", response.status())));
+        }
+
+        let mut state = StreamState::default();
+        // Bytes are buffered until a newline: a chunk boundary can split a
+        // UTF-8 character as well as a JSON line.
+        let mut buffer: Vec<u8> = Vec::new();
+
+        while !state.done {
+            let next = cancellable(response.chunk(), cancel).await??;
+            let Some(bytes) = next else { break };
+            buffer.extend_from_slice(&bytes);
+
+            while let Some(position) = buffer.iter().position(|byte| *byte == b'\n') {
+                let line: Vec<u8> = buffer.drain(..=position).collect();
+                let line = std::str::from_utf8(&line[..line.len().saturating_sub(1)])
+                    .map_err(|e| JarvisError::Model(format!("Invalid UTF-8 from provider: {e}")))?;
+                if !line.trim().is_empty() {
+                    state.apply(line, Some(sink))?;
+                }
+            }
+        }
+
+        if !buffer.is_empty() {
+            let line = std::str::from_utf8(&buffer)
+                .map_err(|e| JarvisError::Model(format!("Invalid UTF-8 from provider: {e}")))?;
+            if !line.trim().is_empty() {
+                state.apply(line, Some(sink))?;
+            }
+        }
+
+        if !state.done {
+            // A closed stream means the answer may be cut off in the middle.
+            // Returning it would present a truncated reply as complete.
+            return Err(JarvisError::Model(
+                "the model stream ended before the turn finished".to_string(),
+            ));
+        }
+
+        Ok(state.into_turn())
     }
 
     pub async fn list_models(&self) -> Result<Vec<String>> {
@@ -238,5 +431,126 @@ impl OllamaClient {
             })
             .unwrap_or_default();
         Ok(models)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sink() -> (
+        UnboundedSender<String>,
+        tokio::sync::mpsc::UnboundedReceiver<String>,
+    ) {
+        tokio::sync::mpsc::unbounded_channel()
+    }
+
+    #[test]
+    fn request_prepends_a_non_empty_system_message() {
+        let messages = vec![ChatMessage::text("user", "hi")];
+        let request = build_request(
+            "llama3.2:1b",
+            Some("  be brief  "),
+            &messages,
+            None,
+            None,
+            true,
+        );
+
+        assert!(request.stream);
+        assert_eq!(request.messages.len(), 2);
+        assert_eq!(request.messages[0].role, "system");
+        assert_eq!(request.messages[0].content, "be brief");
+        assert_eq!(request.messages[1].content, "hi");
+    }
+
+    #[test]
+    fn blank_system_prompt_is_not_sent() {
+        let messages = vec![ChatMessage::text("user", "hi")];
+        let request = build_request("m", Some("   "), &messages, None, None, false);
+        assert_eq!(request.messages.len(), 1);
+    }
+
+    #[test]
+    fn streaming_content_is_accumulated_and_forwarded() {
+        let (tx, mut rx) = sink();
+        let mut state = StreamState::default();
+
+        state
+            .apply(
+                r#"{"message":{"role":"assistant","content":"Hel"}}"#,
+                Some(&tx),
+            )
+            .unwrap();
+        state
+            .apply(
+                r#"{"message":{"role":"assistant","content":"lo"},"done":false}"#,
+                Some(&tx),
+            )
+            .unwrap();
+        state
+            .apply(
+                r#"{"message":{"role":"assistant","content":""},"done":true,"prompt_eval_count":12,"eval_count":2}"#,
+                Some(&tx),
+            )
+            .unwrap();
+        drop(tx);
+
+        assert!(state.done);
+        assert_eq!(state.content, "Hello");
+        assert_eq!(rx.try_recv().unwrap(), "Hel");
+        assert_eq!(rx.try_recv().unwrap(), "lo");
+
+        let turn = state.into_turn();
+        assert_eq!(turn.message.content, "Hello");
+        assert_eq!(turn.message.role, "assistant");
+        assert_eq!(turn.prompt_tokens, Some(12));
+        assert_eq!(turn.completion_tokens, Some(2));
+        assert!(turn.message.tool_calls.is_none());
+    }
+
+    #[test]
+    fn streaming_tool_calls_are_collected() {
+        let mut state = StreamState::default();
+        state
+            .apply(
+                r#"{"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"shell.run","arguments":{"command":"ls"}}}]},"done":false}"#,
+                None,
+            )
+            .unwrap();
+        state.apply(r#"{"done":true}"#, None).unwrap();
+
+        let turn = state.into_turn();
+        let calls = turn.message.tool_calls.expect("tool calls");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "shell.run");
+        assert_eq!(calls[0].function.arguments["command"], "ls");
+    }
+
+    #[test]
+    fn an_error_line_is_returned_as_a_model_error() {
+        let mut state = StreamState::default();
+        let error = state
+            .apply(r#"{"error":"model exploded"}"#, None)
+            .unwrap_err();
+        assert!(matches!(error, JarvisError::Model(message) if message == "model exploded"));
+    }
+
+    #[test]
+    fn malformed_json_is_a_model_error() {
+        let mut state = StreamState::default();
+        let error = state.apply("not json", None).unwrap_err();
+        assert!(matches!(error, JarvisError::Model(_)));
+    }
+
+    #[tokio::test]
+    async fn cancellation_wins_over_a_pending_future() {
+        let registry = crate::cancel::TurnRegistry::default();
+        let id = uuid::Uuid::new_v4();
+        let (cancel, _guard) = registry.begin(id);
+        registry.cancel(id);
+
+        let result = cancellable(std::future::pending::<()>(), Some(&cancel)).await;
+        assert!(matches!(result, Err(JarvisError::Cancelled)));
     }
 }

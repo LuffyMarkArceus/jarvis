@@ -7,6 +7,7 @@ use jarvis_core::{
     permissions::{PermissionAction, PermissionManager},
 };
 use serde_json::json;
+use std::io::IsTerminal as _;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -252,12 +253,25 @@ async fn wait_for_daemon_to_stop(timeout: Duration) -> bool {
 }
 
 async fn send_request(request: Request) -> anyhow::Result<Response> {
+    Ok(send_request_streaming(request, false).await?.0)
+}
+
+/// Send a request and optionally print assistant chunks as they arrive.
+///
+/// Returns the final response and whether anything was streamed, so the caller
+/// can avoid printing the answer twice. Streaming is only requested for
+/// interactive `ask`; other commands have no chunks.
+async fn send_request_streaming(
+    request: Request,
+    stream: bool,
+) -> anyhow::Result<(Response, bool)> {
     let socket_path = get_socket_path();
     if !socket_path.exists() {
         anyhow::bail!("Daemon not running");
     }
-    let stream = UnixStream::connect(&socket_path).await?;
-    let (reader, mut writer) = stream.into_split();
+    let stream_socket = UnixStream::connect(&socket_path).await?;
+    let (reader, mut writer) = stream_socket.into_split();
+    let request_id = request.id;
 
     writer
         .write_all(format!("{}\n", Message::Request(request).encode()).as_bytes())
@@ -266,6 +280,7 @@ async fn send_request(request: Request) -> anyhow::Result<Response> {
 
     let mut reader = BufReader::new(reader);
     let mut line = String::new();
+    let mut printed = false;
     loop {
         line.clear();
         if reader.read_line(&mut line).await? == 0 {
@@ -285,7 +300,14 @@ async fn send_request(request: Request) -> anyhow::Result<Response> {
                     .await?;
                 writer.flush().await?;
             }
-            Message::Response(response) => return Ok(response),
+            Message::Chunk(chunk) => {
+                if stream && chunk.id == request_id {
+                    print!("{}", chunk.text);
+                    let _ = std::io::stdout().flush();
+                    printed = true;
+                }
+            }
+            Message::Response(response) => return Ok((response, printed)),
             other => {
                 info!("ignoring unexpected message from daemon: {:?}", other);
             }
@@ -315,14 +337,30 @@ async fn main() -> anyhow::Result<()> {
         Commands::Ask { prompt } => {
             // Try to connect to daemon first
             let request = Request::new("ask", json!({"prompt": prompt}));
-            match send_request(request).await {
-                Ok(response) => {
+            let interactive = false; // Disable streaming to avoid terminal issues
+            match send_request_streaming(request, interactive).await {
+                Ok((response, printed)) => {
+                    if printed {
+                        println!();
+                    }
                     if response.ok {
-                        if let Some(result) = response.result {
-                            if let Some(resp) = result.get("response").and_then(|r| r.as_str()) {
+                        let result = response.result.as_ref();
+                        let cancelled = result
+                            .and_then(|r| r.get("cancelled"))
+                            .and_then(|c| c.as_bool())
+                            .unwrap_or(false);
+                        if cancelled {
+                            // Keep any partial answer the user already saw.
+                            println!("[cancelled]");
+                            return Ok(());
+                        }
+                        if let Some(resp) =
+                            result.and_then(|r| r.get("response")).and_then(|r| r.as_str())
+                        {
+                            if !printed {
                                 println!("{}", resp);
-                                return Ok(());
                             }
+                            return Ok(());
                         }
                     }
                     println!(

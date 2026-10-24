@@ -12,6 +12,9 @@ pub enum JarvisError {
     Ipc(String),
     #[error("Model error: {0}")]
     Model(String),
+    /// The user asked to stop the turn.
+    #[error("cancelled")]
+    Cancelled,
     #[error("Permission denied: {0}")]
     Permission(String),
     #[error("IO error: {0}")]

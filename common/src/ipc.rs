@@ -7,9 +7,18 @@
 //! "ask" cannot be decided by the daemon alone, so the daemon sends a
 //! prompt and waits for a [`ConfirmationReply`] carrying the same id.
 //!
-//! Clients therefore read in a loop: handle any confirmation prompts that
-//! arrive, and stop at the [`Response`] whose id matches the request they
-//! sent.
+//! Clients therefore read in a loop: handle any confirmation prompts and
+//! streaming [`Chunk`]s that arrive, and stop at the [`Response`] whose id
+//! matches the request they sent.
+//!
+//! Two messages exist only for a turn that is still running:
+//!
+//! * [`Chunk`] carries assistant text as the model produces it. It is
+//!   optional: a client may show it, and the final [`Response`] always
+//!   carries the complete answer.
+//! * [`Cancel`] asks the daemon to stop a request. It is deliberately not a
+//!   [`Request`], so it produces no response of its own and can be sent
+//!   while the original request's connection is busy streaming.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -52,6 +61,23 @@ pub struct ConfirmationReply {
     pub approved: bool,
 }
 
+/// Incremental assistant text for a request that is still running.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Chunk {
+    /// The id of the [`Request`] that produced this text.
+    pub id: Uuid,
+    /// The new text. Chunks are ordered; concatenating every chunk for an
+    /// id yields the text streamed so far.
+    pub text: String,
+}
+
+/// Ask the daemon to stop a running request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Cancel {
+    /// The id of the [`Request`] to stop.
+    pub id: Uuid,
+}
+
 /// Any message that can cross the socket.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -60,6 +86,8 @@ pub enum Message {
     Response(Response),
     ConfirmationRequest(ConfirmationRequest),
     ConfirmationReply(ConfirmationReply),
+    Chunk(Chunk),
+    Cancel(Cancel),
 }
 
 impl Message {
@@ -178,6 +206,45 @@ mod tests {
             Message::Request(r) => assert_eq!(r.method, "status"),
             other => panic!("expected a request, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn chunk_roundtrips() {
+        let chunk = Chunk {
+            id: Uuid::new_v4(),
+            text: "Hello".to_string(),
+        };
+        let line = Message::Chunk(chunk.clone()).encode();
+        match Message::decode(&line).expect("should decode") {
+            Message::Chunk(decoded) => {
+                assert_eq!(decoded.id, chunk.id);
+                assert_eq!(decoded.text, "Hello");
+            }
+            other => panic!("expected a chunk, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cancel_roundtrips() {
+        let cancel = Cancel { id: Uuid::new_v4() };
+        let line = Message::Cancel(cancel.clone()).encode();
+        match Message::decode(&line).expect("should decode") {
+            Message::Cancel(decoded) => assert_eq!(decoded.id, cancel.id),
+            other => panic!("expected a cancel, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn chunk_wire_tag_is_stable() {
+        let line = Message::Chunk(Chunk {
+            id: Uuid::nil(),
+            text: "x".to_string(),
+        })
+        .encode();
+        assert!(
+            line.contains(r#""type":"chunk""#),
+            "wire tag changed: {line}"
+        );
     }
 
     #[test]

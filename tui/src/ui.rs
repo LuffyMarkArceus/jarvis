@@ -64,9 +64,14 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     if app.is_busy() {
+        let (label, style) = if app.cancelling {
+            ("   cancelling", Style::new().fg(Color::Yellow))
+        } else {
+            ("   ", Style::new().fg(Color::Cyan))
+        };
         spans.push(Span::styled(
-            format!("   {}", SPINNER[app.spinner % SPINNER.len()]),
-            Style::new().fg(Color::Cyan),
+            format!("{label}{}", SPINNER[app.spinner % SPINNER.len()]),
+            style,
         ));
     }
 
@@ -156,9 +161,15 @@ fn draw_input(frame: &mut Frame, app: &App, area: Rect) -> Option<Position> {
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     let dim = Style::new().fg(Color::DarkGray);
     let mut spans = vec![Span::styled(
-        " PgUp/PgDn scroll · Ctrl+S sessions · Ctrl+N new · F1 help · Ctrl+R reconnect · Ctrl+Q quit",
+        " PgUp/PgDn scroll · Ctrl+C cancel · Ctrl+S sessions · Ctrl+N new · F1 help · Ctrl+R reconnect · Ctrl+Q quit",
         dim,
     )];
+    if app.cancelling {
+        spans.push(Span::styled(
+            "   cancelling… waiting for the turn to stop",
+            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ));
+    }
     if let DaemonState::Offline(_) = app.state {
         spans.push(Span::styled(
             "   [offline]",
@@ -188,6 +199,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         ("Up / Down", "prompt history, or scroll"),
         ("PgUp / PgDn", "scroll the conversation"),
         ("Ctrl+N", "start a new session"),
+        ("Ctrl+C", "cancel the running turn, or quit when idle"),
         ("Ctrl+S", "list and switch sessions"),
         ("Ctrl+L", "clear the screen"),
         ("Ctrl+U", "clear the message box"),
@@ -235,7 +247,7 @@ fn draw_confirm(frame: &mut Frame, prompt: &str, area: Rect) {
         Line::raw(prompt.to_string()),
         Line::raw(""),
         Line::styled(
-            "y approve · n deny",
+            "y approve · n deny · Ctrl+C cancel the turn",
             Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
         ),
     ];

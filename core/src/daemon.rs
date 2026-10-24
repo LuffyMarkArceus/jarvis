@@ -1,11 +1,13 @@
 //! Jarvis Daemon
 
+use crate::cancel::Cancellation;
 use crate::config::Config;
 use crate::error::{JarvisError, Result};
 use crate::memory::{MemoryManager, SessionInfo};
 use crate::orchestrator::{ConfirmationHandler, Orchestrator};
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex;
 use tracing::info;
 use uuid::Uuid;
@@ -56,9 +58,25 @@ impl Daemon {
         prompt: &str,
         confirm: Option<&dyn ConfirmationHandler>,
     ) -> Result<String> {
+        self.ask_streaming(prompt, confirm, None, None).await
+    }
+
+    /// Handle one turn with cancellation and optional token streaming.
+    ///
+    /// The orchestrator lock is held for the whole turn (turns are
+    /// serialised globally), which is exactly why cancellation cannot travel
+    /// through this object: it is delivered by the transport-side registry
+    /// instead.
+    pub async fn ask_streaming(
+        &self,
+        prompt: &str,
+        confirm: Option<&dyn ConfirmationHandler>,
+        cancel: Option<&Cancellation>,
+        sink: Option<&UnboundedSender<String>>,
+    ) -> Result<String> {
         let orch = self.orchestrator.lock().await;
         let session_id = orch.session_id().to_string();
-        let result = orch.run_with(prompt, confirm).await?;
+        let result = orch.run_with_options(prompt, confirm, cancel, sink).await?;
         // Auto-title if this is a new session with few messages
         if let Some(ref mem) = self.memory {
             if let Ok(count) = mem.get_message_count(&session_id) {

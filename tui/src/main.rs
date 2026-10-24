@@ -118,6 +118,11 @@ fn perform(
                     "Cannot answer: the daemon is not connected.".to_string(),
                 )),
             },
+            Action::Cancel { id } => {
+                if let Some(client) = client.as_ref() {
+                    client.cancel(id);
+                }
+            }
             Action::Request {
                 method,
                 params,

@@ -6,7 +6,9 @@
 //! the daemon blocks until it is answered, so the two directions have to be
 //! driven by the same task rather than a request made per call.
 
-use jarvis_common::ipc::{ConfirmationReply, ConfirmationRequest, Message, Request, Response};
+use jarvis_common::ipc::{
+    Cancel, ConfirmationReply, ConfirmationRequest, Message, Request, Response,
+};
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -14,6 +16,10 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 /// Something the daemon said that the UI has to react to.
+///
+/// The `Response` for a cancelled turn carries `ok: true` with
+/// `{"cancelled": true, ...}` rather than an error, so the UI can keep
+/// partial text in place.
 #[derive(Debug)]
 pub enum ClientEvent {
     /// The socket connected; the daemon is reachable.
@@ -21,6 +27,11 @@ pub enum ClientEvent {
     Response(Response),
     /// A tool needs approval before the turn can continue.
     Confirmation(ConfirmationRequest),
+    /// Incremental assistant text while the turn is still running.
+    Chunk {
+        id: Uuid,
+        text: String,
+    },
     /// The connection is gone, with a human-readable reason.
     Disconnected(String),
 }
@@ -28,6 +39,7 @@ pub enum ClientEvent {
 enum Command {
     Request(Request),
     Confirm { id: Uuid, approved: bool },
+    Cancel { id: Uuid },
 }
 
 /// A handle to the background connection task.
@@ -54,6 +66,11 @@ impl Client {
 
     pub fn confirm(&self, id: Uuid, approved: bool) {
         let _ = self.commands.send(Command::Confirm { id, approved });
+    }
+
+    /// Ask the daemon to stop the request `id`. No response is sent.
+    pub fn cancel(&self, id: Uuid) {
+        let _ = self.commands.send(Command::Cancel { id });
     }
 }
 
@@ -103,7 +120,10 @@ async fn run(
                         Ok(Message::ConfirmationRequest(request)) => {
                             let _ = events.send(ClientEvent::Confirmation(request));
                         }
-                        Ok(_) => {}
+                        Ok(Message::Chunk(chunk)) => {
+                            let _ = events.send(ClientEvent::Chunk { id: chunk.id, text: chunk.text });
+                        }
+                        Ok(Message::Cancel(_)) | Ok(Message::Request(_)) | Ok(Message::ConfirmationReply(_)) => {}
                         Err(e) => {
                             let _ = events.send(ClientEvent::Disconnected(format!(
                                 "unreadable message from the daemon: {e}"
@@ -126,6 +146,7 @@ async fn run(
                     Command::Confirm { id, approved } => {
                         Message::ConfirmationReply(ConfirmationReply { id, approved })
                     }
+                    Command::Cancel { id } => Message::Cancel(Cancel { id }),
                 };
                 if let Err(e) = write_message(&mut writer, &message).await {
                     let _ = events.send(ClientEvent::Disconnected(format!(

@@ -45,9 +45,10 @@
 //! socket, the CLI supplies one backed by the terminal. When no handler is
 //! present (a headless run) the call is denied, never silently allowed.
 
+use crate::cancel::Cancellation;
 use crate::config::Config;
 use crate::context::{self, ContextPlan};
-use crate::error::Result;
+use crate::error::{JarvisError, Result};
 use crate::memory::{MemoryManager, Message};
 use crate::model::{ChatMessage, ModelToolCall, OllamaClient};
 use crate::permissions::{PermissionAction, PermissionManager};
@@ -62,6 +63,7 @@ use crate::tools::{
     ToolRegistry,
 };
 use serde_json::Value;
+use tokio::sync::mpsc::UnboundedSender;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -204,6 +206,30 @@ impl Orchestrator {
         input: &str,
         confirm: Option<&dyn ConfirmationHandler>,
     ) -> Result<String> {
+        self.run_with_options(input, confirm, None, None).await
+    }
+
+    /// Handle one user turn with cancellation and optional token streaming.
+    ///
+    /// `sink` receives the assistant text of a *direct* conversation as the
+    /// model produces it. A tool-capable turn is not streamed: the model may
+    /// answer with a tool call, and text shown before that decision would be
+    /// pulled back from the screen. The caller still receives the complete
+    /// answer as the return value.
+    ///
+    /// Cancellation is checked between model calls and inside them. A tool
+    /// that has already started always runs to completion.
+    pub async fn run_with_options(
+        &self,
+        input: &str,
+        confirm: Option<&dyn ConfirmationHandler>,
+        cancel: Option<&Cancellation>,
+        sink: Option<&UnboundedSender<String>>,
+    ) -> Result<String> {
+        if cancel.is_some_and(Cancellation::is_cancelled) {
+            return Err(JarvisError::Cancelled);
+        }
+
         // Bound the log line: a pasted document should not fill the log.
         info!("Processing: {}", context::truncate_with_marker(input, 200));
 
@@ -220,16 +246,31 @@ impl Orchestrator {
 
         let answer = match route {
             // Pure conversation: no tools involved at all.
-            Route::Direct => self.converse(input, &history).await,
+            Route::Direct => self.converse(input, &history, cancel, sink).await?,
 
             // A confidently identified tool call: run it and report the facts.
             Route::Tool { name, args } => {
+                if cancel.is_some_and(Cancellation::is_cancelled) {
+                    return Err(JarvisError::Cancelled);
+                }
+                // The tool is the whole turn: once it has run, its result is
+                // the answer even if the user has just cancelled. Dropping it
+                // would hide an action that really happened.
                 let outcome = self.execute_call(name, args, confirm).await;
+                // A confirmation that was denied *because* the user cancelled
+                // is not a tool result worth persisting: the turn never ran.
+                // If the tool really ran, its report is still the answer.
+                if cancel.is_some_and(Cancellation::is_cancelled) && outcome.status.is_blocked() {
+                    return Err(JarvisError::Cancelled);
+                }
                 self.answer_from_outcome(&outcome)
             }
 
             // Ambiguous: let the model pick from the catalogue.
-            Route::Model => self.model_with_tools(input, &history, confirm).await,
+            Route::Model => {
+                self.model_with_tools(input, &history, confirm, cancel)
+                    .await?
+            }
         };
 
         self.persist_assistant(&answer);
@@ -244,7 +285,13 @@ impl Orchestrator {
 
     /// Plain conversation. The model is given no tools, so it cannot try to
     /// use one - which is exactly what we want for "who are you?".
-    async fn converse(&self, input: &str, history: &[Message]) -> String {
+    async fn converse(
+        &self,
+        input: &str,
+        history: &[Message],
+        cancel: Option<&Cancellation>,
+        sink: Option<&UnboundedSender<String>>,
+    ) -> Result<String> {
         let plan = context::assemble(
             &self.conversation_system_prompt(),
             input,
@@ -253,21 +300,42 @@ impl Orchestrator {
             0,
         );
         self.log_plan(&plan);
-        let turn = match self
-            .client
-            .chat_turn_with_options(
-                &self.config.model.default_model,
-                Some(&plan.system),
-                &plan.messages,
-                None,
-                Some(self.model_options()),
-            )
-            .await
-        {
-            Ok(t) => t,
+        let options = self.model_options();
+        let result = match sink {
+            Some(sink) => {
+                self.client
+                    .chat_turn_streaming(
+                        &self.config.model.default_model,
+                        Some(&plan.system),
+                        &plan.messages,
+                        None,
+                        Some(options),
+                        cancel,
+                        sink,
+                    )
+                    .await
+            }
+            None => {
+                self.client
+                    .chat_turn_cancellable(
+                        &self.config.model.default_model,
+                        Some(&plan.system),
+                        &plan.messages,
+                        None,
+                        Some(options),
+                        cancel,
+                    )
+                    .await
+            }
+        };
+        let turn = match result {
+            Ok(turn) => turn,
+            // A provider failure has a deterministic fallback; a user
+            // cancelling the turn must not turn into one.
+            Err(JarvisError::Cancelled) => return Err(JarvisError::Cancelled),
             Err(e) => {
                 info!("Model unavailable: {}, using fallback", e);
-                return self.fallback_answer(input);
+                return Ok(self.fallback_answer(input));
             }
         };
         info!(
@@ -276,11 +344,11 @@ impl Orchestrator {
         );
 
         let answer = final_answer(&turn.message.content);
-        if answer.is_empty() {
+        Ok(if answer.is_empty() {
             self.empty_answer(input)
         } else {
             answer
-        }
+        })
     }
 
     /// The ambiguous case: the model may call a tool, and the result is
@@ -290,7 +358,8 @@ impl Orchestrator {
         input: &str,
         history: &[Message],
         confirm: Option<&dyn ConfirmationHandler>,
-    ) -> String {
+        cancel: Option<&Cancellation>,
+    ) -> Result<String> {
         let tools = self.tools.schemas();
         let reserved = self.tool_schema_tokens(&tools);
         let plan = context::assemble(
@@ -310,25 +379,31 @@ impl Orchestrator {
         let mut trace: Vec<ToolOutcome> = Vec::new();
 
         for _ in 0..MAX_ITERATIONS {
+            if cancel.is_some_and(Cancellation::is_cancelled) {
+                return self.cancelled_result(&trace);
+            }
+
             // Tool results grow the prompt. Shed the oldest history until it
             // fits again rather than letting the provider truncate the front.
             self.fit_prompt(&system, &mut messages, &mut history_len, reserved);
 
-            let turn = match self
+            let result = self
                 .client
-                .chat_turn_with_options(
+                .chat_turn_cancellable(
                     &self.config.model.default_model,
                     Some(&system),
                     &messages,
                     Some(&tools),
                     Some(self.model_options()),
+                    cancel,
                 )
-                .await
-            {
+                .await;
+            let turn = match result {
                 Ok(t) => t,
+                Err(JarvisError::Cancelled) => return self.cancelled_result(&trace),
                 Err(e) => {
                     info!("Model unavailable: {}, using fallback", e);
-                    return self.fallback_answer(input);
+                    return Ok(self.fallback_answer(input));
                 }
             };
             info!(
@@ -352,9 +427,15 @@ impl Orchestrator {
                         &self.prompt_tool_output(&outcome.output),
                     ));
                     trace.push(outcome);
+                    if cancel.is_some_and(Cancellation::is_cancelled) {
+                        return self.cancelled_result(&trace);
+                    }
+                }
+                if cancel.is_some_and(Cancellation::is_cancelled) {
+                    return self.cancelled_result(&trace);
                 }
                 if let Some(report) = blocked_report(&trace) {
-                    return report;
+                    return Ok(report);
                 }
                 continue;
             }
@@ -374,9 +455,15 @@ impl Orchestrator {
                         ),
                     ));
                     trace.push(outcome);
+                    if cancel.is_some_and(Cancellation::is_cancelled) {
+                        return self.cancelled_result(&trace);
+                    }
+                }
+                if cancel.is_some_and(Cancellation::is_cancelled) {
+                    return self.cancelled_result(&trace);
                 }
                 if let Some(report) = blocked_report(&trace) {
-                    return report;
+                    return Ok(report);
                 }
                 continue;
             }
@@ -385,22 +472,42 @@ impl Orchestrator {
             // Showing it would put protocol JSON in front of the user, and
             // silently ignoring it would hide that nothing was executed.
             if parser::looks_like_tool_call(&turn.message.content) {
-                return "I tried to use a tool, but the model's instruction was malformed, so nothing was run. Try rephrasing the request.".to_string();
+                return Ok("I tried to use a tool, but the model's instruction was malformed, so nothing was run. Try rephrasing the request.".to_string());
             }
 
             // A plain answer.
             let answer = final_answer(&turn.message.content);
             if answer.is_empty() {
-                return if trace.is_empty() {
+                return Ok(if trace.is_empty() {
                     self.empty_answer(input)
                 } else {
                     render_execution_report(&trace)
-                };
+                });
             }
-            return answer;
+            return Ok(answer);
         }
 
-        render_execution_report(&trace)
+        Ok(render_execution_report(&trace))
+    }
+
+    /// What to return when the user cancels a tool-capable turn.
+    ///
+    /// With no tool trace there is nothing to show, so the cancellation is
+    /// propagated and nothing is persisted. Once a tool has run, its result
+    /// is real: report it and say plainly that the model never explained it.
+    fn cancelled_result(&self, trace: &[ToolOutcome]) -> Result<String> {
+        // Nothing that ran: propagate, so the caller persists no answer and
+        // the UI can keep whatever partial text it already streamed.
+        // Everything blocked means the user cancelled the approval itself,
+        // which is also not a result worth recording.
+        if trace.is_empty() || trace.iter().all(|o| o.status.is_blocked()) {
+            Err(JarvisError::Cancelled)
+        } else {
+            Ok(format!(
+                "{}\n\n(cancelled before the model explained the result)",
+                render_execution_report(trace)
+            ))
+        }
     }
 
     /// Turn a single tool outcome into the user-facing answer.

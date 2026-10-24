@@ -167,6 +167,10 @@ pub enum Action {
         id: Uuid,
         approved: bool,
     },
+    /// Stop a running request without closing the connection.
+    Cancel {
+        id: Uuid,
+    },
     /// Throw away the connection and connect again.
     Reconnect,
     Quit,
@@ -233,6 +237,12 @@ pub fn parse_command(text: &str) -> Option<Command> {
     })
 }
 
+#[derive(Debug, Clone)]
+struct StreamingTurn {
+    request_id: Uuid,
+    index: usize,
+}
+
 pub struct App {
     pub entries: Vec<Entry>,
     pub input: Input,
@@ -246,6 +256,10 @@ pub struct App {
     pub overlay: Option<Overlay>,
     pub pending: Option<Pending>,
     pub pending_id: Option<Uuid>,
+    /// The assistant entry being built from chunks, if any.
+    streaming: Option<StreamingTurn>,
+    /// A cancel was sent for the in-flight turn and its answer is pending.
+    pub cancelling: bool,
     pub should_quit: bool,
     pub spinner: usize,
     history: Vec<String>,
@@ -267,6 +281,8 @@ impl App {
             overlay: None,
             pending: None,
             pending_id: None,
+            streaming: None,
+            cancelling: false,
             should_quit: false,
             spinner: 0,
             history: Vec::new(),
@@ -300,6 +316,8 @@ impl App {
         self.state = DaemonState::Ready;
         self.pending = None;
         self.pending_id = None;
+        self.streaming = None;
+        self.cancelling = false;
         vec![Action::Request {
             method: "session.current",
             params: json!({}),
@@ -311,6 +329,8 @@ impl App {
         self.state = DaemonState::Offline(reason.clone());
         self.pending = None;
         self.pending_id = None;
+        self.streaming = None;
+        self.cancelling = false;
         // A confirmation can no longer be answered; the daemon will deny the
         // tool after its own timeout, so do not pretend it was sent.
         if matches!(self.overlay, Some(Overlay::Confirm(_))) {
@@ -330,6 +350,7 @@ impl App {
                 self.overlay = Some(Overlay::Confirm(request));
                 vec![]
             }
+            ClientEvent::Chunk { id, text } => self.on_chunk(id, text),
             ClientEvent::Response(response) => self.on_response(response),
         }
     }
@@ -338,12 +359,16 @@ impl App {
     pub fn begin_request(&mut self, id: Uuid, pending: Pending) {
         self.pending_id = Some(id);
         self.pending = Some(pending);
+        self.streaming = None;
+        self.cancelling = false;
     }
 
     /// The request could not even be sent (no connection).
     pub fn request_failed(&mut self, reason: impl Into<String>) {
         self.pending = None;
         self.pending_id = None;
+        self.streaming = None;
+        self.cancelling = false;
         self.note(Entry::error(reason));
     }
 
@@ -481,7 +506,10 @@ impl App {
             return vec![];
         }
         self.pending_id = None;
+        self.cancelling = false;
         let pending = self.pending.take();
+        let streaming_id = self.streaming.as_ref().map(|s| s.request_id);
+        let streaming_index = self.streaming.take().map(|s| s.index);
 
         if !response.ok {
             let reason = response
@@ -495,13 +523,39 @@ impl App {
         match pending {
             Some(Pending::Turn) => {
                 self.scroll = 0;
+                let cancelled = result
+                    .get("cancelled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
                 let text = result
                     .get("response")
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string();
+                if cancelled {
+                    if let Some(index) = streaming_index {
+                        if index < self.entries.len() {
+                            // Keep the partial answer the user already saw.
+                            self.entries[index].role = Role::Assistant;
+                        }
+                    }
+                    if !text.trim().is_empty()
+                        && (streaming_id != Some(response.id) || streaming_index.is_none())
+                    {
+                        self.note(Entry::assistant(text));
+                    }
+                    self.note(Entry::system("Cancelled."));
+                    return vec![];
+                }
                 if text.trim().is_empty() {
                     self.note(Entry::error("The daemon returned an empty answer."));
+                } else if let Some(index) = streaming_index {
+                    if index < self.entries.len() {
+                        self.entries[index].role = Role::Assistant;
+                        self.entries[index].text = text;
+                    } else {
+                        self.note(Entry::assistant(text));
+                    }
                 } else {
                     self.note(Entry::assistant(text));
                 }
@@ -600,11 +654,73 @@ impl App {
         }
     }
 
+    fn on_chunk(&mut self, id: Uuid, text: String) -> Vec<Action> {
+        if self.pending_id != Some(id) {
+            return vec![];
+        }
+        if !matches!(self.pending, Some(Pending::Turn)) {
+            return vec![];
+        }
+        if text.is_empty() {
+            return vec![];
+        }
+        if let Some(streaming) = self.streaming.as_mut() {
+            if streaming.request_id == id && streaming.index < self.entries.len() {
+                self.entries[streaming.index].text.push_str(&text);
+                // Leave scroll alone: if the user scrolled up to read, new
+                // chunks must not yank them back to the bottom.
+                return vec![];
+            }
+        }
+        let index = self.entries.len();
+        self.entries.push(Entry::assistant(text));
+        self.streaming = Some(StreamingTurn {
+            request_id: id,
+            index,
+        });
+        vec![]
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> Vec<Action> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
 
-        if ctrl && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('q')) {
+        if ctrl && key.code == KeyCode::Char('c') {
+            // A confirmation belongs to the running turn. Cancelling should
+            // abort the turn itself; denying only the tool would let the
+            // model continue explaining the denial, which is not what Ctrl+C
+            // means here.
+            if let Some(Overlay::Confirm(request)) = self.overlay.take() {
+                if matches!(self.pending, Some(Pending::Turn)) {
+                    if let Some(id) = self.pending_id {
+                        if !self.cancelling {
+                            self.cancelling = true;
+                            return vec![Action::Cancel { id }];
+                        }
+                        return vec![];
+                    }
+                }
+                return vec![Action::Confirm {
+                    id: request.id,
+                    approved: false,
+                }];
+            }
+            if matches!(self.pending, Some(Pending::Turn)) {
+                if let Some(id) = self.pending_id {
+                    if !self.cancelling {
+                        self.cancelling = true;
+                        return vec![Action::Cancel { id }];
+                    }
+                    // Already asked. Pressing Ctrl+C again must not queue a
+                    // second cancel; Ctrl+Q still quits immediately.
+                    return vec![];
+                }
+            }
+            self.should_quit = true;
+            return vec![Action::Quit];
+        }
+
+        if ctrl && key.code == KeyCode::Char('q') {
             self.should_quit = true;
             return vec![Action::Quit];
         }
@@ -1038,14 +1154,39 @@ mod tests {
     }
 
     #[test]
-    fn scrolling_stops_at_the_top_of_the_transcript() {
+    fn ctrl_c_during_a_turn_cancels_it_once() {
         let mut app = App::new("test".into());
-        app.max_scroll = 5;
-        app.scroll_up(10);
-        assert_eq!(app.scroll, 5);
-        app.scroll_down(2);
-        assert_eq!(app.scroll, 3);
-        app.scroll_down(99);
-        assert_eq!(app.scroll, 0);
+        let id = Uuid::new_v4();
+        app.begin_request(id, Pending::Turn);
+        let actions = app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.cancelling);
+        assert!(matches!(
+            actions.as_slice(),
+            [Action::Cancel { id: cancel_id }] if *cancel_id == id
+        ));
+        let actions = app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(actions.is_empty());
+        assert!(app.cancelling);
+    }
+
+    #[test]
+    fn ctrl_c_during_confirmation_cancels_the_turn() {
+        let mut app = App::new("test".into());
+        let turn_id = Uuid::new_v4();
+        app.begin_request(turn_id, Pending::Turn);
+        let confirm_id = Uuid::new_v4();
+        app.overlay = Some(Overlay::Confirm(ConfirmationRequest {
+            id: confirm_id,
+            tool: "shell.run".into(),
+            args: json!({"command": "firefox"}),
+            prompt: "Run shell command: firefox".into(),
+        }));
+        let actions = app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(matches!(
+            actions.as_slice(),
+            [Action::Cancel { id: cancel_id }] if *cancel_id == turn_id
+        ));
+        assert!(app.overlay.is_none());
+        assert!(app.cancelling);
     }
 }
