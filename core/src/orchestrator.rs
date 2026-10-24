@@ -386,19 +386,39 @@ impl Orchestrator {
     ) -> Result<String> {
         let lower = input.to_lowercase();
         let mut tools = Vec::new();
-        
+
         // Always include system info for general queries, but filter aggressively
-        let need_fs = lower.contains("file") || lower.contains("dir") || lower.contains("list") 
-            || lower.contains("read") || lower.contains("write") || lower.contains("edit")
-            || lower.contains("search") || lower.contains("/") || lower.contains("~");
-        let need_shell = lower.contains("run") || lower.contains("exec") || lower.contains("command")
-            || lower.contains("install") || lower.contains("open ") || lower.contains("launch");
-        let need_process = lower.contains("process") || lower.contains("cpu") || lower.contains("memory") || lower.contains("ram");
-        let need_fetch = lower.contains("fetch") || lower.contains("http") || lower.contains("url")
-            || lower.contains("website") || lower.contains("download") || lower.contains("wikipedia");
-        let need_system = lower.contains("os") || lower.contains("system") || lower.contains("hostname") 
-            || lower.contains("arch") || lower.contains("spec");
-        
+        let need_fs = lower.contains("file")
+            || lower.contains("dir")
+            || lower.contains("list")
+            || lower.contains("read")
+            || lower.contains("write")
+            || lower.contains("edit")
+            || lower.contains("search")
+            || lower.contains("/")
+            || lower.contains("~");
+        let need_shell = lower.contains("run")
+            || lower.contains("exec")
+            || lower.contains("command")
+            || lower.contains("install")
+            || lower.contains("open ")
+            || lower.contains("launch");
+        let need_process = lower.contains("process")
+            || lower.contains("cpu")
+            || lower.contains("memory")
+            || lower.contains("ram");
+        let need_fetch = lower.contains("fetch")
+            || lower.contains("http")
+            || lower.contains("url")
+            || lower.contains("website")
+            || lower.contains("download")
+            || lower.contains("wikipedia");
+        let need_system = lower.contains("os")
+            || lower.contains("system")
+            || lower.contains("hostname")
+            || lower.contains("arch")
+            || lower.contains("spec");
+
         if need_fs {
             for t in &self.tools.list() {
                 if t.starts_with("filesystem.") {
@@ -406,14 +426,33 @@ impl Orchestrator {
                 }
             }
             // Add native filesystem tools
-            for tool_name in ["filesystem.list_dir", "filesystem.read", "filesystem.search", "filesystem.stat", "filesystem.write", "filesystem.edit"] {
-                if let Some(schema) = self.tools.schemas().iter().find(|s| s["function"]["name"].as_str() == Some(tool_name)) {
+            for tool_name in [
+                "filesystem.list_dir",
+                "filesystem.read",
+                "filesystem.search",
+                "filesystem.stat",
+                "filesystem.write",
+                "filesystem.edit",
+            ] {
+                if let Some(schema) = self
+                    .tools
+                    .schemas()
+                    .iter()
+                    .find(|s| s["function"]["name"].as_str() == Some(tool_name))
+                {
                     tools.push(schema.clone());
                 }
             }
             // Add relevant MCP filesystem tools
             for t in self.mcp.list_tools() {
-                if t.server == "filesystem" && (t.name.contains("read") || t.name.contains("list") || t.name.contains("search") || t.name.contains("write") || t.name.contains("edit") || t.name == "get_file_info") {
+                if t.server == "filesystem"
+                    && (t.name.contains("read")
+                        || t.name.contains("list")
+                        || t.name.contains("search")
+                        || t.name.contains("write")
+                        || t.name.contains("edit")
+                        || t.name == "get_file_info")
+                {
                     tools.push(serde_json::json!({
                         "type": "function",
                         "function": {
@@ -426,12 +465,22 @@ impl Orchestrator {
             }
         }
         if need_shell {
-            if let Some(schema) = self.tools.schemas().iter().find(|s| s["function"]["name"].as_str() == Some("shell.run")) {
+            if let Some(schema) = self
+                .tools
+                .schemas()
+                .iter()
+                .find(|s| s["function"]["name"].as_str() == Some("shell.run"))
+            {
                 tools.push(schema.clone());
             }
         }
         if need_process {
-            if let Some(schema) = self.tools.schemas().iter().find(|s| s["function"]["name"].as_str() == Some("process.list")) {
+            if let Some(schema) = self
+                .tools
+                .schemas()
+                .iter()
+                .find(|s| s["function"]["name"].as_str() == Some("process.list"))
+            {
                 tools.push(schema.clone());
             }
         }
@@ -450,14 +499,24 @@ impl Orchestrator {
             }
         }
         if need_system {
-            if let Some(schema) = self.tools.schemas().iter().find(|s| s["function"]["name"].as_str() == Some("system.info")) {
+            if let Some(schema) = self
+                .tools
+                .schemas()
+                .iter()
+                .find(|s| s["function"]["name"].as_str() == Some("system.info"))
+            {
                 tools.push(schema.clone());
             }
         }
-        
+
         // If no specific tools needed, include minimal set
         if tools.is_empty() {
-            if let Some(schema) = self.tools.schemas().iter().find(|s| s["function"]["name"].as_str() == Some("system.info")) {
+            if let Some(schema) = self
+                .tools
+                .schemas()
+                .iter()
+                .find(|s| s["function"]["name"].as_str() == Some("system.info"))
+            {
                 tools.push(schema.clone());
             }
         }
