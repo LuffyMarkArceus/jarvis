@@ -246,12 +246,17 @@ pub fn route(input: &str) -> Route {
     // 2c. Factual queries that benefit from web search/fetch
     if lower.contains("millennium prize")
         || lower.contains("millenium prize")
-        || (lower.contains("solved") && lower.contains("conjecture") && !lower.contains("can you solve"))
+        || (lower.contains("solved")
+            && lower.contains("conjecture")
+            && !lower.contains("can you solve"))
         || lower.contains("who won the prize")
         || lower.contains("nobel prize")
         || lower.contains("clay institute")
     {
-        if lower.contains("millennium") || lower.contains("millenium") || lower.contains("clay institute") {
+        if lower.contains("millennium")
+            || lower.contains("millenium")
+            || lower.contains("clay institute")
+        {
             return Route::Tool {
                 name: "mcp.fetch.fetch".to_string(),
                 args: json!({ "url": "https://en.wikipedia.org/wiki/Millennium_Prize_Problems" }),
