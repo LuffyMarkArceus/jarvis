@@ -49,6 +49,7 @@ use crate::cancel::Cancellation;
 use crate::config::Config;
 use crate::context::{self, ContextPlan};
 use crate::error::{JarvisError, Result};
+use crate::mcp::client::McpClient;
 use crate::memory::{MemoryManager, Message};
 use crate::model::{ChatMessage, ModelToolCall, OllamaClient};
 use crate::permissions::{PermissionAction, PermissionManager};
@@ -65,6 +66,7 @@ use crate::tools::{
 use serde_json::Value;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{info, warn};
+use std::sync::Arc;
 use uuid::Uuid;
 
 /// Asked when a tool call needs the user's approval before it runs.
@@ -145,6 +147,7 @@ pub struct Orchestrator {
     memory: Option<MemoryManager>,
     session_id: String,
     permissions: PermissionManager,
+    mcp: Arc<tokio::sync::Mutex<McpClient>>,
 }
 
 impl Orchestrator {
@@ -170,6 +173,13 @@ impl Orchestrator {
             let _ = m.create_session(&session_id);
         }
         let permissions = PermissionManager::new(&config).expect("Failed to init permissions");
+        let mcp = Arc::new(tokio::sync::Mutex::new(McpClient::new()));
+        // Start MCP servers in background
+        let mcp_clone = mcp.clone();
+        let cfg_clone = config.clone();
+        tokio::spawn(async move {
+            let _ = mcp_clone.lock().await.start_from_config(&cfg_clone).await;
+        });
         Self {
             config,
             client,
@@ -177,6 +187,7 @@ impl Orchestrator {
             memory,
             session_id,
             permissions,
+            mcp,
         }
     }
 
