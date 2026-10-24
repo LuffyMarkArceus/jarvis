@@ -16,7 +16,11 @@ pub struct StdioTransport {
 }
 
 impl StdioTransport {
-    pub async fn start(command: &str, args: &[String], env: &HashMap<String, String>) -> Result<Self> {
+    pub async fn start(
+        command: &str,
+        args: &[String],
+        env: &HashMap<String, String>,
+    ) -> Result<Self> {
         let mut cmd = Command::new(command);
         cmd.args(args)
             .envs(env)
@@ -26,10 +30,17 @@ impl StdioTransport {
         let mut child = cmd
             .spawn()
             .map_err(|e| JarvisError::Tool(format!("Failed to start MCP server: {}", e)))?;
-        let stdin = child.stdin.take().ok_or_else(|| JarvisError::Tool("MCP server has no stdin".into()))?;
-        let stdout = child.stdout.take().ok_or_else(|| JarvisError::Tool("MCP server has no stdout".into()))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| JarvisError::Tool("MCP server has no stdin".into()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| JarvisError::Tool("MCP server has no stdout".into()))?;
         let stdin = Arc::new(Mutex::new(stdin));
-        let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>> = Arc::new(Mutex::new(HashMap::new()));
+        let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
         let pending_clone = pending.clone();
         tokio::spawn(async move {
             let mut reader = BufReader::new(stdout).lines();
@@ -57,7 +68,11 @@ impl StdioTransport {
         })
     }
 
-    pub async fn request(&self, method: &str, params: Option<serde_json::Value>) -> Result<JsonRpcResponse> {
+    pub async fn request(
+        &self,
+        method: &str,
+        params: Option<serde_json::Value>,
+    ) -> Result<JsonRpcResponse> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let req = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -73,14 +88,20 @@ impl StdioTransport {
             .write_all(format!("{}\n", line).as_bytes())
             .await
             .map_err(|e| JarvisError::Tool(format!("Failed to write to MCP server: {}", e)))?;
-        stdin.flush().await.map_err(|e| JarvisError::Tool(e.to_string()))?;
+        stdin
+            .flush()
+            .await
+            .map_err(|e| JarvisError::Tool(e.to_string()))?;
         drop(stdin);
         let resp = tokio::time::timeout(std::time::Duration::from_secs(60), rx)
             .await
             .map_err(|_| JarvisError::Tool("MCP request timed out".into()))?
             .map_err(|_| JarvisError::Tool("MCP server closed connection".into()))?;
         if let Some(err) = resp.error {
-            return Err(JarvisError::Tool(format!("MCP error {}: {}", err.code, err.message)));
+            return Err(JarvisError::Tool(format!(
+                "MCP error {}: {}",
+                err.code, err.message
+            )));
         }
         Ok(resp)
     }
@@ -98,7 +119,10 @@ impl StdioTransport {
             .write_all(format!("{}\n", line).as_bytes())
             .await
             .map_err(|e| JarvisError::Tool(e.to_string()))?;
-        stdin.flush().await.map_err(|e| JarvisError::Tool(e.to_string()))?;
+        stdin
+            .flush()
+            .await
+            .map_err(|e| JarvisError::Tool(e.to_string()))?;
         Ok(())
     }
 }

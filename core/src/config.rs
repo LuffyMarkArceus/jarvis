@@ -120,7 +120,6 @@ pub struct McpServerConfig {
     pub enabled: bool,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct McpConfig {

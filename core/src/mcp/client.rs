@@ -32,7 +32,8 @@ impl McpClient {
                 continue;
             }
             info!("Starting MCP server: {}", server.name);
-            let transport = StdioTransport::start(&server.command, &server.args, &server.env).await?;
+            let transport =
+                StdioTransport::start(&server.command, &server.args, &server.env).await?;
             let transport = Arc::new(transport);
             // Initialize
             let _init = transport
@@ -65,14 +66,20 @@ impl McpClient {
                                     .description
                                     .clone()
                                     .unwrap_or_else(|| format!("MCP tool {}", full_name)),
-                                schema: mcp_tool.input_schema.clone().unwrap_or(serde_json::json!({"type": "object"})),
+                                schema: mcp_tool
+                                    .input_schema
+                                    .clone()
+                                    .unwrap_or(serde_json::json!({"type": "object"})),
                             });
                             info!("Discovered MCP tool: {}", full_name);
                         }
                     }
                 }
             }
-            self.transports.lock().await.insert(server.name.clone(), transport);
+            self.transports
+                .lock()
+                .await
+                .insert(server.name.clone(), transport);
         }
         Ok(())
     }
