@@ -64,9 +64,9 @@ use crate::tools::{
     ToolRegistry,
 };
 use serde_json::Value;
+use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{info, warn};
-use std::sync::Arc;
 use uuid::Uuid;
 
 /// Asked when a tool call needs the user's approval before it runs.
