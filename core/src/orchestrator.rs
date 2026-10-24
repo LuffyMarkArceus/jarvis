@@ -64,7 +64,6 @@ use crate::tools::{
     ToolRegistry,
 };
 use serde_json::Value;
-use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -147,7 +146,7 @@ pub struct Orchestrator {
     memory: Option<MemoryManager>,
     session_id: String,
     permissions: PermissionManager,
-    mcp: Arc<tokio::sync::Mutex<McpClient>>,
+    mcp: McpClient,
 }
 
 impl Orchestrator {
@@ -173,12 +172,16 @@ impl Orchestrator {
             let _ = m.create_session(&session_id);
         }
         let permissions = PermissionManager::new(&config).expect("Failed to init permissions");
-        let mcp = Arc::new(tokio::sync::Mutex::new(McpClient::new()));
-        // Start MCP servers in background
-        let mcp_clone = mcp.clone();
+        let mcp = McpClient::new();
+        // Start MCP servers in the background: a slow or broken server must
+        // not delay the first prompt, and discovery results simply appear in
+        // the cache when they are ready.
+        let mcp_startup = mcp.clone();
         let cfg_clone = config.clone();
         tokio::spawn(async move {
-            let _ = mcp_clone.lock().await.start_from_config(&cfg_clone).await;
+            if let Err(e) = mcp_startup.start_from_config(&cfg_clone).await {
+                warn!("MCP startup failed: {}", e);
+            }
         });
         Self {
             config,
@@ -288,8 +291,18 @@ impl Orchestrator {
         Ok(answer)
     }
 
-    pub fn list_tools(&self) -> Vec<&str> {
-        self.tools.list()
+    pub fn list_tools(&self) -> Vec<String> {
+        let mut tools: Vec<String> = self
+            .tools
+            .list()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
+        // MCP tools appear once discovery completes; before that this is
+        // simply the native catalogue.
+        tools.extend(self.mcp.list_tools().into_iter().map(|t| t.full_name));
+        tools.sort();
+        tools
     }
 
     // ------------------------------------------------------------ conversations
@@ -371,7 +384,17 @@ impl Orchestrator {
         confirm: Option<&dyn ConfirmationHandler>,
         cancel: Option<&Cancellation>,
     ) -> Result<String> {
-        let tools = self.tools.schemas();
+        let mut tools = self.tools.schemas();
+        for t in self.mcp.list_tools() {
+            tools.push(serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": t.full_name,
+                    "description": t.description,
+                    "parameters": t.schema,
+                }
+            }));
+        }
         let reserved = self.tool_schema_tokens(&tools);
         let plan = context::assemble(
             &self.tool_system_prompt(),
@@ -526,6 +549,9 @@ impl Orchestrator {
         if outcome.status.is_blocked() {
             return render_blocked_report(std::slice::from_ref(outcome));
         }
+        if outcome.name.starts_with("mcp.") {
+            return format!("{}:\n{}", outcome.name, outcome.output);
+        }
         render_tool_output(outcome)
     }
 
@@ -630,6 +656,10 @@ impl Orchestrator {
         p.push_str("Tools you can call:\n");
         for (name, desc) in self.tools.describe() {
             p.push_str(&format!("- {}: {}\n", name, desc));
+        }
+        // MCP tools are listed under the same names the model must call.
+        for t in self.mcp.list_tools() {
+            p.push_str(&format!("- {}: {}\n", t.full_name, t.description));
         }
         p
     }
@@ -799,34 +829,52 @@ impl Orchestrator {
         decision: &str,
         pattern: Option<String>,
     ) -> ToolOutcome {
-        match self.tools.execute(&name, args.clone()).await {
-            Ok(res) => {
-                let compact = compact_output(&name, &res);
-                let _ = self.permissions.log_audit(
-                    Some(&self.session_id),
-                    &name,
-                    &args,
-                    decision,
-                    Some(&compact),
-                );
-                ToolOutcome {
-                    name,
-                    args,
-                    status: OutcomeStatus::Succeeded,
-                    output: compact,
-                    result: Some(res),
-                    pattern,
+        // Check if it's an MCP tool (namespaced as mcp.server.tool)
+        if name.starts_with("mcp.") {
+            let parts: Vec<&str> = name.split('.').collect();
+            if parts.len() >= 3 {
+                let server = parts[1].to_string();
+                let tool_name = parts[2..].join(".");
+                match self.mcp.call_tool(&server, &tool_name, args.clone()).await {
+                    Ok(res) => {
+                        let _ = self.permissions.log_audit(
+                            Some(&self.session_id),
+                            &name,
+                            &args,
+                            decision,
+                            Some(&res),
+                        );
+                        let res_val = serde_json::json!({ "result": res });
+                        ToolOutcome {
+                            name,
+                            args,
+                            status: OutcomeStatus::Succeeded,
+                            output: res.clone(),
+                            result: Some(res_val),
+                            pattern,
+                        }
+                    }
+                    Err(e) => {
+                        let msg = format!("Tool {} failed: {}", name, e);
+                        let _ = self.permissions.log_audit(
+                            Some(&self.session_id),
+                            &name,
+                            &args,
+                            &format!("{}_failed", decision),
+                            Some(&msg),
+                        );
+                        ToolOutcome {
+                            name,
+                            args,
+                            status: OutcomeStatus::Failed,
+                            output: msg,
+                            result: None,
+                            pattern,
+                        }
+                    }
                 }
-            }
-            Err(e) => {
-                let msg = format!("Tool {} failed: {}", name, e);
-                let _ = self.permissions.log_audit(
-                    Some(&self.session_id),
-                    &name,
-                    &args,
-                    &format!("{}_failed", decision),
-                    Some(&msg),
-                );
+            } else {
+                let msg = format!("Invalid MCP tool name: {}", name);
                 ToolOutcome {
                     name,
                     args,
@@ -836,6 +884,45 @@ impl Orchestrator {
                     pattern,
                 }
             }
+        } else {
+            match self.tools.execute(&name, args.clone()).await {
+                Ok(res) => {
+                    let compact = compact_output(&name, &res);
+                    let _ = self.permissions.log_audit(
+                        Some(&self.session_id),
+                        &name,
+                        &args,
+                        decision,
+                        Some(&compact),
+                    );
+                    ToolOutcome {
+                        name,
+                        args,
+                        status: OutcomeStatus::Succeeded,
+                        output: compact,
+                        result: Some(res),
+                        pattern,
+                    }
+                }
+                Err(e) => {
+                    let msg = format!("Tool {} failed: {}", name, e);
+                    let _ = self.permissions.log_audit(
+                        Some(&self.session_id),
+                        &name,
+                        &args,
+                        &format!("{}_failed", decision),
+                        Some(&msg),
+                    );
+                    ToolOutcome {
+                        name,
+                        args,
+                        status: OutcomeStatus::Failed,
+                        output: msg,
+                        result: None,
+                        pattern,
+                    }
+                }
+            }
         }
     }
 
@@ -843,7 +930,21 @@ impl Orchestrator {
     /// `{"type": "function", "function": "list_dir", "parameters": {...}}`.
     /// Unwrap that so the real arguments reach the tool.
     fn sanitize_args(&self, tool: &str, args: Value) -> Value {
-        let required = self.tools.required_args(tool);
+        let required = if tool.starts_with("mcp.") {
+            self.mcp
+                .list_tools()
+                .into_iter()
+                .find(|t| t.full_name == tool)
+                .and_then(|t| t.schema.get("required").and_then(|r| r.as_array()).cloned())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect::<Vec<String>>()
+                })
+                .unwrap_or_default()
+        } else {
+            self.tools.required_args(tool)
+        };
         if required.is_empty() {
             return args;
         }

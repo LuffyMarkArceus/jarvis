@@ -66,13 +66,55 @@ fn set_permission(
     tool: &str,
     action: PermissionAction,
 ) -> anyhow::Result<()> {
-    let known = jarvis_core::tools::known_tool_names();
-    if !known.contains(&tool) {
-        anyhow::bail!("unknown tool '{}'. Known tools: {}", tool, known.join(", "));
+    // MCP tools are discovered at runtime, so they cannot be validated
+    // against the static list. They are named `mcp.<server>.<tool>`; accept
+    // that shape so a rule can be written before the server is running.
+    if !tool.starts_with("mcp.") {
+        let known = jarvis_core::tools::known_tool_names();
+        if !known.contains(&tool) {
+            anyhow::bail!("unknown tool '{}'. Known tools: {}", tool, known.join(", "));
+        }
     }
     manager.set_rule(tool, action.clone())?;
     println!("{} will {}.", tool, action.label());
     Ok(())
+}
+
+/// Print the tool catalogue, marking which tools come from an MCP server.
+///
+/// Telling the two apart matters: a native tool is part of Jarvis, while an
+/// MCP tool is an external process with its own trust story. The caller
+/// needs to see which is which without reading the source.
+fn print_tools(tools: &[serde_json::Value]) {
+    let names: Vec<&str> = tools.iter().filter_map(|t| t.as_str()).collect();
+    if names.is_empty() {
+        println!("No tools available.");
+        return;
+    }
+
+    let native: Vec<&&str> = names.iter().filter(|n| !n.starts_with("mcp.")).collect();
+    let mcp: Vec<&&str> = names.iter().filter(|n| n.starts_with("mcp.")).collect();
+
+    if !native.is_empty() {
+        println!("Built-in tools:");
+        for name in &native {
+            println!("  {}", name);
+        }
+    }
+    if !mcp.is_empty() {
+        if !native.is_empty() {
+            println!();
+        }
+        println!("MCP tools:");
+        for name in &mcp {
+            // `mcp.<server>.<tool...>`
+            let server = name.split('.').nth(1).unwrap_or("?");
+            let rest = name.splitn(3, '.').nth(2).unwrap_or(name);
+            println!("  {:<32} [mcp:{}] {}", name, server, rest);
+        }
+    }
+    println!();
+    println!("{} tool(s).", names.len());
 }
 
 /// A short, single-line rendering of tool arguments.
@@ -492,7 +534,10 @@ async fn main() -> anyhow::Result<()> {
                 Ok(response) => {
                     if response.ok {
                         if let Some(result) = response.result {
-                            println!("{}", serde_json::to_string_pretty(&result)?);
+                            match result.get("tools").and_then(|t| t.as_array()) {
+                                Some(tools) => print_tools(tools),
+                                None => println!("{}", serde_json::to_string_pretty(&result)?),
+                            }
                         }
                     }
                 }
@@ -508,7 +553,10 @@ async fn main() -> anyhow::Result<()> {
                 Ok(response) => {
                     if response.ok {
                         if let Some(result) = response.result {
-                            println!("{}", serde_json::to_string_pretty(&result)?);
+                            match result.get("tools").and_then(|t| t.as_array()) {
+                                Some(tools) => print_tools(tools),
+                                None => println!("{}", serde_json::to_string_pretty(&result)?),
+                            }
                         }
                     }
                 }

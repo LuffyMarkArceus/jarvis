@@ -202,11 +202,9 @@ impl Daemon {
         }
     }
 
-    pub fn list_tools(&self) -> Vec<String> {
-        crate::tools::known_tool_names()
-            .into_iter()
-            .map(|s| s.to_string())
-            .collect()
+    pub async fn list_tools(&self) -> Vec<String> {
+        let orch = self.orchestrator.lock().await;
+        orch.list_tools()
     }
 
     pub async fn session_id(&self) -> String {

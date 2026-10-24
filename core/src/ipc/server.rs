@@ -301,7 +301,7 @@ async fn handle_request(
                 request.id,
                 serde_json::json!({
                     "status": "running",
-                    "tools": daemon_lock.list_tools(),
+                    "tools": daemon_lock.list_tools().await,
                     "session_id": sid,
                 }),
             )
@@ -309,7 +309,7 @@ async fn handle_request(
         "tools.list" => Response::ok(
             request.id,
             serde_json::json!({
-                "tools": daemon_lock.list_tools(),
+                "tools": daemon_lock.list_tools().await,
             }),
         ),
         "session.list" => {
