@@ -188,6 +188,7 @@ fn draw_overlay(frame: &mut Frame, app: &App, area: Rect) {
         Overlay::Sessions { rows, selected } => {
             draw_sessions(frame, rows, *selected, app.session_id.as_deref(), area)
         }
+        Overlay::Recall(rows) => draw_recall(frame, rows, area),
         Overlay::Confirm(request) => draw_confirm(frame, &request.prompt, area),
     }
 }
@@ -201,6 +202,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         ("Ctrl+N", "start a new session"),
         ("Ctrl+C", "cancel the running turn, or quit when idle"),
         ("Ctrl+S", "list and switch sessions"),
+        ("/recall <q>", "search memories across sessions"),
         ("Ctrl+L", "clear the screen"),
         ("Ctrl+U", "clear the message box"),
         ("Ctrl+R", "reconnect to the daemon"),
@@ -211,6 +213,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         ("/delete <id>", "delete a session"),
         ("/prune", "remove empty sessions"),
         ("/session", "show the current session id"),
+        ("/recall <query>", "search memories across sessions"),
         ("/status, /tools", "daemon information"),
         ("/clear, /quit, /help", "clear, leave, this list"),
     ];
@@ -364,3 +367,24 @@ mod tests {
         assert!(popup.width <= area.width);
     }
 }
+
+fn draw_recall(frame: &mut Frame, rows: &[crate::app::RecallRow], area: Rect) {
+    let items: Vec<ListItem> = rows
+        .iter()
+        .map(|row| {
+            let sid = if row.session_id.len() > 8 {
+                &row.session_id[..8]
+            } else {
+                &row.session_id
+            };
+            let text = format!("[{}] {}: {}", sid, row.role, row.snippet);
+            ListItem::new(Line::from(text))
+        })
+        .collect();
+
+    let list = List::new(items).block(Block::bordered().title(" Recall (Esc to close) "));
+    let popup = centered(area, 90, (rows.len() as u16 + 4).min(area.height * 2 / 3));
+    frame.render_widget(Clear, popup);
+    frame.render_widget(list, popup);
+}
+

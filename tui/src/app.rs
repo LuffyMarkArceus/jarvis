@@ -150,6 +150,7 @@ pub enum Pending {
     NewSession,
     DeleteSession(String),
     Prune,
+    Recall,
     Status,
     Tools,
 }
@@ -191,6 +192,14 @@ pub enum Overlay {
         rows: Vec<SessionRow>,
         selected: usize,
     },
+    Recall(Vec<RecallRow>),
+}
+
+#[derive(Debug, Clone)]
+pub struct RecallRow {
+    pub session_id: String,
+    pub role: String,
+    pub snippet: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,21 +222,23 @@ pub enum Command {
     Status,
     Tools,
     Session,
+    Recall(String),
     Clear,
     Quit,
 }
 
 pub fn parse_command(text: &str) -> Option<Command> {
-    let mut parts = text.split_whitespace();
+    let mut parts = text.splitn(2, char::is_whitespace);
     let head = parts.next()?;
-    let argument = parts.next().map(str::to_string);
+    let rest = parts.next().unwrap_or("").trim().to_string();
     Some(match head {
         "/help" => Command::Help,
         "/new" => Command::New,
         "/sessions" => Command::Sessions,
-        "/switch" => Command::Switch(argument.unwrap_or_default()),
-        "/delete" => Command::Delete(argument.unwrap_or_default()),
+        "/switch" => Command::Switch(rest),
+        "/delete" => Command::Delete(rest),
         "/prune" => Command::Prune,
+        "/recall" => Command::Recall(rest),
         "/status" => Command::Status,
         "/tools" => Command::Tools,
         "/session" => Command::Session,
@@ -470,6 +481,17 @@ impl App {
                 params: json!({}),
                 pending: Pending::Prune,
             }],
+            Command::Recall(query) => {
+                if query.is_empty() {
+                    self.note(Entry::system("Usage: /recall <query>"));
+                    return vec![];
+                }
+                vec![Action::Request {
+                    method: "memory.recall",
+                    params: json!({ "query": query, "limit": 10 }),
+                    pending: Pending::Recall,
+                }]
+            }
             Command::Status => vec![Action::Request {
                 method: "status",
                 params: json!({}),
@@ -614,6 +636,29 @@ impl App {
                     .and_then(Value::as_u64)
                     .unwrap_or_default();
                 self.note(Entry::system(format!("Pruned {pruned} empty session(s).")));
+                vec![]
+            }
+            Some(Pending::Recall) => {
+                let rows: Vec<RecallRow> = result
+                    .get("results")
+                    .and_then(Value::as_array)
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|r| {
+                                Some(RecallRow {
+                                    session_id: r.get("session_id").and_then(Value::as_str)?.to_string(),
+                                    role: r.get("role").and_then(Value::as_str)?.to_string(),
+                                    snippet: r.get("snippet").and_then(Value::as_str)?.to_string(),
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if rows.is_empty() {
+                    self.note(Entry::system("No memories found."));
+                } else {
+                    self.overlay = Some(Overlay::Recall(rows));
+                }
                 vec![]
             }
             Some(Pending::Status) => {
@@ -782,6 +827,7 @@ impl App {
         };
         match overlay {
             Overlay::Help => vec![],
+            Overlay::Recall(_) => vec![],
             Overlay::Confirm(request) => match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => vec![Action::Confirm {
                     id: request.id,
