@@ -819,16 +819,24 @@ async fn main() -> anyhow::Result<()> {
                 Ok(response) => {
                     if response.ok {
                         if let Some(result) = response.result {
-                            if let Some(results) = result.get("results").and_then(|r| r.as_array()) {
+                            if let Some(results) = result.get("results").and_then(|r| r.as_array())
+                            {
                                 if results.is_empty() {
                                     println!("No memories found.");
                                     return Ok(());
                                 }
                                 for r in results {
-                                    let session = r.get("session_id").and_then(|s| s.as_str()).unwrap_or("?");
-                                    let role = r.get("role").and_then(|s| s.as_str()).unwrap_or("?");
-                                    let snip = r.get("snippet").and_then(|s| s.as_str()).unwrap_or("");
-                                    let sid = if session.len() > 8 { &session[..8] } else { session };
+                                    let session =
+                                        r.get("session_id").and_then(|s| s.as_str()).unwrap_or("?");
+                                    let role =
+                                        r.get("role").and_then(|s| s.as_str()).unwrap_or("?");
+                                    let snip =
+                                        r.get("snippet").and_then(|s| s.as_str()).unwrap_or("");
+                                    let sid = if session.len() > 8 {
+                                        &session[..8]
+                                    } else {
+                                        session
+                                    };
                                     println!("[{}] {}: {}", sid, role, snip);
                                 }
                                 return Ok(());
