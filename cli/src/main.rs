@@ -337,7 +337,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Ask { prompt } => {
             // Try to connect to daemon first
             let request = Request::new("ask", json!({"prompt": prompt}));
-            let interactive = false; // Disable streaming to avoid terminal issues
+            let interactive = std::io::stdout().is_terminal();
             match send_request_streaming(request, interactive).await {
                 Ok((response, printed)) => {
                     if printed {
@@ -354,8 +354,9 @@ async fn main() -> anyhow::Result<()> {
                             println!("[cancelled]");
                             return Ok(());
                         }
-                        if let Some(resp) =
-                            result.and_then(|r| r.get("response")).and_then(|r| r.as_str())
+                        if let Some(resp) = result
+                            .and_then(|r| r.get("response"))
+                            .and_then(|r| r.as_str())
                         {
                             if !printed {
                                 println!("{}", resp);
