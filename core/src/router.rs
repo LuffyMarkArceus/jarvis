@@ -200,6 +200,9 @@ const ACTION_WORDS: &[&str] = &[
     "pip",
     "npm",
     "cargo",
+    "use",
+    "invoke",
+    "call",
 ];
 
 /// Route a user request.
@@ -282,8 +285,8 @@ pub fn route(input: &str) -> Route {
         };
     }
 
-    // 10. Looks like a machine action the router cannot pin down.
-    if has_action_word(&lower) {
+    // 10. Looks like a machine action the router cannot pin down, or MCP usage.
+    if lower.contains("mcp.") || has_action_word(&lower) {
         return Route::Model;
     }
 
