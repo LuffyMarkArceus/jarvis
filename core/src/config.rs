@@ -120,16 +120,11 @@ pub struct McpServerConfig {
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct McpConfig {
+    #[serde(default)]
     pub servers: Vec<McpServerConfig>,
-}
-
-impl Default for McpConfig {
-    fn default() -> Self {
-        Self { servers: vec![] }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
