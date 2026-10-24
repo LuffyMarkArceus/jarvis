@@ -7,6 +7,7 @@ pub mod context;
 pub mod daemon;
 pub mod error;
 pub mod ipc;
+pub mod mcp;
 pub mod memory;
 pub mod model;
 pub mod orchestrator;

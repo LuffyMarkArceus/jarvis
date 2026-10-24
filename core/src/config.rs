@@ -13,6 +13,8 @@ pub struct Config {
     pub tools: ToolsConfig,
     #[serde(default)]
     pub context: ContextConfig,
+    #[serde(default)]
+    pub mcp: Option<McpConfig>,
 }
 
 /// Default data directory, shared by the config sections that need it.
@@ -100,6 +102,34 @@ impl Default for MemoryConfig {
             db_path: default_data_dir().join("memory.db"),
             vector_dim: 768,
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct McpServerConfig {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct McpConfig {
+    pub servers: Vec<McpServerConfig>,
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self { servers: vec![] }
     }
 }
 
