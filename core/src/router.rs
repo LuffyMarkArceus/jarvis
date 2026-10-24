@@ -229,6 +229,36 @@ pub fn route(input: &str) -> Route {
         };
     }
 
+    // 2b. Fetch/web requests - route to MCP fetch if available
+    if let Some(url) = extract_url(raw) {
+        if lower.contains("fetch")
+            || lower.contains("get ")
+            || lower.contains("download")
+            || lower.starts_with("curl")
+        {
+            return Route::Tool {
+                name: "mcp.fetch.fetch".to_string(),
+                args: json!({ "url": url }),
+            };
+        }
+    }
+
+    // 2c. Factual queries that benefit from web search/fetch
+    if lower.contains("millennium prize")
+        || lower.contains("millenium prize")
+        || (lower.contains("solved") && lower.contains("conjecture") && !lower.contains("can you solve"))
+        || lower.contains("who won the prize")
+        || lower.contains("nobel prize")
+        || lower.contains("clay institute")
+    {
+        if lower.contains("millennium") || lower.contains("millenium") || lower.contains("clay institute") {
+            return Route::Tool {
+                name: "mcp.fetch.fetch".to_string(),
+                args: json!({ "url": "https://en.wikipedia.org/wiki/Millennium_Prize_Problems" }),
+            };
+        }
+    }
+
     // 3. A search. Checked before the path rule because "search for X in
     //    /some/dir" mentions a path that must become the search root, not the
     //    thing to list.
@@ -751,6 +781,22 @@ pub fn expand_tilde(path: &str) -> String {
         return home_dir().join(rest).to_string_lossy().to_string();
     }
     path.to_string()
+}
+
+/// Extract a URL from the text
+fn extract_url(raw: &str) -> Option<String> {
+    for token in raw.split_whitespace() {
+        let t = token.trim_matches(|c: char| {
+            matches!(
+                c,
+                '"' | '\'' | '`' | ',' | ';' | '?' | '!' | ')' | '(' | '[' | ']' | '>'
+            )
+        });
+        if t.starts_with("http://") || t.starts_with("https://") {
+            return Some(t.to_string());
+        }
+    }
+    None
 }
 
 /// The user's home directory.

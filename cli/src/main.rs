@@ -388,6 +388,13 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Ask { prompt } => {
             // Try to connect to daemon first
+            // Each CLI invocation starts a fresh session so questions don't leak
+            // between separate terminal invocations.
+            if let Ok(session_req) = send_request(Request::new("session.new", json!({}))).await {
+                if session_req.ok {
+                    // New session created and set as current on the daemon
+                }
+            }
             let request = Request::new("ask", json!({"prompt": prompt}));
             let interactive = std::io::stdout().is_terminal();
             match send_request_streaming(request, interactive).await {
