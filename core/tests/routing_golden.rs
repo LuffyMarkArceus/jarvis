@@ -73,6 +73,16 @@ const GOLDEN: &[(&str, Expect)] = &[
         "What are the millennium prize problems and which have been solved?",
         Expect::Model,
     ),
+    // Recency and live status need a source, whatever the subject is. These
+    // rows exist because the rule used to be a list of topic names; adding a
+    // new subject should not require a router edit.
+    ("who won the 2026 world cup", Expect::Model),
+    ("which films won awards in 2025", Expect::Model),
+    ("has the riemann hypothesis been solved", Expect::Model),
+    ("what is the current version of postgres", Expect::Model),
+    // A stable historical fact with no recency marker does not need one.
+    ("what are the millennium prize problems", Expect::Direct),
+    ("when did the second world war end", Expect::Direct),
     // ---- ambiguous machine actions --------------------------------------
     ("create a file called notes.md", Expect::Model),
     ("check the git status of this repo", Expect::Model),

@@ -15,6 +15,7 @@ pub mod permissions;
 pub mod planner;
 pub mod router;
 pub mod tools;
+pub mod verify;
 
 pub fn init_tracing() {
     tracing_subscriber::fmt()

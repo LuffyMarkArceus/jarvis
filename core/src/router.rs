@@ -352,21 +352,6 @@ const WEB_WORDS: &[&str] = &[
     "headlines",
 ];
 
-/// Phrases that ask for an external fact. They do not name a website: the
-/// point is that the answer needs a source, so a web tool should be offered.
-const SOURCE_PHRASES: &[&str] = &[
-    "millennium prize",
-    "millenium prize",
-    "clay institute",
-    "nobel prize",
-    "who won",
-    "has been solved",
-    "have been solved",
-    "record holder",
-    "population of",
-    "capital of",
-];
-
 /// Does the request ask for something that must come from the web?
 ///
 /// Shared by the router (which sends it to the model) and the planner (which
@@ -383,10 +368,67 @@ pub fn needs_web(input: &str) -> bool {
         || lower.contains("search the web")
 }
 
+/// Years at or after this depend on facts newer than the model's weights, so
+/// the answer needs a retrieved source.
+const RECENT_YEAR: u32 = 2024;
+
+/// Phrases that ask about the *current* state of the world rather than about
+/// a stable fact. These are structural (recency, live status) rather than
+/// topic names: naming individual subjects does not scale, and every new one
+/// used to mean another router edit.
+const RECENCY_PHRASES: &[&str] = &[
+    "as of",
+    "this year",
+    "last year",
+    "right now",
+    "at the moment",
+    "so far",
+    "to date",
+    "up to date",
+    "most recent",
+    "current version",
+    "current price",
+    "who won",
+    "been solved",
+    "is solved",
+    "are solved",
+];
+
 /// Does the request ask for an external fact that needs a source?
+///
+/// "Who won the 2026 prize" and "has it been solved yet" both need one,
+/// whatever the prize or the problem is. That is why the rule is about
+/// recency and live status instead of a list of subjects.
 pub fn needs_source(input: &str) -> bool {
     let lower = input.to_lowercase();
-    SOURCE_PHRASES.iter().any(|phrase| lower.contains(phrase))
+    if has_recent_year(&lower) {
+        return true;
+    }
+    RECENCY_PHRASES.iter().any(|phrase| lower.contains(phrase))
+}
+
+/// Does the text contain a year at or after [`RECENT_YEAR`]?
+fn has_recent_year(input: &str) -> bool {
+    let bytes = input.as_bytes();
+    let mut index = 0;
+    while index + 4 <= bytes.len() {
+        let window = &bytes[index..index + 4];
+        if window.iter().all(u8::is_ascii_digit) {
+            // Reject a longer digit run: "12026" is not a year.
+            let before = index.checked_sub(1).map(|i| bytes[i]).unwrap_or(b' ');
+            let after = bytes.get(index + 4).copied().unwrap_or(b' ');
+            let standalone = !before.is_ascii_digit() && !after.is_ascii_digit();
+            if standalone {
+                if let Ok(year) = input[index..index + 4].parse::<u32>() {
+                    if (RECENT_YEAR..=2100).contains(&year) {
+                        return true;
+                    }
+                }
+            }
+        }
+        index += 1;
+    }
+    false
 }
 
 /// Handle `/list`, `/read`, `/run`, `/info`, `/ls`, `/cat`, `/find`, `/stat`.

@@ -122,6 +122,12 @@ impl OfferedTool {
 pub struct TurnPlan {
     pub route: Route,
     pub tools: Vec<OfferedTool>,
+    /// The request needs information from outside the model's weights.
+    ///
+    /// Exposed because more than tool selection depends on it: the
+    /// orchestrator searches first on such a turn, and must know an answer
+    /// that retrieved nothing is not a sourced answer.
+    pub web: bool,
 }
 
 impl TurnPlan {
@@ -184,10 +190,15 @@ pub fn plan(input: &str, route: Route, native: &ToolRegistry, mcp: &[DiscoveredT
         return TurnPlan {
             route: Route::Direct,
             tools: Vec::new(),
+            web: intent.web,
         };
     }
 
-    TurnPlan { route, tools }
+    TurnPlan {
+        route,
+        tools,
+        web: intent.web,
+    }
 }
 
 /// Render the "Tools you can call" block for the system prompt.
@@ -427,6 +438,20 @@ mod tests {
         );
         assert_eq!(plan.route, Route::Model);
         assert_eq!(plan.names(), vec!["mcp.fetch.fetch"]);
+        // The orchestrator uses this to decide whether to search first, and
+        // whether an answer that retrieved nothing is a sourced answer.
+        assert!(plan.web);
+    }
+
+    #[test]
+    fn a_non_web_model_turn_is_not_marked_web() {
+        let plan = plan(
+            "read the file notes.md and summarise it",
+            Route::Model,
+            &native(),
+            &fetch_tools(),
+        );
+        assert!(!plan.web);
     }
 
     #[test]

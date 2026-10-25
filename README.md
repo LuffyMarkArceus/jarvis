@@ -5,7 +5,7 @@ Python sidecars + TypeScript UI.
 
 ## Status
 
-Phase 1.5 - local core with deterministic tool planning and MCP tooling.
+Phase 2 - web search, a `search -> fetch` chain, and answer grounding.
 
 ## Build
 
@@ -47,6 +47,28 @@ MCP servers are offered when the request names the server or tool, when the
 server sets `always_offer = true`, or when the request needs the web and the
 server is a web server.
 
+## Web questions
+
+A question that needs a source (`needs_web`, `needs_source` - a recent year,
+"latest", "who won", "has it been solved") starts with two steps the
+orchestrator takes itself: it searches, then reads the top result. This is not
+delegated to the model because a 1B model gets it wrong in a measurable way: it
+hands `fetch` the question instead of a URL, then answers from its weights.
+Choosing the first step needs no judgement, so it is code; writing the answer
+from the retrieved text is left to the model.
+
+Two guards keep the answer honest:
+
+* If a figure in the answer (a year or a dotted version) appears nowhere in the
+  retrieved material, a note is appended naming it. This is how "1.64" and
+  "released in 2023" are caught without a bigger model.
+* If a web answer retrieved nothing at all - every tool failed, or the user
+  denied the call - the answer is marked as coming from the model's own
+  knowledge rather than from a source.
+
+The answer is never rewritten, only annotated: the note says what could not be
+confirmed, and the user decides what to do with it.
+
 ## MCP sidecars
 
 MCP servers are started over stdio and their tools are namespaced as
@@ -66,6 +88,52 @@ Arguments beginning with `sidecars/` (or `${SIDECAR_DIR}`) are resolved to the
 sidecars shipped with the checkout, so no absolute path is required. See
 `config/mcp.example.toml` for a full example.
 
+### Search backends
+
+`sidecars/search` returns titles, URLs and snippets. General web search without
+an API key is not reliably available - DuckDuckGo, Mojeek and Qwant answer this
+class of client with a CAPTCHA or `403` - so backends are explicit and the
+response names the one that produced it.
+
+| Backend | Needs | Good for |
+| --- | --- | --- |
+| `wikipedia` | nothing | facts, versions, named events (keyless default) |
+| `instant` | nothing | entity summaries (keyless fallback) |
+| `searx` | `JARVIS_SEARX_URL` | general web, when you have an instance |
+| `brave` | `JARVIS_BRAVE_KEY` | general web, with an API key |
+
+Set credentials per server in `config.toml`:
+
+```toml
+[[mcp.servers]]
+name = "search"
+command = "python3"
+args = ["sidecars/search/server.py"]
+enabled = true
+env = { JARVIS_SEARX_URL = "https://searx.example.org" }
+```
+
+`auto` prefers a configured general backend and otherwise tries Wikipedia, then
+Instant Answers. Naming a backend means exactly that backend: it never silently
+answers from a different index.
+
+New MCP tools are `ask` by default, so a headless run denies them until you
+grant access:
+
+```sh
+jarvis permissions allow mcp.search.search
+jarvis permissions allow mcp.fetch.fetch
+```
+
+### The fetch server
+
+`sidecars/fetch` returns clean text: HTML tags, scripts, navigation chrome and
+citation markers are removed, and the main content region is chosen rather than
+the whole page. It validates its own argument contract, because a wrong
+argument is a model mistake this tool can describe better than a stack trace:
+passing a search phrase instead of a URL returns a message saying so and
+pointing at the search tool.
+
 The built-in `filesystem.*` tools cover listing, reading, searching, writing
 and editing. The MCP filesystem server duplicates them and is therefore
 disabled by default; enabling both doubles the tool surface for no new
@@ -76,9 +144,10 @@ capability.
 ```sh
 cargo test --workspace
 python3 -m unittest discover -s sidecars/fetch -p 'test_*.py'
+python3 -m unittest discover -s sidecars/search -p 'test_*.py'
 ```
 
 The Rust suite includes golden routing cases (`core/tests/routing_golden.rs`)
 and MCP client integration tests against a real stdio subprocess
-(`core/tests/mcp_stdio.rs`). The Python suite covers HTML extraction and the
-JSON-RPC protocol without network access.
+(`core/tests/mcp_stdio.rs`). The Python suites cover HTML extraction, search
+backends, query normalisation and the JSON-RPC protocol without network access.

@@ -31,6 +31,23 @@ enabled = true
 always_offer = false
 env = {}
 
+[[mcp.servers]]
+name = "search"
+# Finds pages to then fetch. Keyless backends are Wikipedia and DuckDuckGo
+# Instant Answers. General web search needs one of these:
+#
+#   env = { JARVIS_SEARX_URL = "https://your-searxng.example" }
+#   env = { JARVIS_BRAVE_KEY = "..." }
+#
+# Without one, `search` still answers factual questions from Wikipedia, which
+# is what most "what is X" and "latest version of X" requests need. The result
+# names the backend that produced it, so coverage is never implied.
+command = "python3"
+args = ["sidecars/search/server.py"]
+enabled = true
+always_offer = false
+env = {}
+
 # The MCP filesystem server duplicates the built-in `filesystem.*` tools,
 # which run in-process and are already integrated with the permission
 # system. Enabling both doubles the tool surface for no new capability, so

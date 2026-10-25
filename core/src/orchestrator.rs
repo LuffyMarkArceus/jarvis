@@ -51,7 +51,7 @@ use crate::context::{self, ContextPlan};
 use crate::error::{JarvisError, Result};
 use crate::mcp::client::McpClient;
 use crate::memory::{MemoryManager, Message};
-use crate::model::{ChatMessage, ModelToolCall, OllamaClient};
+use crate::model::{ChatMessage, ModelFunction, ModelToolCall, OllamaClient};
 use crate::permissions::{PermissionAction, PermissionManager};
 use crate::planner::{self, OfferedTool, TurnPlan};
 use crate::router::{self, Route};
@@ -64,7 +64,8 @@ use crate::tools::{
     system::{GetSystemInfoTool, ListProcessesTool},
     ToolRegistry,
 };
-use serde_json::Value;
+use crate::verify;
+use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -412,6 +413,31 @@ impl Orchestrator {
         let mut history_len = messages.len().saturating_sub(1);
         let mut trace: Vec<ToolOutcome> = Vec::new();
 
+        // A web question with no URL starts with a search, decided here rather
+        // than by the model. Measured on llama3.2:1b with `search` and `fetch`
+        // both offered: it calls `fetch` with the *question* as the URL, gets a
+        // contract error, and then answers from its weights instead of
+        // retrying. Choosing the first step is the one part of the chain a 1B
+        // model does not get right, and it is also the part that needs no
+        // judgement: a question about the world begins by finding pages.
+        //
+        // The step after it - reading the best page - is the same kind of
+        // decision, so it is made here too. The model is left with the part it
+        // is actually good at: putting the retrieved text into an answer.
+        if plan.web && !input_names_url(input) {
+            let outcomes = self
+                .web_first_steps(input, plan, confirm, &mut messages)
+                .await;
+            let search_blocked = outcomes.first().is_some_and(|o| o.status.is_blocked());
+            trace.extend(outcomes);
+            if search_blocked {
+                return Ok(render_blocked_report(&trace));
+            }
+            if cancel.is_some_and(Cancellation::is_cancelled) {
+                return self.cancelled_result(&trace);
+            }
+        }
+
         for _ in 0..MAX_ITERATIONS {
             if cancel.is_some_and(Cancellation::is_cancelled) {
                 return self.cancelled_result(&trace);
@@ -518,10 +544,70 @@ impl Orchestrator {
                     render_execution_report(&trace)
                 });
             }
-            return Ok(answer);
+            return Ok(self.grounded_answer(answer, input, &trace, plan.web));
         }
 
         Ok(render_execution_report(&trace))
+    }
+
+    /// The deterministic opening of a web turn: search, then read the top hit.
+    ///
+    /// Returns the outcomes in execution order and appends the matching
+    /// assistant/tool messages so the model sees the exchange as one it took
+    /// part in. A blocked search ends the chain (there is nothing to read); a
+    /// blocked fetch does not, because the search snippets are still a source
+    /// the model can answer from.
+    async fn web_first_steps(
+        &self,
+        input: &str,
+        plan: &TurnPlan,
+        confirm: Option<&dyn ConfirmationHandler>,
+        messages: &mut Vec<ChatMessage>,
+    ) -> Vec<ToolOutcome> {
+        let mut outcomes = Vec::new();
+
+        let Some(search) = plan
+            .tools
+            .iter()
+            .find(|t| t.name.starts_with("mcp.search."))
+            .map(|t| t.name.clone())
+        else {
+            return outcomes;
+        };
+
+        let outcome = self
+            .execute_offered(search, json!({ "query": input }), plan, confirm)
+            .await;
+        let succeeded = outcome.status == OutcomeStatus::Succeeded;
+        let seen = self.prompt_tool_output(&outcome.output);
+        push_synthetic_exchange(messages, &outcome, &seen);
+        outcomes.push(outcome);
+
+        if !succeeded {
+            return outcomes;
+        }
+
+        // The first URL in rank order is the page to read. This is a property
+        // of search output in general, not of one server's formatting.
+        let Some(url) = first_url(&seen) else {
+            return outcomes;
+        };
+        let Some(fetch) = plan
+            .tools
+            .iter()
+            .find(|t| t.name.starts_with("mcp.fetch."))
+            .map(|t| t.name.clone())
+        else {
+            return outcomes;
+        };
+
+        let outcome = self
+            .execute_offered(fetch, json!({ "url": url }), plan, confirm)
+            .await;
+        let seen = self.prompt_tool_output(&outcome.output);
+        push_synthetic_exchange(messages, &outcome, &seen);
+        outcomes.push(outcome);
+        outcomes
     }
 
     /// What to return when the user cancels a tool-capable turn.
@@ -553,6 +639,43 @@ impl Orchestrator {
             return format!("{}:\n{}", outcome.name, outcome.output);
         }
         render_tool_output(outcome)
+    }
+
+    /// Attach a caveat when the answer is not supported by retrieved material.
+    ///
+    /// Two different failures are reported the same way, because from the
+    /// user's side they are the same thing: a web answer that retrieved
+    /// nothing (all tool calls failed, or the model answered from memory) must
+    /// not read as if it came from a source. When sources *were* read, only
+    /// figures that appear nowhere in them are called out.
+    fn grounded_answer(
+        &self,
+        answer: String,
+        input: &str,
+        trace: &[ToolOutcome],
+        web: bool,
+    ) -> String {
+        let mut sources: Vec<&str> = trace
+            .iter()
+            .filter(|o| o.status == OutcomeStatus::Succeeded)
+            .map(|o| o.output.as_str())
+            .collect();
+
+        if sources.is_empty() {
+            if !web {
+                return answer;
+            }
+            // Measured failure: `fetch` was handed a question, failed, and the
+            // model answered "1.54.0" from weights with no hint that nothing
+            // had been read.
+            return format!(
+                "{}\n\nNote: I could not retrieve a source for this answer, so it comes from the model's own knowledge and may be out of date.",
+                answer.trim_end()
+            );
+        }
+
+        sources.push(input);
+        verify::with_caveat(answer, &sources)
     }
 
     // ---------------------------------------------------------------- prompts
@@ -653,7 +776,20 @@ impl Orchestrator {
     fn tool_system_prompt(&self, offered: &[OfferedTool]) -> String {
         let mut p = self.conversation_system_prompt();
         p.push_str("- Only report actions that appear in the tool results. Never claim an action succeeded unless it appears there.\n");
-        p.push_str("- To use a tool, emit a tool call with its arguments. Never repeat a tool's definition.\n\n");
+        p.push_str("- To use a tool, emit a tool call with its arguments. Never repeat a tool's definition.\n");
+        // When both are offered, say how they fit together. A small model
+        // will otherwise fetch a guessed URL and fail, or search and then
+        // answer from the snippet alone.
+        let has = |server: &str| {
+            offered
+                .iter()
+                .any(|t| t.name.split('.').nth(1) == Some(server))
+        };
+        if has("search") && has("fetch") {
+            p.push_str("- search takes a topic or question (words). fetch takes a URL. Never pass a search phrase to fetch.\n");
+            p.push_str("- Use search to find relevant pages, then fetch the most promising URL for details.\n");
+        }
+        p.push('\n');
         // Rendered from the same list that is sent as provider schemas. If
         // the model cannot call it, it is not described here.
         if let Some(block) = planner::render_tool_prompt(offered) {
@@ -1011,6 +1147,55 @@ fn normalize_arguments(args: Value) -> Value {
         }
         _ => args,
     }
+}
+
+/// Record a tool call the orchestrator made and its result, in the shape the
+/// provider expects from a model-initiated call.
+fn push_synthetic_exchange(messages: &mut Vec<ChatMessage>, outcome: &ToolOutcome, seen: &str) {
+    messages.push(ChatMessage::assistant_with_tool_calls(
+        "",
+        vec![ModelToolCall {
+            id: Some(Uuid::new_v4().to_string()),
+            function: ModelFunction {
+                index: None,
+                name: outcome.name.clone(),
+                arguments: outcome.args.clone(),
+            },
+        }],
+    ));
+    messages.push(ChatMessage::tool_result(&outcome.name, seen));
+}
+
+/// The first absolute URL in a tool's output.
+///
+/// Used to read the top search hit. Results are rendered one URL per line, so
+/// whitespace ends the URL. A trailing `)` is removed only when it has no
+/// matching `(` inside the URL: that trims markdown `[text](url)`, while
+/// keeping real addresses like `.../Rust_(programming_language)`.
+fn first_url(text: &str) -> Option<String> {
+    let start = text.find("http://").or_else(|| text.find("https://"))?;
+    let rest = &text[start..];
+    let end = rest
+        .find(|c: char| c.is_whitespace() || matches!(c, ']' | '>' | '"' | '\''))
+        .unwrap_or(rest.len());
+    let mut url = rest[..end].trim_end_matches(['.', ',', ';', ':', '!', '?']);
+    while url.ends_with(')') && url.matches(')').count() > url.matches('(').count() {
+        url = &url[..url.len() - 1];
+    }
+    if url.len() > "https://".len() {
+        Some(url.to_string())
+    } else {
+        None
+    }
+}
+
+/// Does the request already contain the address it wants read?
+///
+/// When it does, searching first would be busywork: the user said which page
+/// to read, and `fetch` is the whole job.
+fn input_names_url(input: &str) -> bool {
+    let lower = input.to_lowercase();
+    lower.contains("http://") || lower.contains("https://")
 }
 
 /// Clean up a model response before it becomes the user-facing answer.
@@ -1465,5 +1650,59 @@ fn blocked_report(trace: &[ToolOutcome]) -> Option<String> {
         Some(render_blocked_report(trace))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_first_url_is_the_top_result() {
+        let output = "Backend: wikipedia\nQuery: rust\n\n1. Rust\n   https://en.wikipedia.org/wiki/Rust\n   text\n2. Other\n   https://other.example\n";
+        assert_eq!(
+            first_url(output).as_deref(),
+            Some("https://en.wikipedia.org/wiki/Rust")
+        );
+    }
+
+    #[test]
+    fn trailing_punctuation_is_not_part_of_the_url() {
+        let output = "see https://example.com/page.";
+        assert_eq!(
+            first_url(output).as_deref(),
+            Some("https://example.com/page")
+        );
+    }
+
+    #[test]
+    fn a_url_containing_parentheses_is_kept_whole() {
+        let output = "1. Rust\n   https://en.wikipedia.org/wiki/Rust_(programming_language)\n";
+        assert_eq!(
+            first_url(output).as_deref(),
+            Some("https://en.wikipedia.org/wiki/Rust_(programming_language)")
+        );
+    }
+
+    #[test]
+    fn a_markdown_wrapper_is_trimmed() {
+        let output = "[result](https://example.com/page)";
+        assert_eq!(
+            first_url(output).as_deref(),
+            Some("https://example.com/page")
+        );
+    }
+
+    #[test]
+    fn text_without_a_url_yields_none() {
+        assert_eq!(first_url("no links here"), None);
+        assert_eq!(first_url("https://"), None);
+    }
+
+    #[test]
+    fn a_request_with_a_scheme_already_names_its_url() {
+        assert!(input_names_url("what does https://example.com say"));
+        assert!(input_names_url("read HTTP://EXAMPLE.COM"));
+        assert!(!input_names_url("what is the latest version of rust"));
     }
 }

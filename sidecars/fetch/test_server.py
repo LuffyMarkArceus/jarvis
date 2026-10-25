@@ -199,6 +199,27 @@ class FormattingTests(unittest.TestCase):
         self.assertIn("hello", out)
 
 
+class ArgumentContractTests(unittest.TestCase):
+    """A model that passes the wrong kind of argument should be told how to
+    use the tool, not handed a low-level urllib error it cannot act on."""
+
+    def test_a_search_phrase_is_rejected_with_guidance(self):
+        with self.assertRaises(ValueError) as ctx:
+            server.fetch_url("rust programming language")
+        message = str(ctx.exception)
+        self.assertIn("not a URL", message)
+        self.assertIn("search", message)
+
+    def test_an_empty_url_names_the_contract(self):
+        with self.assertRaises(ValueError) as ctx:
+            server.fetch_url("")
+        self.assertIn("http", str(ctx.exception))
+
+    def test_non_http_schemes_are_rejected(self):
+        with self.assertRaises(ValueError):
+            server.fetch_url("ftp://example.com/file")
+
+
 class ProtocolTests(unittest.TestCase):
     def call(self, request):
         buffer = io.StringIO()

@@ -385,7 +385,16 @@ def format_result(url: str, title: Optional[str], body: str, max_length: int) ->
 def fetch_url(url: str, max_length: int = DEFAULT_MAX_LENGTH) -> str:
     """Fetch *url* and return clean text. Raises on network/HTTP errors."""
     if not url:
-        raise ValueError("missing url")
+        raise ValueError("missing url: fetch needs an absolute http(s) URL")
+    # A small model will sometimes hand this tool a search phrase instead of an
+    # address. Say what the tool needs and which tool does the other job, so
+    # the next model turn can correct itself instead of giving up.
+    if not re.match(r"^https?://", url, re.I):
+        raise ValueError(
+            f"{url!r} is not a URL. fetch needs an absolute http:// or "
+            "https:// address; to find pages by topic, use the search tool "
+            "and fetch one of the URLs it returns."
+        )
     max_length = clamp_length(max_length)
     request = urllib.request.Request(
         url,
