@@ -303,11 +303,9 @@ fn repair_truncated_json(input: &str) -> Option<String> {
             '"' => in_string = true,
             '{' => stack.push('}'),
             '[' => stack.push(']'),
-            '}' | ']' => {
-                if stack.pop() != Some(c) {
-                    return None;
-                }
-            }
+            // The guard pops as it compares; a mismatch means the document
+            // was never going to parse, so repair is refused.
+            '}' | ']' if stack.pop() != Some(c) => return None,
             _ => {}
         }
     }

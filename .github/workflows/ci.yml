@@ -14,8 +14,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Pinned so a new clippy lint on `stable` cannot fail a pull request
+      # that changed nothing related to it. Bump both jobs together.
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.93.1
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
       - name: Build
@@ -30,7 +32,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.93.1
         with:
           components: rustfmt, clippy
       - name: Cache cargo
