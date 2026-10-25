@@ -51,9 +51,10 @@ use crate::context::{self, ContextPlan};
 use crate::error::{JarvisError, Result};
 use crate::mcp::client::McpClient;
 use crate::memory::{self, MemoryManager, Message};
-use crate::model::{ChatMessage, ModelFunction, ModelToolCall, OllamaClient};
+use crate::model::{ChatMessage, ModelFunction, ModelToolCall};
 use crate::permissions::{PermissionAction, PermissionManager};
 use crate::planner::{self, OfferedTool, TurnPlan};
+use crate::provider::{self, ChatRequest, Provider};
 use crate::router::{self, Route};
 use crate::tools::{
     filesystem::{
@@ -66,6 +67,7 @@ use crate::tools::{
 };
 use crate::verify;
 use serde_json::{json, Value};
+use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -143,7 +145,7 @@ struct ToolOutcome {
 
 pub struct Orchestrator {
     config: Config,
-    client: OllamaClient,
+    client: Arc<dyn Provider>,
     tools: ToolRegistry,
     memory: Option<MemoryManager>,
     session_id: String,
@@ -157,7 +159,15 @@ impl Orchestrator {
     }
 
     pub fn with_config(config: Config) -> Self {
-        let client = OllamaClient::new(&config.model.base_url);
+        // A bad provider name is a configuration mistake. Falling back to the
+        // local server keeps the assistant usable, but it must be visible.
+        let client = match provider::from_config(&config) {
+            Ok(provider) => provider,
+            Err(e) => {
+                warn!("{}; using the local Ollama server instead", e);
+                Arc::new(provider::OllamaProvider::new(&config.model.base_url))
+            }
+        };
         let mut tools = ToolRegistry::new();
         tools.register(Box::new(ListDirTool));
         tools.register(Box::new(ReadFileTool));
@@ -331,16 +341,17 @@ impl Orchestrator {
             0,
         );
         self.log_plan(&plan);
-        let options = self.model_options();
         let result = match sink {
             Some(sink) => {
                 self.client
                     .chat_turn_streaming(
-                        &self.config.model.default_model,
-                        Some(&plan.system),
-                        &plan.messages,
-                        None,
-                        Some(options),
+                        ChatRequest {
+                            model: &self.config.model.default_model,
+                            system: Some(&plan.system),
+                            messages: &plan.messages,
+                            tools: None,
+                            options: Some(self.model_options()),
+                        },
                         cancel,
                         sink,
                     )
@@ -348,12 +359,14 @@ impl Orchestrator {
             }
             None => {
                 self.client
-                    .chat_turn_cancellable(
-                        &self.config.model.default_model,
-                        Some(&plan.system),
-                        &plan.messages,
-                        None,
-                        Some(options),
+                    .chat_turn(
+                        ChatRequest {
+                            model: &self.config.model.default_model,
+                            system: Some(&plan.system),
+                            messages: &plan.messages,
+                            tools: None,
+                            options: Some(self.model_options()),
+                        },
                         cancel,
                     )
                     .await
@@ -449,12 +462,14 @@ impl Orchestrator {
 
             let result = self
                 .client
-                .chat_turn_cancellable(
-                    &self.config.model.default_model,
-                    Some(&system),
-                    &messages,
-                    Some(&tools),
-                    Some(self.model_options()),
+                .chat_turn(
+                    ChatRequest {
+                        model: &self.config.model.default_model,
+                        system: Some(&system),
+                        messages: &messages,
+                        tools: Some(&tools),
+                        options: Some(self.model_options()),
+                    },
                     cancel,
                 )
                 .await;

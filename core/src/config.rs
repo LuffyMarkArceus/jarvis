@@ -69,6 +69,11 @@ pub struct ModelConfig {
     /// temperatures.
     #[serde(default)]
     pub temperature: f32,
+    /// Environment variable holding the API key for a hosted provider.
+    ///
+    /// The key is never stored in the config file: that file is plain text and
+    /// often copied around. Ollama needs no key, so this is unset by default.
+    pub api_key_env: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -85,6 +90,7 @@ impl Default for ModelConfig {
             embedding_model: "nomic-embed-text".to_string(),
             native_tool_calling: true,
             temperature: 0.0,
+            api_key_env: None,
         }
     }
 }

@@ -226,7 +226,7 @@ fn build_request(
 }
 
 /// Await `future`, abandoning it when `cancel` fires.
-async fn cancellable<T>(
+pub(crate) async fn cancellable<T>(
     future: impl Future<Output = T>,
     cancel: Option<&Cancellation>,
 ) -> Result<T> {

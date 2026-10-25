@@ -5,8 +5,9 @@ Python sidecars + TypeScript UI.
 
 ## Status
 
-Phase 3 - web search, the `search -> fetch` chain, answer grounding, and recall
-across sessions.
+Phase 4 - web search, the `search -> fetch` chain, answer grounding, recall
+across sessions, and a provider abstraction (Ollama and any OpenAI-compatible
+server).
 
 ## Build
 
@@ -106,6 +107,45 @@ recall_max_chars = 600
 
 `jarvis recall "<text>"` searches the same index directly, without the filters
 that apply to prompt injection.
+
+## Model providers
+
+Everything above decides *what* to ask; one module decides *how* to ask it.
+Two providers are supported:
+
+| `provider` | wire format | `base_url` |
+| --- | --- | --- |
+| `ollama` (default) | Ollama native `/api/chat` | `http://127.0.0.1:11434` |
+| `openai` | OpenAI `/v1/chat/completions` | must include `/v1`, e.g. `http://127.0.0.1:11434/v1` |
+
+The second is not only for OpenAI. llama.cpp's server, vLLM, LM Studio,
+OpenRouter and Ollama's own `/v1` endpoint all speak the same format, so the
+same implementation serves them; only the URL and model name change.
+
+```toml
+[model]
+provider = "openai"
+base_url = "http://127.0.0.1:11434/v1"
+default_model = "llama3.2:1b"
+```
+
+A hosted provider needs a key, which is never written to the config file:
+
+```toml
+[model]
+api_key_env = "OPENROUTER_API_KEY"
+```
+
+The variable is read at startup and sent as a bearer token. If it is named but
+unset, the provider reports that rather than running unauthenticated.
+
+The two formats differ in ways the provider absorbs, so the rest of the code
+does not branch on them: tool results carry a `tool_call_id` that must match
+the model's call, tool arguments arrive as a JSON string (in fragments while
+streaming), and token counts are absent unless the request asks for them with
+`stream_options.include_usage`. Options are translated too - `num_ctx` has no
+equivalent and is dropped rather than sent as an unknown field, which some
+servers reject.
 
 ## MCP sidecars
 
