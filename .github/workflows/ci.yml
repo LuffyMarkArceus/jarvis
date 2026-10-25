@@ -22,6 +22,8 @@ jobs:
         run: cargo build --workspace
       - name: Run tests
         run: cargo test --workspace
+      - name: Test sidecars
+        run: python3 -m unittest discover -s sidecars/fetch -p 'test_*.py'
 
   lint:
     runs-on: ubuntu-latest

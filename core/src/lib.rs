@@ -12,6 +12,7 @@ pub mod memory;
 pub mod model;
 pub mod orchestrator;
 pub mod permissions;
+pub mod planner;
 pub mod router;
 pub mod tools;
 

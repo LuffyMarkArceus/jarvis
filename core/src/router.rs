@@ -25,8 +25,21 @@
 //! 7. Questions about running processes
 //! 8. `open` / `launch` / `start` followed by an application
 //! 9. "list the files" with no path -> the current directory
-//! 7. Anything that smells like a machine action -> `Route::Model`
-//! 8. Everything else -> `Route::Direct` (pure conversation)
+//! 10. Requests that need the outside world (a web lookup or an external
+//!     fact) -> `Route::Model`, with web tools offered by the planner
+//! 11. Anything that smells like a machine action -> `Route::Model`
+//! 12. Everything else -> `Route::Direct` (pure conversation)
+//!
+//! The rule for the web is deliberately about the *domain* ("this needs a
+//! source") rather than about individual sites. Site-specific rules do not
+//! scale and have to be added every time the model meets a new question.
+//!
+//! # Relationship to the planner
+//!
+//! The router answers *what kind of request is this*. [`crate::planner`]
+//! answers *which tools can serve it*. They share [`needs_web`] and
+//! [`needs_source`] so a request is never routed to a path whose only useful
+//! tool has been filtered out.
 
 use serde_json::{json, Value};
 use std::path::Path;
@@ -243,18 +256,6 @@ pub fn route(input: &str) -> Route {
         }
     }
 
-    // 2c. Factual queries that benefit from web search/fetch
-    if (lower.contains("millennium prize")
-        || lower.contains("millenium prize")
-        || lower.contains("who won the prize")
-        || lower.contains("clay institute"))
-        && (lower.contains("millennium")
-            || lower.contains("millenium")
-            || lower.contains("clay institute"))
-    {
-        return Route::Model;
-    }
-
     // 3. A search. Checked before the path rule because "search for X in
     //    /some/dir" mentions a path that must become the search root, not the
     //    thing to list.
@@ -311,13 +312,81 @@ pub fn route(input: &str) -> Route {
         };
     }
 
-    // 10. Looks like a machine action the router cannot pin down, or MCP usage.
+    // 10. A request that needs the outside world: a web lookup or an
+    //     external fact. This is deliberately domain-level - "this needs a
+    //     source" - rather than a list of websites. The planner offers the
+    //     web tools and the model decides which to call.
+    if needs_web(raw) || needs_source(raw) {
+        return Route::Model;
+    }
+
+    // 11. Looks like a machine action the router cannot pin down, or MCP usage.
     if lower.contains("mcp.") || has_action_word(&lower) {
         return Route::Model;
     }
 
-    // 11. Conversation.
+    // 12. Conversation.
     Route::Direct
+}
+
+/// Words that suggest the answer must come from the web rather than from
+/// the model's weights.
+const WEB_WORDS: &[&str] = &[
+    "url",
+    "website",
+    "webpage",
+    "web",
+    "internet",
+    "online",
+    "fetch",
+    "download",
+    "wikipedia",
+    "browse",
+    "google",
+    "news",
+    "latest",
+    "weather",
+    "price",
+    "stock",
+    "headline",
+    "headlines",
+];
+
+/// Phrases that ask for an external fact. They do not name a website: the
+/// point is that the answer needs a source, so a web tool should be offered.
+const SOURCE_PHRASES: &[&str] = &[
+    "millennium prize",
+    "millenium prize",
+    "clay institute",
+    "nobel prize",
+    "who won",
+    "has been solved",
+    "have been solved",
+    "record holder",
+    "population of",
+    "capital of",
+];
+
+/// Does the request ask for something that must come from the web?
+///
+/// Shared by the router (which sends it to the model) and the planner (which
+/// offers the web tools), so the two cannot disagree.
+pub fn needs_web(input: &str) -> bool {
+    let lower = input.to_lowercase();
+    if lower.contains("http://") || lower.contains("https://") {
+        return true;
+    }
+    let tokens = words(&lower);
+    WEB_WORDS.iter().any(|w| tokens.iter().any(|t| t == w))
+        || lower.contains("web page")
+        || lower.contains("look up")
+        || lower.contains("search the web")
+}
+
+/// Does the request ask for an external fact that needs a source?
+pub fn needs_source(input: &str) -> bool {
+    let lower = input.to_lowercase();
+    SOURCE_PHRASES.iter().any(|phrase| lower.contains(phrase))
 }
 
 /// Handle `/list`, `/read`, `/run`, `/info`, `/ls`, `/cat`, `/find`, `/stat`.
@@ -782,14 +851,27 @@ pub fn expand_tilde(path: &str) -> String {
 /// Extract a URL from the text
 fn extract_url(raw: &str) -> Option<String> {
     for token in raw.split_whitespace() {
-        let t = token.trim_matches(|c: char| {
+        // Quotes, commas and brackets around a URL are sentence punctuation,
+        // not part of the address. Parentheses are different: Wikipedia
+        // article URLs end in one (`Rust_(programming_language)`), so a
+        // trailing `)` is only punctuation when it has no matching `(`.
+        let mut candidate = token.trim_matches(|c: char| {
             matches!(
                 c,
-                '"' | '\'' | '`' | ',' | ';' | '?' | '!' | ')' | '(' | '[' | ']' | '>'
+                '"' | '\'' | '`' | ',' | ';' | '?' | '!' | '[' | ']' | '>' | '<'
             )
         });
-        if t.starts_with("http://") || t.starts_with("https://") {
-            return Some(t.to_string());
+        // A URL wrapped by the sentence: `(https://example.com/page)`.
+        if candidate.starts_with("(http") && candidate.ends_with(')') {
+            candidate = &candidate[1..candidate.len() - 1];
+        }
+        while candidate.ends_with(')')
+            && candidate.matches(')').count() > candidate.matches('(').count()
+        {
+            candidate = &candidate[..candidate.len() - 1];
+        }
+        if candidate.starts_with("http://") || candidate.starts_with("https://") {
+            return Some(candidate.to_string());
         }
     }
     None
@@ -814,6 +896,24 @@ mod tests {
             Route::Tool { name, args } => Some((name.as_str(), args.clone())),
             _ => None,
         }
+    }
+
+    #[test]
+    fn a_url_with_parentheses_is_not_truncated() {
+        let r = route("fetch https://en.wikipedia.org/wiki/Rust_(programming_language)");
+        let (name, args) = tool_of(&r).unwrap();
+        assert_eq!(name, "mcp.fetch.fetch");
+        assert_eq!(
+            args["url"],
+            "https://en.wikipedia.org/wiki/Rust_(programming_language)"
+        );
+    }
+
+    #[test]
+    fn a_url_wrapped_in_parentheses_loses_the_wrapping() {
+        let r = route("fetch (https://example.com/page)");
+        let (_, args) = tool_of(&r).unwrap();
+        assert_eq!(args["url"], "https://example.com/page");
     }
 
     #[test]

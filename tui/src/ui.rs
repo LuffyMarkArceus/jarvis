@@ -339,6 +339,26 @@ fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
+fn draw_recall(frame: &mut Frame, rows: &[crate::app::RecallRow], area: Rect) {
+    let items: Vec<ListItem> = rows
+        .iter()
+        .map(|row| {
+            let sid = if row.session_id.len() > 8 {
+                &row.session_id[..8]
+            } else {
+                &row.session_id
+            };
+            let text = format!("[{}] {}: {}", sid, row.role, row.snippet);
+            ListItem::new(Line::from(text))
+        })
+        .collect();
+
+    let list = List::new(items).block(Block::bordered().title(" Recall (Esc to close) "));
+    let popup = centered(area, 90, (rows.len() as u16 + 4).min(area.height * 2 / 3));
+    frame.render_widget(Clear, popup);
+    frame.render_widget(list, popup);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,24 +386,4 @@ mod tests {
         assert_eq!(popup.height, 6);
         assert!(popup.width <= area.width);
     }
-}
-
-fn draw_recall(frame: &mut Frame, rows: &[crate::app::RecallRow], area: Rect) {
-    let items: Vec<ListItem> = rows
-        .iter()
-        .map(|row| {
-            let sid = if row.session_id.len() > 8 {
-                &row.session_id[..8]
-            } else {
-                &row.session_id
-            };
-            let text = format!("[{}] {}: {}", sid, row.role, row.snippet);
-            ListItem::new(Line::from(text))
-        })
-        .collect();
-
-    let list = List::new(items).block(Block::bordered().title(" Recall (Esc to close) "));
-    let popup = centered(area, 90, (rows.len() as u16 + 4).min(area.height * 2 / 3));
-    frame.render_widget(Clear, popup);
-    frame.render_widget(list, popup);
 }

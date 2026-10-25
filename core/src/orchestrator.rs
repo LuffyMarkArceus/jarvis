@@ -53,6 +53,7 @@ use crate::mcp::client::McpClient;
 use crate::memory::{MemoryManager, Message};
 use crate::model::{ChatMessage, ModelToolCall, OllamaClient};
 use crate::permissions::{PermissionAction, PermissionManager};
+use crate::planner::{self, OfferedTool, TurnPlan};
 use crate::router::{self, Route};
 use crate::tools::{
     filesystem::{
@@ -256,9 +257,14 @@ impl Orchestrator {
         }
 
         let route = router::route(input);
-        info!("route: {:?}", route);
+        // One decision, one owner: the planner narrows the route and produces
+        // the exact tool set this turn may use. Both the provider request and
+        // the system prompt are rendered from `plan.tools`, so the model can
+        // never be told about a tool it cannot call.
+        let plan = planner::plan(input, route, &self.tools, &self.mcp.list_tools());
+        info!("route: {:?} tools: {:?}", plan.route, plan.names());
 
-        let answer = match route {
+        let answer = match &plan.route {
             // Pure conversation: no tools involved at all.
             Route::Direct => self.converse(input, &history, cancel, sink).await?,
 
@@ -270,7 +276,7 @@ impl Orchestrator {
                 // The tool is the whole turn: once it has run, its result is
                 // the answer even if the user has just cancelled. Dropping it
                 // would hide an action that really happened.
-                let outcome = self.execute_call(name, args, confirm).await;
+                let outcome = self.execute_call(name.clone(), args.clone(), confirm).await;
                 // A confirmation that was denied *because* the user cancelled
                 // is not a tool result worth persisting: the turn never ran.
                 // If the tool really ran, its report is still the answer.
@@ -280,9 +286,9 @@ impl Orchestrator {
                 self.answer_from_outcome(&outcome)
             }
 
-            // Ambiguous: let the model pick from the catalogue.
+            // Ambiguous: let the model pick from the tools this plan offers.
             Route::Model => {
-                self.model_with_tools(input, &history, confirm, cancel)
+                self.model_with_tools(input, &history, &plan, confirm, cancel)
                     .await?
             }
         };
@@ -381,157 +387,26 @@ impl Orchestrator {
         &self,
         input: &str,
         history: &[Message],
+        plan: &TurnPlan,
         confirm: Option<&dyn ConfirmationHandler>,
         cancel: Option<&Cancellation>,
     ) -> Result<String> {
-        let lower = input.to_lowercase();
-        let mut tools = Vec::new();
-
-        // Always include system info for general queries, but filter aggressively
-        let need_fs = lower.contains("file")
-            || lower.contains("dir")
-            || lower.contains("list")
-            || lower.contains("read")
-            || lower.contains("write")
-            || lower.contains("edit")
-            || lower.contains("search")
-            || lower.contains("/")
-            || lower.contains("~");
-        let need_shell = lower.contains("run")
-            || lower.contains("exec")
-            || lower.contains("command")
-            || lower.contains("install")
-            || lower.contains("open ")
-            || lower.contains("launch");
-        let need_process = lower.contains("process")
-            || lower.contains("cpu")
-            || lower.contains("memory")
-            || lower.contains("ram");
-        let need_fetch = lower.contains("fetch")
-            || lower.contains("http")
-            || lower.contains("url")
-            || lower.contains("website")
-            || lower.contains("download")
-            || lower.contains("wikipedia");
-        let need_system = lower.contains("os")
-            || lower.contains("system")
-            || lower.contains("hostname")
-            || lower.contains("arch")
-            || lower.contains("spec");
-
-        if need_fs {
-            for t in &self.tools.list() {
-                if t.starts_with("filesystem.") {
-                    // Find the tool schema
-                }
-            }
-            // Add native filesystem tools
-            for tool_name in [
-                "filesystem.list_dir",
-                "filesystem.read",
-                "filesystem.search",
-                "filesystem.stat",
-                "filesystem.write",
-                "filesystem.edit",
-            ] {
-                if let Some(schema) = self
-                    .tools
-                    .schemas()
-                    .iter()
-                    .find(|s| s["function"]["name"].as_str() == Some(tool_name))
-                {
-                    tools.push(schema.clone());
-                }
-            }
-            // Add relevant MCP filesystem tools
-            for t in self.mcp.list_tools() {
-                if t.server == "filesystem"
-                    && (t.name.contains("read")
-                        || t.name.contains("list")
-                        || t.name.contains("search")
-                        || t.name.contains("write")
-                        || t.name.contains("edit")
-                        || t.name == "get_file_info")
-                {
-                    tools.push(serde_json::json!({
-                        "type": "function",
-                        "function": {
-                            "name": t.full_name,
-                            "description": t.description,
-                            "parameters": t.schema,
-                        }
-                    }));
-                }
-            }
-        }
-        if need_shell {
-            if let Some(schema) = self
-                .tools
-                .schemas()
-                .iter()
-                .find(|s| s["function"]["name"].as_str() == Some("shell.run"))
-            {
-                tools.push(schema.clone());
-            }
-        }
-        if need_process {
-            if let Some(schema) = self
-                .tools
-                .schemas()
-                .iter()
-                .find(|s| s["function"]["name"].as_str() == Some("process.list"))
-            {
-                tools.push(schema.clone());
-            }
-        }
-        if need_fetch {
-            for t in self.mcp.list_tools() {
-                if t.server == "fetch" {
-                    tools.push(serde_json::json!({
-                        "type": "function",
-                        "function": {
-                            "name": t.full_name,
-                            "description": t.description,
-                            "parameters": t.schema,
-                        }
-                    }));
-                }
-            }
-        }
-        if need_system {
-            if let Some(schema) = self
-                .tools
-                .schemas()
-                .iter()
-                .find(|s| s["function"]["name"].as_str() == Some("system.info"))
-            {
-                tools.push(schema.clone());
-            }
-        }
-
-        // If no specific tools needed, include minimal set
-        if tools.is_empty() {
-            if let Some(schema) = self
-                .tools
-                .schemas()
-                .iter()
-                .find(|s| s["function"]["name"].as_str() == Some("system.info"))
-            {
-                tools.push(schema.clone());
-            }
-        }
+        // The offered tools are the request's tools. There is no second
+        // filter here, and no way for the prompt to mention anything else.
+        let tools = plan.schemas();
+        let system_prompt = self.tool_system_prompt(&plan.tools);
         let reserved = self.tool_schema_tokens(&tools);
-        let plan = context::assemble(
-            &self.tool_system_prompt(),
+        let assembled = context::assemble(
+            &system_prompt,
             input,
             history,
             &self.config.context,
             reserved,
         );
-        self.log_plan(&plan);
+        self.log_plan(&assembled);
 
-        let system = plan.system;
-        let mut messages = plan.messages;
+        let system = assembled.system;
+        let mut messages = assembled.messages;
         // How many leading messages are history. Everything after them is the
         // current request and the tool trace, which must never be dropped.
         let mut history_len = messages.len().saturating_sub(1);
@@ -580,7 +455,7 @@ impl Orchestrator {
                     calls.clone(),
                 ));
                 for call in calls {
-                    let outcome = self.execute_native_call(call, confirm).await;
+                    let outcome = self.execute_native_call(call, plan, confirm).await;
                     messages.push(ChatMessage::tool_result(
                         &outcome.name,
                         &self.prompt_tool_output(&outcome.output),
@@ -604,7 +479,7 @@ impl Orchestrator {
             if !text_calls.is_empty() {
                 messages.push(ChatMessage::text("assistant", &turn.message.content));
                 for call in &text_calls {
-                    let outcome = self.execute_text_call(call, confirm).await;
+                    let outcome = self.execute_text_call(call, plan, confirm).await;
                     messages.push(ChatMessage::text(
                         "user",
                         &format!(
@@ -775,16 +650,14 @@ impl Orchestrator {
     }
 
     /// System prompt for the ambiguous case, where the model may pick a tool.
-    fn tool_system_prompt(&self) -> String {
+    fn tool_system_prompt(&self, offered: &[OfferedTool]) -> String {
         let mut p = self.conversation_system_prompt();
-        p.push_str("- Only report actions that appear in the tool results. Never claim an action succeeded unless it appears there.\n\n");
-        p.push_str("Tools you can call:\n");
-        for (name, desc) in self.tools.describe() {
-            p.push_str(&format!("- {}: {}\n", name, desc));
-        }
-        // MCP tools are listed under the same names the model must call.
-        for t in self.mcp.list_tools() {
-            p.push_str(&format!("- {}: {}\n", t.full_name, t.description));
+        p.push_str("- Only report actions that appear in the tool results. Never claim an action succeeded unless it appears there.\n");
+        p.push_str("- To use a tool, emit a tool call with its arguments. Never repeat a tool's definition.\n\n");
+        // Rendered from the same list that is sent as provider schemas. If
+        // the model cannot call it, it is not described here.
+        if let Some(block) = planner::render_tool_prompt(offered) {
+            p.push_str(&block);
         }
         p
     }
@@ -829,21 +702,57 @@ impl Orchestrator {
     async fn execute_native_call(
         &self,
         call: &ModelToolCall,
+        plan: &TurnPlan,
         confirm: Option<&dyn ConfirmationHandler>,
     ) -> ToolOutcome {
         let name = call.function.name.clone();
         let args = normalize_arguments(call.function.arguments.clone());
-        self.execute_call(name, args, confirm).await
+        self.execute_offered(name, args, plan, confirm).await
     }
 
     /// Execute a tool call parsed out of the model's text.
     async fn execute_text_call(
         &self,
         call: &parser::ToolCall,
+        plan: &TurnPlan,
         confirm: Option<&dyn ConfirmationHandler>,
     ) -> ToolOutcome {
         let args = normalize_arguments(call.args.clone());
-        self.execute_call(call.name.clone(), args, confirm).await
+        self.execute_offered(call.name.clone(), args, plan, confirm)
+            .await
+    }
+
+    /// Run a model-requested call only if this turn's plan offered it.
+    ///
+    /// A hallucinated tool name must not become an execution path around the
+    /// planner. This is a correctness guard, not a permission check: the
+    /// permission system still runs for every call that gets this far.
+    async fn execute_offered(
+        &self,
+        name: String,
+        args: Value,
+        plan: &TurnPlan,
+        confirm: Option<&dyn ConfirmationHandler>,
+    ) -> ToolOutcome {
+        if !plan.allows(&name) {
+            let available = if plan.tools.is_empty() {
+                "none".to_string()
+            } else {
+                plan.names().join(", ")
+            };
+            return ToolOutcome {
+                name,
+                args,
+                status: OutcomeStatus::Failed,
+                output: format!(
+                    "That tool is not available for this request. Available tools: {}.",
+                    available
+                ),
+                result: None,
+                pattern: None,
+            };
+        }
+        self.execute_call(name, args, confirm).await
     }
 
     /// Run a single tool call through the permission gate and the registry.

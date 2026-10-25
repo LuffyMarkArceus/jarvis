@@ -1,19 +1,54 @@
 # Example MCP configuration for Jarvis
 #
-# Copy to ~/.config/jarvis/mcp.toml or merge into your config.
-# MCP servers are started at daemon startup (stdio). Tools are namespaced as
-# `mcp.<server>.<tool>` and go through the permission system like built-in tools.
+# Merge into ~/.config/jarvis/config.toml. Servers are started at daemon
+# startup over stdio. Their tools are namespaced as `mcp.<server>.<tool>` and
+# go through the permission system exactly like built-in tools.
+#
+# Paths beginning with `sidecars/` (or `${SIDECAR_DIR}`) are resolved at load
+# time to the sidecars shipped with this checkout, so no absolute path or
+# `/tmp` copy is needed.
+#
+# Tool selection
+# --------------
+# MCP servers are offered to the model only when the request needs them:
+#   * the request names the server or one of its tools,
+#   * the server sets `always_offer = true`, or
+#   * the request needs the web and the server is a web server
+#     (fetch/search/web/browser/http/crawl).
+#
+# Keep `always_offer` off for servers with a large tool surface: every offered
+# tool costs prompt budget and attention, and small local models degrade
+# quickly as the menu grows.
 
 [mcp]
 [[mcp.servers]]
 name = "fetch"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-fetch"]
+# Runs the fetch server from this repository. It returns clean text, with
+# HTML tags, scripts and styles removed.
+command = "python3"
+args = ["sidecars/fetch/server.py"]
 enabled = true
+always_offer = false
 env = {}
 
+# The MCP filesystem server duplicates the built-in `filesystem.*` tools,
+# which run in-process and are already integrated with the permission
+# system. Enabling both doubles the tool surface for no new capability, so
+# this server is off by default. Turn it on only if you need a feature the
+# built-ins lack (for example `move_file` or media reads), and prefer
+# `always_offer = false`.
+#
 # [[mcp.servers]]
 # name = "filesystem"
 # command = "npx"
-# args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/shrey"]
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/you"]
+# enabled = false
+# always_offer = false
+
+# A small, focused server is a good candidate for always_offer.
+#
+# [[mcp.servers]]
+# name = "notes"
+# command = "notes-mcp"
 # enabled = true
+# always_offer = true

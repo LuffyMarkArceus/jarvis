@@ -64,6 +64,15 @@ pub fn parse_tool_calls(response: &str) -> Vec<ToolCall> {
                     i = end;
                     continue;
                 }
+                // The object never closes. A lone missing `}` at the very end
+                // is recoverable; a value cut mid-string is not.
+                if let Some(repaired) = repair_truncated_json(&response[i..]) {
+                    let parsed = try_parse_formats(&repaired).unwrap_or_default();
+                    if !parsed.is_empty() {
+                        calls.extend(parsed);
+                        break;
+                    }
+                }
             }
             i += 1;
         }
@@ -120,7 +129,11 @@ fn try_parse_formats(json_str: &str) -> Result<Vec<ToolCall>, ()> {
 
     let v: Value = match serde_json::from_str(json_str) {
         Ok(v) => v,
-        Err(_) => return Err(()),
+        Err(_) => match repair_truncated_json(json_str).and_then(|s| serde_json::from_str(&s).ok())
+        {
+            Some(v) => v,
+            None => return Err(()),
+        },
     };
 
     // Format 1, 2 and 4: arrays of calls under "tool_calls" or "tools".
@@ -251,6 +264,65 @@ fn parse_single_call(tc: &Value) -> Option<ToolCall> {
     None
 }
 
+/// Close a JSON object that was cut off at a structural boundary.
+///
+/// Small models regularly run out of completion tokens after writing all the
+/// arguments but before the final `}`. Discarding a call whose every value is
+/// complete throws away a correct action for no reason.
+///
+/// The repair is deliberately conservative:
+///
+/// * it never touches a document that ends inside a string, so a value that
+///   was cut mid-way (`"/tmp/fo`) can never be "completed" into the wrong
+///   path;
+/// * it refuses mismatched brackets and absurd nesting depth.
+///
+/// Anything that fails these checks stays malformed, and the orchestrator
+/// keeps telling the user that nothing ran.
+fn repair_truncated_json(input: &str) -> Option<String> {
+    const MAX_CLOSERS: usize = 8;
+
+    let mut stack: Vec<char> = Vec::new();
+    let mut in_string = false;
+    let mut escape = false;
+
+    for c in input.chars() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if in_string {
+            match c {
+                '\\' => escape = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '{' => stack.push('}'),
+            '[' => stack.push(']'),
+            '}' | ']' => {
+                if stack.pop() != Some(c) {
+                    return None;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if in_string || stack.is_empty() || stack.len() > MAX_CLOSERS {
+        return None;
+    }
+
+    let mut out = input.trim_end().to_string();
+    while let Some(closer) = stack.pop() {
+        out.push(closer);
+    }
+    Some(out)
+}
+
 /// Tool arguments are sometimes a JSON-encoded string rather than an object.
 fn normalize_args(args: Value) -> Value {
     match &args {
@@ -376,12 +448,40 @@ mod tests {
     }
 
     #[test]
-    fn truncated_tool_json_is_recognised_as_such() {
-        // The exact 153-byte reply a 1B model gave for "install docker":
-        // a function call with the final brace missing.
+    fn a_call_missing_only_its_final_brace_is_repaired() {
+        // The exact 153-byte reply a 1B model gave for "install docker": the
+        // arguments are complete and the final `}` is missing. Throwing this
+        // away discards a call the model fully specified.
         let truncated = r#"{"type":"function","function":{"name":"filesystem.edit","parameters": {"path": "/usr/local/bin/docker", "old_string": "docker", "new_string": "docker2"}}"#;
+        let call = single(truncated);
+        assert_eq!(call.name, "filesystem.edit");
+        assert_eq!(call.args["new_string"], "docker2");
+    }
+
+    #[test]
+    fn a_value_cut_mid_string_is_never_completed() {
+        // Repairing this would invent the path "/tmp/fo", which the model
+        // never asked for. It must stay malformed.
+        let truncated = r#"{"type":"function","function":{"name":"filesystem.write","parameters":{"path":"/tmp/fo"#;
         assert!(parse_tool_calls(truncated).is_empty());
         assert!(looks_like_tool_call(truncated));
+    }
+
+    #[test]
+    fn mismatched_brackets_are_not_repaired() {
+        let broken = r#"{"type":"function","function":{"name":"filesystem.read","parameters":{"path":"/tmp"]"#;
+        assert!(parse_tool_calls(broken).is_empty());
+    }
+
+    #[test]
+    fn parses_the_exact_echoed_definition_from_llama() {
+        let raw = r#"{"type":"function","function":{"name": "mcp.fetch.fetch","description": "(fetch MCP server) Fetch a URL and return its readable text content (HTML is stripped, scripts and styles removed)", "parameters": {"url": "https://en.wikipedia.org/wiki/Rust_(programming_language)"}}}"#;
+        let call = single(raw);
+        assert_eq!(call.name, "mcp.fetch.fetch");
+        assert_eq!(
+            call.args["url"],
+            "https://en.wikipedia.org/wiki/Rust_(programming_language)"
+        );
     }
 
     #[test]

@@ -100,6 +100,7 @@ impl McpClient {
                     schema: mcp_tool
                         .input_schema
                         .unwrap_or(serde_json::json!({"type": "object"})),
+                    always_offer: server.always_offer,
                 });
                 info!("Discovered MCP tool: {}", full_name);
             }

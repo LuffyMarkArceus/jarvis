@@ -45,4 +45,10 @@ pub struct DiscoveredTool {
     pub full_name: String,
     pub description: String,
     pub schema: Value,
+    /// Whether the server opted into being offered on every model turn.
+    ///
+    /// Small, focused servers (notes, git) can set this; broad ones
+    /// (filesystem) should not, or the model is handed a menu it cannot
+    /// navigate.
+    pub always_offer: bool,
 }

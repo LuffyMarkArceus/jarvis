@@ -118,6 +118,13 @@ pub struct McpServerConfig {
     pub env: std::collections::HashMap<String, String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Offer this server's tools on every model turn.
+    ///
+    /// Off by default. A server with a large tool surface should be selected
+    /// by intent (see [`crate::planner`]) rather than always present, because
+    /// every offered tool costs prompt budget and attention on small models.
+    #[serde(default)]
+    pub always_offer: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -255,8 +262,99 @@ impl Config {
             }
         }
 
+        config.resolve_sidecar_paths();
         config
     }
+
+    /// Turn `sidecars/...` arguments into absolute paths.
+    ///
+    /// A config that points at a script in `/tmp` works exactly once. This
+    /// makes the shipped sidecars addressable from a checkout, an installed
+    /// tree, or an explicit override, without the user hand-writing an
+    /// absolute path.
+    fn resolve_sidecar_paths(&mut self) {
+        let Some(mcp) = self.mcp.as_mut() else {
+            return;
+        };
+        let root = sidecar_dir();
+        for server in &mut mcp.servers {
+            for arg in &mut server.args {
+                if let Some(resolved) = expand_sidecar_arg(arg, root.as_deref()) {
+                    *arg = resolved;
+                }
+            }
+        }
+    }
+}
+
+/// The directory holding the sidecars shipped with this build.
+///
+/// Checked in order: `JARVIS_SIDECAR_DIR`, an ancestor of the executable
+/// (a `target/debug` binary), an ancestor of the working directory (running
+/// from a checkout), and finally the data directory of an installed tree.
+pub fn sidecar_dir() -> Option<PathBuf> {
+    if let Ok(explicit) = std::env::var("JARVIS_SIDECAR_DIR") {
+        if !explicit.is_empty() {
+            return Some(PathBuf::from(explicit));
+        }
+    }
+
+    let looks_right = |dir: &std::path::Path| dir.join("fetch/server.py").is_file();
+
+    let from_exe = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(PathBuf::from))
+        .and_then(|dir| find_ancestor(&dir, looks_right));
+    if from_exe.is_some() {
+        return from_exe;
+    }
+
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(found) = find_ancestor(&cwd, looks_right) {
+            return Some(found);
+        }
+    }
+
+    let installed = default_data_dir().join("sidecars");
+    if looks_right(&installed) {
+        return Some(installed);
+    }
+
+    None
+}
+
+fn find_ancestor(
+    start: &std::path::Path,
+    predicate: impl Fn(&std::path::Path) -> bool,
+) -> Option<PathBuf> {
+    let mut current = Some(start);
+    while let Some(dir) = current {
+        let candidate = dir.join("sidecars");
+        if predicate(&candidate) {
+            return Some(candidate);
+        }
+        current = dir.parent();
+    }
+    None
+}
+
+/// Expand one MCP `args` entry.
+///
+/// Supports `${SIDECAR_DIR}` and a bare relative `sidecars/...` path, which
+/// is what the shipped example config uses.
+fn expand_sidecar_arg(arg: &str, root: Option<&std::path::Path>) -> Option<String> {
+    let root = root?.to_string_lossy();
+
+    if let Some(rest) = arg.strip_prefix("${SIDECAR_DIR}") {
+        return Some(format!("{}{}", root.trim_end_matches('/'), rest));
+    }
+    if arg == "sidecars" {
+        return Some(root.to_string());
+    }
+    if let Some(rest) = arg.strip_prefix("sidecars/") {
+        return Some(format!("{}/{}", root.trim_end_matches('/'), rest));
+    }
+    None
 }
 
 #[cfg(test)]
@@ -314,5 +412,57 @@ mod tests {
             ..ContextConfig::default()
         };
         assert_eq!(greedy.prompt_budget(), 4096 / 2 - 4096 / 2 / 8);
+    }
+    #[test]
+    fn sidecar_placeholder_is_expanded() {
+        let root = std::path::Path::new("/opt/jarvis/sidecars");
+        assert_eq!(
+            expand_sidecar_arg("${SIDECAR_DIR}/fetch/server.py", Some(root)).as_deref(),
+            Some("/opt/jarvis/sidecars/fetch/server.py")
+        );
+    }
+
+    #[test]
+    fn relative_sidecar_path_is_expanded() {
+        let root = std::path::Path::new("/opt/jarvis/sidecars");
+        assert_eq!(
+            expand_sidecar_arg("sidecars/fetch/server.py", Some(root)).as_deref(),
+            Some("/opt/jarvis/sidecars/fetch/server.py")
+        );
+        assert_eq!(
+            expand_sidecar_arg("sidecars", Some(root)).as_deref(),
+            Some("/opt/jarvis/sidecars")
+        );
+    }
+
+    #[test]
+    fn ordinary_arguments_are_untouched() {
+        let root = std::path::Path::new("/opt/jarvis/sidecars");
+        assert_eq!(expand_sidecar_arg("--flag", Some(root)), None);
+        assert_eq!(expand_sidecar_arg("/usr/bin/python3", Some(root)), None);
+    }
+
+    #[test]
+    fn without_a_root_nothing_is_guessed() {
+        assert_eq!(expand_sidecar_arg("sidecars/fetch/server.py", None), None);
+    }
+
+    #[test]
+    fn mcp_servers_opt_into_always_offer() {
+        let text = r#"
+            [mcp]
+            [[mcp.servers]]
+            name = "notes"
+            command = "notes-mcp"
+            always_offer = true
+
+            [[mcp.servers]]
+            name = "filesystem"
+            command = "fs-mcp"
+        "#;
+        let config: Config = toml::from_str(text).expect("valid");
+        let servers = config.mcp.expect("mcp").servers;
+        assert!(servers[0].always_offer);
+        assert!(!servers[1].always_offer);
     }
 }
