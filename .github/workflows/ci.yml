@@ -11,9 +11,11 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # Pinned to a specific image: `ubuntu-latest` is scheduled to move to
+    # Ubuntu 26, and a silent image change is not a CI failure worth debugging.
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # Pinned so a new clippy lint on `stable` cannot fail a pull request
       # that changed nothing related to it. Bump both jobs together.
       - name: Install Rust
@@ -30,9 +32,11 @@ jobs:
           python3 -m unittest discover -s sidecars/search -p 'test_*.py'
 
   lint:
-    runs-on: ubuntu-latest
+    # Pinned to a specific image: `ubuntu-latest` is scheduled to move to
+    # Ubuntu 26, and a silent image change is not a CI failure worth debugging.
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.93.1
         with:
@@ -42,4 +46,4 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
