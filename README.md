@@ -5,7 +5,8 @@ Python sidecars + TypeScript UI.
 
 ## Status
 
-Phase 2 - web search, a `search -> fetch` chain, and answer grounding.
+Phase 3 - web search, the `search -> fetch` chain, answer grounding, and recall
+across sessions.
 
 ## Build
 
@@ -68,6 +69,43 @@ Two guards keep the answer honest:
 
 The answer is never rewritten, only annotated: the note says what could not be
 confirmed, and the user decides what to do with it.
+
+## Memory
+
+Every turn is stored in SQLite (`memory.db`) and indexed with FTS5. Before a
+turn the assistant recalls a few relevant messages from *other* sessions and
+puts them in the system prompt, labelled as earlier context. Without this a
+`jarvis ask` starts as a stranger every time, because each one is a new
+session.
+
+The query is not the raw question. An FTS5 `MATCH` treats punctuation as syntax,
+and a natural question is mostly stopwords, so the request is reduced to
+significant terms joined with `OR` (each quoted, so a word like `OR` cannot act
+as an operator). Hyphenated identifiers such as `rust-analyzer` stay whole.
+
+Three filters keep the block useful rather than noisy:
+
+* The current session is excluded - its recent messages are already in the
+  prompt.
+* Identical text is deduplicated, so the same exchange stored in five sessions
+  counts once.
+* A recalled message that is just the current question repeated is dropped. So
+  is any assistant answer that admitted it had no source ("as of my knowledge
+  cutoff", or our own "does not appear in the sources I read" note): memory
+  should not teach the model its own past failure.
+
+The block is capped (`memory.recall_limit`, `memory.recall_max_chars`) and can
+be turned off:
+
+```toml
+[memory]
+recall_enabled = true
+recall_limit = 3
+recall_max_chars = 600
+```
+
+`jarvis recall "<text>"` searches the same index directly, without the filters
+that apply to prompt injection.
 
 ## MCP sidecars
 
@@ -147,7 +185,9 @@ python3 -m unittest discover -s sidecars/fetch -p 'test_*.py'
 python3 -m unittest discover -s sidecars/search -p 'test_*.py'
 ```
 
-The Rust suite includes golden routing cases (`core/tests/routing_golden.rs`)
-and MCP client integration tests against a real stdio subprocess
-(`core/tests/mcp_stdio.rs`). The Python suites cover HTML extraction, search
-backends, query normalisation and the JSON-RPC protocol without network access.
+The Rust suite includes golden routing cases (`core/tests/routing_golden.rs`),
+MCP client integration tests against a real stdio subprocess
+(`core/tests/mcp_stdio.rs`), and memory tests that build a temporary database
+to check recall, exclusion and deduplication. The Python suites cover HTML
+extraction, search backends, query normalisation and the JSON-RPC protocol
+without network access.

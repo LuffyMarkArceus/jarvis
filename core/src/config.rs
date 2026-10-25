@@ -94,6 +94,15 @@ impl Default for ModelConfig {
 pub struct MemoryConfig {
     pub db_path: PathBuf,
     pub vector_dim: usize,
+    /// Recall relevant past messages into the prompt before a turn.
+    ///
+    /// On by default: without it, every `jarvis ask` starts as a stranger
+    /// because each command is a fresh session.
+    pub recall_enabled: bool,
+    /// How many recalled messages may enter one prompt.
+    pub recall_limit: usize,
+    /// Character budget for the rendered recall block.
+    pub recall_max_chars: usize,
 }
 
 impl Default for MemoryConfig {
@@ -101,6 +110,9 @@ impl Default for MemoryConfig {
         Self {
             db_path: default_data_dir().join("memory.db"),
             vector_dim: 768,
+            recall_enabled: true,
+            recall_limit: 3,
+            recall_max_chars: 600,
         }
     }
 }

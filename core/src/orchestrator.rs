@@ -50,7 +50,7 @@ use crate::config::Config;
 use crate::context::{self, ContextPlan};
 use crate::error::{JarvisError, Result};
 use crate::mcp::client::McpClient;
-use crate::memory::{MemoryManager, Message};
+use crate::memory::{self, MemoryManager, Message};
 use crate::model::{ChatMessage, ModelFunction, ModelToolCall, OllamaClient};
 use crate::permissions::{PermissionAction, PermissionManager};
 use crate::planner::{self, OfferedTool, TurnPlan};
@@ -324,7 +324,7 @@ impl Orchestrator {
         sink: Option<&UnboundedSender<String>>,
     ) -> Result<String> {
         let plan = context::assemble(
-            &self.conversation_system_prompt(),
+            &self.with_recall(input, self.conversation_system_prompt()),
             input,
             history,
             &self.config.context,
@@ -395,7 +395,7 @@ impl Orchestrator {
         // The offered tools are the request's tools. There is no second
         // filter here, and no way for the prompt to mention anything else.
         let tools = plan.schemas();
-        let system_prompt = self.tool_system_prompt(&plan.tools);
+        let system_prompt = self.with_recall(input, self.tool_system_prompt(&plan.tools));
         let reserved = self.tool_schema_tokens(&tools);
         let assembled = context::assemble(
             &system_prompt,
@@ -798,6 +798,40 @@ impl Orchestrator {
         p
     }
 
+    /// Append what earlier sessions know about this request.
+    ///
+    /// Every `jarvis ask` is a new session, so without this the assistant
+    /// meets the same user as a stranger each time. The current session is
+    /// excluded: its recent messages are already in `history`.
+    fn with_recall(&self, input: &str, prompt: String) -> String {
+        append_recall(prompt, self.recall_block(input))
+    }
+
+    fn recall_block(&self, input: &str) -> Option<String> {
+        if !self.config.memory.recall_enabled {
+            return None;
+        }
+        let memory = self.memory.as_ref()?;
+        let results = memory
+            .recall_in(
+                input,
+                self.config.memory.recall_limit,
+                Some(&self.session_id),
+            )
+            .ok()?;
+        // Asking an old question again matches that question in FTS; there is
+        // nothing to remember and it must not pose as memory.
+        let results: Vec<_> = results
+            .into_iter()
+            .filter(|result| !memory::is_echo(result, input))
+            .collect();
+        let block = memory::render_recall(&results, self.config.memory.recall_max_chars);
+        if block.is_some() {
+            info!("recall: {} earlier message(s) added", results.len());
+        }
+        block
+    }
+
     /// Recent history, oldest first. How much of it reaches the model is
     /// decided by [`crate::context::assemble`], not here.
     fn history_for_prompt(&self) -> Vec<Message> {
@@ -1187,6 +1221,19 @@ fn first_url(text: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Append the recall block to a system prompt, if there is one.
+///
+/// The blank line keeps it visually separate from the instructions above;
+/// without it a small model reads the remembered text as another rule.
+fn append_recall(mut prompt: String, block: Option<String>) -> String {
+    let Some(block) = block else {
+        return prompt;
+    };
+    prompt.push('\n');
+    prompt.push_str(&block);
+    prompt
 }
 
 /// Does the request already contain the address it wants read?
@@ -1697,6 +1744,17 @@ mod tests {
     fn text_without_a_url_yields_none() {
         assert_eq!(first_url("no links here"), None);
         assert_eq!(first_url("https://"), None);
+    }
+
+    #[test]
+    fn a_recall_block_is_separated_from_the_instructions() {
+        let with = append_recall("Be brief.".to_string(), Some("Earlier: x".to_string()));
+        assert_eq!(with, "Be brief.\nEarlier: x");
+    }
+
+    #[test]
+    fn no_recall_leaves_the_prompt_untouched() {
+        assert_eq!(append_recall("Be brief.".to_string(), None), "Be brief.");
     }
 
     #[test]
