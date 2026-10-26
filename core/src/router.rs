@@ -276,7 +276,13 @@ pub fn route(input: &str) -> Route {
 
     // 5. A path was mentioned. This is checked before the system-info rules
     //    because a path such as /etc/hostname contains the word "hostname".
+    //    Only for reading: a request to change the path goes to the model,
+    //    whose write tools ask first. Answering "delete /tmp/old.log" with a
+    //    listing of /tmp reads as if the request had been handled.
     if let Some(path) = first_path(raw, &lower) {
+        if wants_change(&lower) {
+            return Route::Model;
+        }
         return Route::Tool {
             name: path_tool(&path, &lower).to_string(),
             args: json!({ "path": path }),
@@ -859,6 +865,33 @@ fn mentions_files(lower: &str) -> bool {
 }
 
 /// Does the request look like it wants something done on the machine?
+/// Verbs that ask for something on disk to change. Whole words only, so a
+/// path such as `/tmp/created` does not count.
+const CHANGE_WORDS: &[&str] = &[
+    "create",
+    "write",
+    "edit",
+    "append",
+    "delete",
+    "remove",
+    "rename",
+    "move",
+    "copy",
+    "overwrite",
+    "touch",
+    "mkdir",
+    "save",
+    "modify",
+    "replace",
+    "insert",
+];
+
+fn wants_change(lower: &str) -> bool {
+    words(lower)
+        .iter()
+        .any(|w| CHANGE_WORDS.contains(&w.as_str()))
+}
+
 fn has_action_word(lower: &str) -> bool {
     words(lower)
         .iter()

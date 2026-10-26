@@ -85,6 +85,15 @@ const GOLDEN: &[(&str, Expect)] = &[
     ("when did the second world war end", Expect::Direct),
     // ---- ambiguous machine actions --------------------------------------
     ("create a file called notes.md", Expect::Model),
+    // A path does not make a change into a read. These listed the directory
+    // and presented the listing as the answer; found by the eval suite.
+    (
+        "create a file called notes.md in /tmp containing hello",
+        Expect::Model,
+    ),
+    ("write hello to /tmp/a.txt", Expect::Model),
+    ("delete /tmp/old.log", Expect::Model),
+    ("rename /tmp/a.txt to /tmp/b.txt", Expect::Model),
     ("check the git status of this repo", Expect::Model),
 ];
 
