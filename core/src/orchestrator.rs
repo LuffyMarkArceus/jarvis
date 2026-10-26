@@ -51,7 +51,7 @@ use crate::context::{self, ContextPlan};
 use crate::error::{JarvisError, Result};
 use crate::mcp::client::McpClient;
 use crate::memory::{self, MemoryManager, Message};
-use crate::model::{ChatMessage, ModelFunction, ModelToolCall};
+use crate::model::{ChatMessage, ChatTurn, ModelFunction, ModelToolCall};
 use crate::permissions::{PermissionAction, PermissionManager};
 use crate::planner::{self, OfferedTool, TurnPlan};
 use crate::provider::{self, ChatRequest, Provider};
@@ -143,6 +143,102 @@ struct ToolOutcome {
     pattern: Option<String>,
 }
 
+/// Everything observable about one turn, not just its answer.
+///
+/// The answer alone cannot tell a correct turn from a lucky one: "Here are
+/// the files" reads the same whether `list_dir` ran or the model made the
+/// listing up. The eval harness grades the route and the tool calls as well
+/// as the text, and it needs them from the orchestrator rather than from
+/// parsing logs.
+#[derive(Debug, Clone, Default)]
+pub struct TurnReport {
+    pub answer: String,
+    /// The route after the planner narrowed it: `Direct`, `Model` or
+    /// `Tool(name)`, in the same spelling as the golden routing test.
+    pub route: String,
+    /// The tools this turn was allowed to use.
+    pub offered: Vec<String>,
+    /// Every tool call attempted, in order, including refused ones.
+    pub calls: Vec<ToolCallRecord>,
+    pub model_calls: u32,
+    /// Summed over model calls. `None` if the provider reported no counts.
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolCallRecord {
+    pub name: String,
+    pub args: Value,
+    /// `executed`, `failed`, `denied`, `declined`, `needs_confirmation`, or
+    /// `not_offered` for a call outside the turn's plan.
+    pub status: &'static str,
+}
+
+/// Collects a [`TurnReport`] while a turn runs.
+///
+/// Passed down explicitly rather than stored on the orchestrator: the daemon
+/// shares one orchestrator, and a field would mix up two turns running at
+/// once.
+#[derive(Default)]
+struct TurnRecorder {
+    calls: std::sync::Mutex<Vec<ToolCallRecord>>,
+    model: std::sync::Mutex<(u32, Option<u64>, Option<u64>)>,
+}
+
+impl TurnRecorder {
+    fn tool(&self, outcome: &ToolOutcome, status: &'static str) {
+        self.calls.lock().unwrap().push(ToolCallRecord {
+            name: outcome.name.clone(),
+            args: outcome.args.clone(),
+            status,
+        });
+    }
+
+    fn model_turn(&self, turn: &ChatTurn) {
+        let mut model = self.model.lock().unwrap();
+        model.0 += 1;
+        if let Some(n) = turn.prompt_tokens {
+            model.1 = Some(model.1.unwrap_or(0) + n);
+        }
+        if let Some(n) = turn.completion_tokens {
+            model.2 = Some(model.2.unwrap_or(0) + n);
+        }
+    }
+
+    fn finish(self, answer: String, plan: &TurnPlan) -> TurnReport {
+        let (model_calls, prompt_tokens, completion_tokens) = *self.model.lock().unwrap();
+        TurnReport {
+            answer,
+            route: route_label(&plan.route),
+            offered: plan.names().into_iter().map(String::from).collect(),
+            calls: self.calls.into_inner().unwrap(),
+            model_calls,
+            prompt_tokens,
+            completion_tokens,
+        }
+    }
+}
+
+/// The route in the spelling used by the golden routing test and eval cases.
+pub fn route_label(route: &Route) -> String {
+    match route {
+        Route::Direct => "Direct".to_string(),
+        Route::Model => "Model".to_string(),
+        Route::Tool { name, .. } => format!("Tool({})", name),
+    }
+}
+
+fn status_label(status: &OutcomeStatus) -> &'static str {
+    match status {
+        OutcomeStatus::Succeeded => "executed",
+        OutcomeStatus::Failed => "failed",
+        OutcomeStatus::Denied => "denied",
+        OutcomeStatus::Declined => "declined",
+        OutcomeStatus::NeedsConfirmation => "needs_confirmation",
+    }
+}
+
 pub struct Orchestrator {
     config: Config,
     client: Arc<dyn Provider>,
@@ -164,6 +260,32 @@ impl Orchestrator {
     /// who chose local-only it would hide a typo behind a working assistant.
     pub fn with_config(config: Config) -> Result<Self> {
         let client = provider::from_config(&config)?;
+        let permissions = PermissionManager::new(&config)?;
+        let orchestrator = Self::with_parts(config, client, permissions);
+        // Start MCP servers in the background: a slow or broken server must
+        // not delay the first prompt, and discovery results simply appear in
+        // the cache when they are ready.
+        let mcp_startup = orchestrator.mcp.clone();
+        let cfg_clone = orchestrator.config.clone();
+        tokio::spawn(async move {
+            if let Err(e) = mcp_startup.start_from_config(&cfg_clone).await {
+                warn!("MCP startup failed: {}", e);
+            }
+        });
+        Ok(orchestrator)
+    }
+
+    /// Build from explicit parts, without starting MCP servers.
+    ///
+    /// `with_config` is the production entry point. This one lets the eval
+    /// harness and tests supply a scripted provider and a throwaway
+    /// permission policy instead of the user's real ones, and start MCP
+    /// with [`Orchestrator::start_mcp`] when they need it to be ready.
+    pub fn with_parts(
+        config: Config,
+        client: Arc<dyn Provider>,
+        permissions: PermissionManager,
+    ) -> Self {
         let mut tools = ToolRegistry::new();
         tools.register(Box::new(ListDirTool));
         tools.register(Box::new(ReadFileTool));
@@ -179,27 +301,23 @@ impl Orchestrator {
         if let Some(ref m) = memory {
             let _ = m.create_session(&session_id);
         }
-        let permissions = PermissionManager::new(&config).expect("Failed to init permissions");
-        let mcp = McpClient::new();
-        // Start MCP servers in the background: a slow or broken server must
-        // not delay the first prompt, and discovery results simply appear in
-        // the cache when they are ready.
-        let mcp_startup = mcp.clone();
-        let cfg_clone = config.clone();
-        tokio::spawn(async move {
-            if let Err(e) = mcp_startup.start_from_config(&cfg_clone).await {
-                warn!("MCP startup failed: {}", e);
-            }
-        });
-        Ok(Self {
+        Self {
             config,
             client,
             tools,
             memory,
             session_id,
             permissions,
-            mcp,
-        })
+            mcp: McpClient::new(),
+        }
+    }
+
+    /// Start the configured MCP servers and wait until discovery finishes.
+    ///
+    /// A web eval case that ran before discovery would be planned without
+    /// the search tools and fail for a reason unrelated to the model.
+    pub async fn start_mcp(&self) -> Result<()> {
+        self.mcp.start_from_config(&self.config).await
     }
 
     /// The provider and model a turn will be sent to, for `jarvis status`.
@@ -257,9 +375,24 @@ impl Orchestrator {
         cancel: Option<&Cancellation>,
         sink: Option<&UnboundedSender<String>>,
     ) -> Result<String> {
+        self.run_turn(input, confirm, cancel, sink)
+            .await
+            .map(|report| report.answer)
+    }
+
+    /// Handle one user turn and report what happened in it, not just the
+    /// answer. The eval harness grades this report.
+    pub async fn run_turn(
+        &self,
+        input: &str,
+        confirm: Option<&dyn ConfirmationHandler>,
+        cancel: Option<&Cancellation>,
+        sink: Option<&UnboundedSender<String>>,
+    ) -> Result<TurnReport> {
         if cancel.is_some_and(Cancellation::is_cancelled) {
             return Err(JarvisError::Cancelled);
         }
+        let rec = TurnRecorder::default();
 
         // Bound the log line: a pasted document should not fill the log.
         info!("Processing: {}", context::truncate_with_marker(input, 200));
@@ -282,7 +415,7 @@ impl Orchestrator {
 
         let answer = match &plan.route {
             // Pure conversation: no tools involved at all.
-            Route::Direct => self.converse(input, &history, cancel, sink).await?,
+            Route::Direct => self.converse(input, &history, cancel, sink, &rec).await?,
 
             // A confidently identified tool call: run it and report the facts.
             Route::Tool { name, args } => {
@@ -292,7 +425,9 @@ impl Orchestrator {
                 // The tool is the whole turn: once it has run, its result is
                 // the answer even if the user has just cancelled. Dropping it
                 // would hide an action that really happened.
-                let outcome = self.execute_call(name.clone(), args.clone(), confirm).await;
+                let outcome = self
+                    .execute_call(name.clone(), args.clone(), confirm, &rec)
+                    .await;
                 // A confirmation that was denied *because* the user cancelled
                 // is not a tool result worth persisting: the turn never ran.
                 // If the tool really ran, its report is still the answer.
@@ -304,13 +439,13 @@ impl Orchestrator {
 
             // Ambiguous: let the model pick from the tools this plan offers.
             Route::Model => {
-                self.model_with_tools(input, &history, &plan, confirm, cancel)
+                self.model_with_tools(input, &history, &plan, confirm, cancel, &rec)
                     .await?
             }
         };
 
         self.persist_assistant(&answer);
-        Ok(answer)
+        Ok(rec.finish(answer, &plan))
     }
 
     pub fn list_tools(&self) -> Vec<String> {
@@ -337,6 +472,7 @@ impl Orchestrator {
         history: &[Message],
         cancel: Option<&Cancellation>,
         sink: Option<&UnboundedSender<String>>,
+        rec: &TurnRecorder,
     ) -> Result<String> {
         let plan = context::assemble(
             &self.with_recall(input, self.conversation_system_prompt()),
@@ -387,6 +523,7 @@ impl Orchestrator {
                 return Ok(self.fallback_answer(input));
             }
         };
+        rec.model_turn(&turn);
         info!(
             "model turn: prompt_tokens={:?} completion_tokens={:?} content={:?}",
             turn.prompt_tokens, turn.completion_tokens, turn.message.content
@@ -409,6 +546,7 @@ impl Orchestrator {
         plan: &TurnPlan,
         confirm: Option<&dyn ConfirmationHandler>,
         cancel: Option<&Cancellation>,
+        rec: &TurnRecorder,
     ) -> Result<String> {
         // The offered tools are the request's tools. There is no second
         // filter here, and no way for the prompt to mention anything else.
@@ -444,7 +582,7 @@ impl Orchestrator {
         // is actually good at: putting the retrieved text into an answer.
         if plan.web && !input_names_url(input) {
             let outcomes = self
-                .web_first_steps(input, plan, confirm, &mut messages)
+                .web_first_steps(input, plan, confirm, &mut messages, rec)
                 .await;
             let search_blocked = outcomes.first().is_some_and(|o| o.status.is_blocked());
             trace.extend(outcomes);
@@ -486,6 +624,7 @@ impl Orchestrator {
                     return Ok(self.fallback_answer(input));
                 }
             };
+            rec.model_turn(&turn);
             info!(
                 "model turn: prompt_tokens={:?} completion_tokens={:?} content={:?} tool_calls={}",
                 turn.prompt_tokens,
@@ -501,7 +640,7 @@ impl Orchestrator {
                     calls.clone(),
                 ));
                 for call in calls {
-                    let outcome = self.execute_native_call(call, plan, confirm).await;
+                    let outcome = self.execute_native_call(call, plan, confirm, rec).await;
                     messages.push(ChatMessage::tool_result(
                         &outcome.name,
                         &self.prompt_tool_output(&outcome.output),
@@ -525,7 +664,7 @@ impl Orchestrator {
             if !text_calls.is_empty() {
                 messages.push(ChatMessage::text("assistant", &turn.message.content));
                 for call in &text_calls {
-                    let outcome = self.execute_text_call(call, plan, confirm).await;
+                    let outcome = self.execute_text_call(call, plan, confirm, rec).await;
                     messages.push(ChatMessage::text(
                         "user",
                         &format!(
@@ -583,6 +722,7 @@ impl Orchestrator {
         plan: &TurnPlan,
         confirm: Option<&dyn ConfirmationHandler>,
         messages: &mut Vec<ChatMessage>,
+        rec: &TurnRecorder,
     ) -> Vec<ToolOutcome> {
         let mut outcomes = Vec::new();
 
@@ -596,7 +736,7 @@ impl Orchestrator {
         };
 
         let outcome = self
-            .execute_offered(search, json!({ "query": input }), plan, confirm)
+            .execute_offered(search, json!({ "query": input }), plan, confirm, rec)
             .await;
         let succeeded = outcome.status == OutcomeStatus::Succeeded;
         let seen = self.prompt_tool_output(&outcome.output);
@@ -622,7 +762,7 @@ impl Orchestrator {
         };
 
         let outcome = self
-            .execute_offered(fetch, json!({ "url": url }), plan, confirm)
+            .execute_offered(fetch, json!({ "url": url }), plan, confirm, rec)
             .await;
         let seen = self.prompt_tool_output(&outcome.output);
         push_synthetic_exchange(messages, &outcome, &seen);
@@ -894,10 +1034,11 @@ impl Orchestrator {
         call: &ModelToolCall,
         plan: &TurnPlan,
         confirm: Option<&dyn ConfirmationHandler>,
+        rec: &TurnRecorder,
     ) -> ToolOutcome {
         let name = call.function.name.clone();
         let args = normalize_arguments(call.function.arguments.clone());
-        self.execute_offered(name, args, plan, confirm).await
+        self.execute_offered(name, args, plan, confirm, rec).await
     }
 
     /// Execute a tool call parsed out of the model's text.
@@ -906,9 +1047,10 @@ impl Orchestrator {
         call: &parser::ToolCall,
         plan: &TurnPlan,
         confirm: Option<&dyn ConfirmationHandler>,
+        rec: &TurnRecorder,
     ) -> ToolOutcome {
         let args = normalize_arguments(call.args.clone());
-        self.execute_offered(call.name.clone(), args, plan, confirm)
+        self.execute_offered(call.name.clone(), args, plan, confirm, rec)
             .await
     }
 
@@ -923,6 +1065,7 @@ impl Orchestrator {
         args: Value,
         plan: &TurnPlan,
         confirm: Option<&dyn ConfirmationHandler>,
+        rec: &TurnRecorder,
     ) -> ToolOutcome {
         if !plan.allows(&name) {
             let available = if plan.tools.is_empty() {
@@ -930,7 +1073,7 @@ impl Orchestrator {
             } else {
                 plan.names().join(", ")
             };
-            return ToolOutcome {
+            let outcome = ToolOutcome {
                 name,
                 args,
                 status: OutcomeStatus::Failed,
@@ -941,12 +1084,27 @@ impl Orchestrator {
                 result: None,
                 pattern: None,
             };
+            rec.tool(&outcome, "not_offered");
+            return outcome;
         }
-        self.execute_call(name, args, confirm).await
+        self.execute_call(name, args, confirm, rec).await
+    }
+
+    /// Run a single tool call and record it in the turn report.
+    async fn execute_call(
+        &self,
+        name: String,
+        args: Value,
+        confirm: Option<&dyn ConfirmationHandler>,
+        rec: &TurnRecorder,
+    ) -> ToolOutcome {
+        let outcome = self.gate_and_run(name, args, confirm).await;
+        rec.tool(&outcome, status_label(&outcome.status));
+        outcome
     }
 
     /// Run a single tool call through the permission gate and the registry.
-    async fn execute_call(
+    async fn gate_and_run(
         &self,
         name: String,
         args: Value,

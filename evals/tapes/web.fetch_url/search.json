@@ -1,0 +1,38 @@
+{
+  "calls": [],
+  "tools": {
+    "tools": [
+      {
+        "description": "Search for web pages about a topic and return titles, URLs and snippets. Use it to find a page, then fetch that URL for details.",
+        "inputSchema": {
+          "properties": {
+            "backend": {
+              "description": "Search backend; leave unset to choose automatically",
+              "enum": [
+                "auto",
+                "wikipedia",
+                "instant",
+                "searx",
+                "brave"
+              ],
+              "type": "string"
+            },
+            "max_results": {
+              "description": "Maximum results to return (default 5)",
+              "type": "integer"
+            },
+            "query": {
+              "description": "What to search for",
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "name": "search"
+      }
+    ]
+  }
+}

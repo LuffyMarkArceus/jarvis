@@ -5,9 +5,10 @@ Python sidecars + TypeScript UI.
 
 ## Status
 
-Phase 4 - web search, the `search -> fetch` chain, answer grounding, recall
-across sessions, and a provider abstraction (Ollama and any OpenAI-compatible
-server).
+Phase 5 - an eval harness (`jarvis eval`, see [evals/README.md](evals/README.md))
+that measures answers per model, on top of Phase 4's web search, answer
+grounding, recall across sessions and provider abstraction (Ollama and any
+OpenAI-compatible server).
 
 ## Build
 
@@ -229,11 +230,15 @@ capability.
 cargo test --workspace
 python3 -m unittest discover -s sidecars/fetch -p 'test_*.py'
 python3 -m unittest discover -s sidecars/search -p 'test_*.py'
+python3 -m unittest discover -s evals -p 'test_*.py'
+jarvis eval              # needs a model; see evals/README.md
 ```
 
 The Rust suite includes golden routing cases (`core/tests/routing_golden.rs`),
 MCP client integration tests against a real stdio subprocess
 (`core/tests/mcp_stdio.rs`), and memory tests that build a temporary database
-to check recall, exclusion and deduplication. The Python suites cover HTML
+to check recall, exclusion and deduplication. `core/tests/eval_suite.rs`
+runs every eval case against a scripted model, so CI checks routes, tool
+calls, permission prompts and file changes without a model server. The Python suites cover HTML
 extraction, search backends, query normalisation and the JSON-RPC protocol
 without network access.

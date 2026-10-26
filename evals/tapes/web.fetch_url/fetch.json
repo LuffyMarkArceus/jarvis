@@ -1,0 +1,42 @@
+{
+  "calls": [
+    {
+      "args": {
+        "url": "https://example.com"
+      },
+      "result": {
+        "content": [
+          {
+            "text": "Title: Example Domain\nURL: https://example.com\n\nThis domain is for use in documentation examples without needing permission. This is not a service; avoid relying on it for testing and monitoring purposes.",
+            "type": "text"
+          }
+        ]
+      },
+      "tool": "fetch"
+    }
+  ],
+  "tools": {
+    "tools": [
+      {
+        "description": "Fetch a URL and return its readable text content (HTML is stripped, scripts and styles removed).",
+        "inputSchema": {
+          "properties": {
+            "max_length": {
+              "description": "Maximum characters to return (default 6000)",
+              "type": "integer"
+            },
+            "url": {
+              "description": "Absolute http(s) URL to fetch",
+              "type": "string"
+            }
+          },
+          "required": [
+            "url"
+          ],
+          "type": "object"
+        },
+        "name": "fetch"
+      }
+    ]
+  }
+}

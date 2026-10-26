@@ -1,3 +1,5 @@
+mod eval;
+
 use clap::{Parser, Subcommand};
 use jarvis_common::ipc::{ConfirmationRequest, Message, Request, Response};
 use jarvis_core::{
@@ -169,6 +171,30 @@ enum Commands {
     MemoryBackfill,
     /// Show memory statistics
     MemoryStats,
+    /// Run the eval suite and report pass rates
+    Eval {
+        /// Only cases whose id contains this, or that carry this tag
+        #[arg(short, long)]
+        filter: Option<String>,
+        /// Attempts per case; models are not deterministic
+        #[arg(short, long, default_value = "3")]
+        repeat: usize,
+        /// Model to evaluate instead of the configured one
+        #[arg(short, long)]
+        model: Option<String>,
+        /// Use a scripted model and grade only what the code decides
+        #[arg(long)]
+        offline: bool,
+        /// Re-record web tapes from the real search and fetch servers
+        #[arg(long)]
+        record: bool,
+        /// Seconds before a turn counts as failed
+        #[arg(long, default_value = "180")]
+        timeout: u64,
+        /// Directory holding cases/, tapes/ and results/
+        #[arg(long, default_value = "evals")]
+        dir: std::path::PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -382,10 +408,34 @@ async fn main() -> anyhow::Result<()> {
         if let Err(e) = jarvis_core::init_tracing_to_file(&log_path) {
             eprintln!("warning: could not open log file: {}", e);
         }
-    } else {
+    } else if !matches!(cli.command, Commands::Eval { .. })
+        || std::env::var_os("RUST_LOG").is_some()
+    {
+        // An eval prints its own progress; per-turn INFO lines would bury
+        // it. RUST_LOG turns them back on when debugging a case.
         init_tracing();
     }
     match cli.command {
+        Commands::Eval {
+            filter,
+            repeat,
+            model,
+            offline,
+            record,
+            timeout,
+            dir,
+        } => {
+            return eval::run(eval::EvalArgs {
+                dir,
+                filter,
+                repeat,
+                model,
+                offline,
+                record,
+                timeout,
+            })
+            .await;
+        }
         Commands::Ask { prompt } => {
             // Try to connect to daemon first
             // Each CLI invocation starts a fresh session so questions don't leak

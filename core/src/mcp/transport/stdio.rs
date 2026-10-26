@@ -26,7 +26,10 @@ impl StdioTransport {
             .envs(env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::null())
+            // A server that ignores EOF on stdin would otherwise outlive the
+            // client; the eval harness starts one per attempt.
+            .kill_on_drop(true);
         let mut child = cmd
             .spawn()
             .map_err(|e| JarvisError::Tool(format!("Failed to start MCP server: {}", e)))?;

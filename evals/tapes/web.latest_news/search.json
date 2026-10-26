@@ -1,0 +1,53 @@
+{
+  "calls": [
+    {
+      "args": {
+        "query": "what is the latest news about rust"
+      },
+      "result": {
+        "content": [
+          {
+            "text": "Backend: wikipedia\nQuery: what is the latest news about rust\n\n1. Rust shooting incident\n   https://en.wikipedia.org/wiki/Rust_shooting_incident\n   (August 14, 2022). \"What forensic testing reveals about revolver in on-set 'Rust' shooting\". ABC News. Archived from the original on August 24, 2022. Johnson\n2. Rust (programming language)\n   https://en.wikipedia.org/wiki/Rust_(programming_language)\n   Rust is a general-purpose programming language that emphasizes performance, type safety, concurrency, and memory safety. Rust supports multiple programming\n3. Rust (video game)\n   https://en.wikipedia.org/wiki/Rust_(video_game)\n   Rust is a 2018 multiplayer survival video game developed by Facepunch Studios. It was first released in early access in December 2013 and received its\n4. Alec Baldwin\n   https://en.wikipedia.org/wiki/Alec_Baldwin\n   2023). \"Charges dropped against Alec Baldwin in fatal on-set 'Rust' shooting: Sources\". ABC News. Archived from the original on April 20, 2023. Retrieved April\n5. 2024 United States presidential election in Michigan\n   https://en.wikipedia.org/wiki/2024_United_States_presidential_election_in_Michigan\n   Democratic-leaning of the three Rust Belt swing states (including Wisconsin and Pennsylvania). Michigan shifted rightward by about 4.2 points from 2020, the",
+            "type": "text"
+          }
+        ]
+      },
+      "tool": "search"
+    }
+  ],
+  "tools": {
+    "tools": [
+      {
+        "description": "Search for web pages about a topic and return titles, URLs and snippets. Use it to find a page, then fetch that URL for details.",
+        "inputSchema": {
+          "properties": {
+            "backend": {
+              "description": "Search backend; leave unset to choose automatically",
+              "enum": [
+                "auto",
+                "wikipedia",
+                "instant",
+                "searx",
+                "brave"
+              ],
+              "type": "string"
+            },
+            "max_results": {
+              "description": "Maximum results to return (default 5)",
+              "type": "integer"
+            },
+            "query": {
+              "description": "What to search for",
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "name": "search"
+      }
+    ]
+  }
+}

@@ -1,0 +1,47 @@
+# Questions about the world. `search` and `fetch` are replayed from
+# evals/tapes/<id>/, recorded with `jarvis eval --record`, so a score does
+# not move because a page changed.
+
+[[case]]
+id = "web.fetch_url"
+input = "fetch https://example.com"
+web = true
+tags = ["web"]
+[case.expect]
+route = "Tool(mcp.fetch.fetch)"
+tools = ["mcp.fetch.fetch"]
+contains = ["example domain"]
+
+[[case]]
+id = "web.current_version"
+input = "what is the current version of postgres"
+web = true
+tags = ["web", "grounding"]
+note = "The taped page says 18.6. A 1B model has been seen inventing a release history instead."
+[case.expect]
+route = "Model"
+tools = ["mcp.search.search", "mcp.fetch.fetch"]
+contains = ["18.6"]
+excludes = ["could not retrieve a source"]
+
+[[case]]
+id = "web.latest_news"
+input = "what is the latest news about rust"
+web = true
+tags = ["web", "grounding"]
+note = "To a developer's assistant Rust is the language. The taped search ranks the film shooting first."
+[case.expect]
+route = "Model"
+tools_include = ["mcp.search.search", "mcp.fetch.fetch"]
+contains_any = ["programming", "language", "compiler", "crate"]
+excludes = ["could not retrieve a source", "baldwin", "shooting"]
+
+[[case]]
+id = "web.not_for_stable_facts"
+input = "what are the millennium prize problems"
+tags = ["web", "conversation"]
+note = "No recency marker: answering must not cost a search."
+[case.expect]
+route = "Direct"
+tools = []
+contains = ["riemann"]

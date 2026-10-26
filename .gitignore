@@ -36,3 +36,6 @@ models/*.gguf
 secrets/
 *.key
 *.pem
+
+# Eval run output; summarise or compare runs instead of committing them.
+evals/results/

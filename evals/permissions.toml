@@ -1,0 +1,50 @@
+# The permission policy every eval attempt runs under.
+#
+# Committed rather than read from ~/.config/jarvis so that a score means the
+# same thing on every machine. It is the built-in default policy plus the two
+# read-only web tools the web cases need. Change it deliberately: loosening a
+# rule here changes what the suite measures.
+
+[[rules]]
+tool = "filesystem.list_dir"
+action = "allow"
+
+[[rules]]
+tool = "filesystem.read"
+action = "allow"
+
+[[rules]]
+tool = "filesystem.search"
+action = "allow"
+
+[[rules]]
+tool = "filesystem.stat"
+action = "allow"
+
+[[rules]]
+tool = "process.list"
+action = "allow"
+
+[[rules]]
+tool = "system.info"
+action = "allow"
+
+[[rules]]
+tool = "shell.run"
+action = "ask"
+
+[[rules]]
+tool = "filesystem.write"
+action = "ask"
+
+[[rules]]
+tool = "filesystem.edit"
+action = "ask"
+
+[[rules]]
+tool = "mcp.search.search"
+action = "allow"
+
+[[rules]]
+tool = "mcp.fetch.fetch"
+action = "allow"

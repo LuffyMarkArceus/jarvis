@@ -1,0 +1,42 @@
+{
+  "calls": [
+    {
+      "args": {
+        "url": "https://en.wikipedia.org/wiki/Rust_shooting_incident"
+      },
+      "result": {
+        "content": [
+          {
+            "text": "Title: Rust shooting incident - Wikipedia\nURL: https://en.wikipedia.org/wiki/Rust_shooting_incident\n\nRust shooting incident\n|\n\n| Date | October 21, 2021\n\n| Time | c.1:46 p.m. (Mountain Time)\n\n| Location |\n\nBonanza City, New Mexico U.S.\n\n35°32′36″N 106°05′52″W﻿/﻿35.54342°N 106.09786°W\n\n| Type | Accidental fatal shooting, manslaughter\n\n| Deaths | Halyna Hutchins\n\n| Injuries | Joel Souza\n\n| Accused | Alec Baldwin\n\n| Convicted |\n\nDavid Halls\n\nHannah Gutierrez-Reed\n\n| Charges | Baldwin:\nInvoluntary manslaughter\n\n| Trial |\n\nGutierrez-Reed's trial ran from February 21 – March 6, 2024\n\nBaldwin's trial ran July 9–12, 2024\n\n| Verdict | Halls:\nPleaded no contest\nGutierrez-Reed:\nGuilty of manslaughter, not guilty of tampering with evidence\nBaldwin:\nCharges dismissed with prejudice by trial judge\n\n| Convictions | Halls:\nNegligent use of a deadly weapon\nGutierrez-Reed:\nInvoluntary manslaughter\n\n| Sentence | Halls:\n6 months probation\nGutierrez-Reed:\n18 months in prison\n\nOn October 21, 2021, at the Bonanza Creek Ranch in Bonanza City, New Mexico, United States, cinematographer Halyna Hutchins was fatally shot and director Joel Souza was injured on the set of the film Rust when a live round was discharged from a revolver that actor Alec Baldwin was using as a prop.\n\nThe incident was investigated by the Santa Fe County Sheriff's Office, the New Mexico First Judicial District Attorney, the New Mexico Occupational Health and Safety Bureau, and the Federal Bureau of Investigation. In an affidavit, the Santa Fe County Sheriff's Office stated that neither Baldwin nor first assistant director David Halls knew that the gun in question was loaded.On January 31, 2023, the Santa Fe district attorney charged Baldwin and armorer Hannah Gutierrez-Reed with one count each of involuntary manslaughter. Halls agreed to plead guilty to the charge of the negligent use of a deadly weapon.\n\nOn February 23, 2023, Baldwin pleaded not guilty, and on April 20, it was reported that prosecutors had indicated that the charges against him were being dropped.Gutierrez-Reed was later charged with tampering with evidence.On March 6, 2024, Gutierrez-Reed was found guilty of involuntary manslaughter but was acquitted on the evidence tampering charge.Gutierrez-Reed was then remanded into police custody and sentenced to 18 months in prison on April 15, 2024; she was released on May 23, 2025.On January 19, 2024, Baldwin was again indicted on charges of involuntary manslaughter; he pleaded not guilty.Baldwin's trial began on July 9, 2024, but the charges were dismissed with prejudice three days later over a Brady disclosure violation.The judge found that authorities, in an \"intentional and deliberate\" manner, withheld evidence from the defense regarding a set of bullets, and that this displayed \"signs of scorching prejudice\".\n\nThe film was eventually released in U.S. theaters in 2025. The incident prompted debates over the use of real guns as props, as well as safety and working conditions on film sets.\n\nBackground\n\nActor and Rust producer Alec Baldwin\n\nThe story for Rust was conceived by writer-director Joel Souza and actor-director Alec Baldwin. The Western was produced on a budget of $6–7 million, and its distribution rights were sold for $2 million during pre-production.The production had a filming schedule of 21 days.Principal photography began on October 6, 2021, at the Bonanza Creek Ranch in Bonanza City, New Mexico, a ghost town approximately 13 miles (21km) south of Santa Fe.\n\nResponsible for overseeing all weapons on set was the production's property key assistant and armorer, Hannah Gutierrez-Reed, stepdaughter of long-time industry armorer Thell Reed.Rust was Gutierrez-Reed's second film serving as lead armorer. On her first film, The Old Way, several crew members complained about her handling of firearms, including an incident in which she discharged a weapon without warning and caused lead actor Nicolas Cage to walk off set.\n\nDavid Halls was the assistant director. In the aftermath of the incident, former colleagues reported that Halls faced complaints in 2019 about his behavior during the filming of two episodes of Into the Dark; the complaints indicated that he allegedly disregarded safety protocols by ignoring blocked exits and a fire lane.In the same year, Halls had been fired from working on the film Freedom's Path after a firearm discharged unexpectedly on set, wounding a crew member.\n\nOn the set of the independent film One Way, a crew member warned producers about Halls's disregard for safety measures and said, \"That man is a liability. He's going to fucking kill someone someday, and you're going to be responsible.\" However, the film's digital imaging technician disputes this claim, saying he knew Halls to be conscientious about safety.The Hollywood Reporter reported a number of complaints raised during the production of 2019's The Tiger Rising, which also featured Rust executive producers Ryan Donnell Smith, Allen Cheney, Emily Hunter Salveson, and Ryan Winterstern.\n\nUnion disputes and safety complaints\n\nThe beginning of Rust's production came amidst a potential strike by members of the International Alliance of Theatrical Stage Employees(IATSE) over working conditions and low pay. On October 4, it was announced that IATSE members voted 98.68% in favor of authorizing a strike, with a voter turnout of 89.66% of eligible voters.Cinematographer Halyna Hutchins supported IATSE.She wrote in an Instagram post: \"Standing in #IAsolidarity with our @IATSE crew here in New Mexico on RUST.\"\n\nSome crew members claim firearms safety protocols were not distributed with the call sheets and were not strictly followed on the set. They claim there was no medic present during the construction of the film's sets.Crew members grew upset with what they claimed was a lack of adequate hotel rooms. Crew members alleged producers would only allow the local New Mexico crew courtesy room rentals after working 13 hours \"on th\n\n[Content truncated...]",
+            "type": "text"
+          }
+        ]
+      },
+      "tool": "fetch"
+    }
+  ],
+  "tools": {
+    "tools": [
+      {
+        "description": "Fetch a URL and return its readable text content (HTML is stripped, scripts and styles removed).",
+        "inputSchema": {
+          "properties": {
+            "max_length": {
+              "description": "Maximum characters to return (default 6000)",
+              "type": "integer"
+            },
+            "url": {
+              "description": "Absolute http(s) URL to fetch",
+              "type": "string"
+            }
+          },
+          "required": [
+            "url"
+          ],
+          "type": "object"
+        },
+        "name": "fetch"
+      }
+    ]
+  }
+}

@@ -9,7 +9,8 @@
 //! failure message shows the input, the expected route and the actual route,
 //! so a regression is diagnosable without running the daemon.
 
-use jarvis_core::router::{route, Route};
+use jarvis_core::orchestrator::route_label;
+use jarvis_core::router::route;
 
 #[derive(Debug, Clone, Copy)]
 enum Expect {
@@ -28,14 +29,6 @@ impl std::fmt::Display for Expect {
             Expect::Model => write!(f, "Model"),
             Expect::Tool(name) => write!(f, "Tool({})", name),
         }
-    }
-}
-
-fn actual(route: &Route) -> String {
-    match route {
-        Route::Direct => "Direct".to_string(),
-        Route::Model => "Model".to_string(),
-        Route::Tool { name, .. } => format!("Tool({})", name),
     }
 }
 
@@ -101,7 +94,7 @@ const GOLDEN: &[(&str, Expect)] = &[
 fn the_golden_set_holds() {
     let mut failures = Vec::new();
     for (input, expected) in GOLDEN {
-        let got = actual(&route(input));
+        let got = route_label(&route(input));
         if got != expected.to_string() {
             failures.push(format!(
                 "  input:    {:?}\n  expected: {}\n  actual:   {}",

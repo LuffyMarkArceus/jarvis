@@ -30,6 +30,7 @@ jobs:
         run: |
           python3 -m unittest discover -s sidecars/fetch -p 'test_*.py'
           python3 -m unittest discover -s sidecars/search -p 'test_*.py'
+          python3 -m unittest discover -s evals -p 'test_*.py'
 
   lint:
     # Pinned to a specific image: `ubuntu-latest` is scheduled to move to

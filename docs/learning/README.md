@@ -129,6 +129,41 @@ extends the same idea from "which route" to "was the final answer right".
 **Say it in an interview.** "Regressions in a router hide in the cases nobody
 re-checks by hand. A golden set makes every change pay for every case."
 
+## 9. Test the whole behaviour, not just the pieces
+
+**Lesson.** Every unit can be right while the product is wrong, because the
+bug is in how the pieces combine. An end-to-end eval finds a different class
+of bug from unit tests.
+
+**In this repo.** The first offline eval run found that "create a file called
+notes.md in /tmp/x" was routed to `filesystem.list_dir`. Routing tests had
+"create a file" and "list /tmp" as separate rows, both correct; nobody had
+written a sentence with both a change verb and a path. Any request like
+"delete /tmp/old.log" listed the directory and showed the listing as if it
+were the answer. Fixed in `core/src/router.rs` (`wants_change`), with golden
+rows added.
+
+**Say it in an interview.** "Unit tests are organised by component, and
+users are not. We added an eval suite written as user requests. Its first
+run found a routing bug that sat in the gap between two correct rules."
+
+## 10. A check is only as strict as its expectation
+
+**Lesson.** A green eval does not mean the answer was right. It means the
+answer met the expectations you wrote. Vague expectations ("no error",
+"mentions the topic") pass wrong answers.
+
+**In this repo.** The first web cases only required "the no-source caveat is
+absent". Both passed: one answer invented a Postgres release history, the
+other was about the *Rust* film shooting instead of the language. The cases
+now require the value on the recorded page (18.6) and exclude the film. The
+tapes in `evals/tapes/` freeze the pages, so requiring an exact value is fair.
+
+**Say it in an interview.** "We audit passing results as well as failing
+ones. When we first read through our passes, two were wrong answers.
+Expectations now name the correct value, which the recorded tapes make
+stable."
+
 ---
 
 ## Self-test
@@ -145,6 +180,12 @@ Answer out loud, without opening the code:
 5. Why is the provider a trait object (`Arc<dyn Provider>`) rather than a
    generic parameter? What would the generic version cost?
 6. What breaks first if two TUI clients send turns at the same time?
+7. Why does the eval suite replay web pages from tapes instead of using the
+   live web? What does that cost? (Hint: what if the page changes?)
+8. Why is the per-turn `TurnRecorder` passed as an argument rather than
+   stored on the `Orchestrator`?
+9. CI grades the suite with a scripted model. Name one bug it can catch and
+   one it cannot.
 
 ## Skills map: SDE2 -> senior
 

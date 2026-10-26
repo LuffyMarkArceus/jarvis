@@ -1,0 +1,52 @@
+# Plain conversation. No tool may be involved, and the answer comes from the
+# model alone, so these measure the model more than the code.
+
+[[case]]
+id = "chat.greeting"
+input = "hello there"
+tags = ["conversation"]
+note = "Any friendly reply is right. An earlier version required the word 'hello' and failed 'I'm here to help. What's on your mind?'."
+[case.expect]
+route = "Direct"
+tools = []
+excludes = ["tool_call", "\"name\":", "could not reach the local model"]
+
+[[case]]
+id = "chat.identity"
+input = "who are you?"
+tags = ["conversation"]
+note = "The system prompt names the assistant; a model that ignores it answers as itself."
+[case.expect]
+route = "Direct"
+tools = []
+contains = ["jarvis"]
+
+[[case]]
+id = "chat.arithmetic"
+input = "what is 2+2"
+tags = ["conversation"]
+[case.expect]
+route = "Direct"
+tools = []
+contains_any = ["4", "four"]
+
+[[case]]
+id = "chat.stable_fact"
+input = "when did the second world war end"
+tags = ["conversation"]
+note = "A historical fact with no recency marker must not trigger a web search."
+[case.expect]
+route = "Direct"
+tools = []
+contains = ["1945"]
+
+[[case]]
+id = "memory.name"
+setup = ["my name is Ada Lovelace"]
+input = "what is my name?"
+tags = ["conversation", "memory"]
+note = "The earlier turn is in session history; the answer must use it."
+[case.expect]
+route = "Direct"
+tools = []
+contains = ["ada"]

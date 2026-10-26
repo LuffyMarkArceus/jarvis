@@ -1,0 +1,53 @@
+{
+  "calls": [
+    {
+      "args": {
+        "query": "what is the current version of postgres"
+      },
+      "result": {
+        "content": [
+          {
+            "text": "Backend: wikipedia\nQuery: what is the current version of postgres\n\n1. PostgreSQL\n   https://en.wikipedia.org/wiki/PostgreSQL\n   PostgreSQL (/ˈpoʊstɡrɛskjuˌɛl/ POHST-gres-kew-EL), also known as Postgres, is a free and open-source relational database management system (RDBMS) emphasizing\n2. Universally unique identifier\n   https://en.wikipedia.org/wiki/Universally_unique_identifier\n   standards and early versions of RFC 4122, in ITU-T Rec. X.667 ISO/IEC 9834-8. This was technically equivalent to RFC 4122. The current IETF specification\n3. Multi-master replication\n   https://en.wikipedia.org/wiki/Multi-master_replication\n   Optimistic replication Postgres-XC Archived 2012-07-01 at the Wayback Machine under What Is Postgres-XC?: Write-scalable means Postgres-XC can be configured\n4. Ingres (database)\n   https://en.wikipedia.org/wiki/Ingres_(database)\n   spawned a number of commercial database applications, including Sybase, Microsoft SQL Server, NonStop SQL and a number of others. Postgres (Post Ingres)\n5. Comparison of version-control software\n   https://en.wikipedia.org/wiki/Comparison_of_version-control_software\n   The following tables describe attributes of notable version control and software configuration management (SCM) systems that can be used to compare and",
+            "type": "text"
+          }
+        ]
+      },
+      "tool": "search"
+    }
+  ],
+  "tools": {
+    "tools": [
+      {
+        "description": "Search for web pages about a topic and return titles, URLs and snippets. Use it to find a page, then fetch that URL for details.",
+        "inputSchema": {
+          "properties": {
+            "backend": {
+              "description": "Search backend; leave unset to choose automatically",
+              "enum": [
+                "auto",
+                "wikipedia",
+                "instant",
+                "searx",
+                "brave"
+              ],
+              "type": "string"
+            },
+            "max_results": {
+              "description": "Maximum results to return (default 5)",
+              "type": "integer"
+            },
+            "query": {
+              "description": "What to search for",
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "name": "search"
+      }
+    ]
+  }
+}

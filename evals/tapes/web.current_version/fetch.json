@@ -1,0 +1,42 @@
+{
+  "calls": [
+    {
+      "args": {
+        "url": "https://en.wikipedia.org/wiki/PostgreSQL"
+      },
+      "result": {
+        "content": [
+          {
+            "text": "Title: PostgreSQL - Wikipedia\nURL: https://en.wikipedia.org/wiki/PostgreSQL\n\n| PostgreSQL\n\n|\nThe World's Most Advanced Open Source Relational Database\n\n| Other names | Postgres\n\n| Developer | PostgreSQL Global Development Group\n\n| Release | 8 July 1996\n\n| Stable release |\n18.6/ 13 August 2026\n\n| Preview release |\n19 release candidate 1/ 15 October 2026\n\n| Written in | C(and C++for the LLVM dependency)\n\n| Type | RDBMS\n\n| License | PostgreSQL License (free and open-source, permissive)\n\n| Website | www.postgresql.org\n\n| Repository |\n\ngit.postgresql.org/gitweb/?p=postgresql.git\n\nPostgreSQL License\n| Publisher | PostgreSQL Global Development Group\nRegents of the University of California\n\n| Debian FSG compatible | Yes\n\n| FSF approved | Yes\n\n| OSI approved | Yes\n\n| GPL compatible | Yes\n\n| Copyleft | No\n\n| Linking from code with a different license | Yes\n\n| Website | postgresql.org/about/licence\n\nPostgreSQL(/ˈ p oʊ s t ɡ r ɛ s k j u ˌ ɛ l/POHST-gres-kew-EL), also known as Postgres, is a free and open-source relational database management system(RDBMS) emphasizing extensibility and SQL compliance. PostgreSQL features transactions with atomicity, consistency, isolation, durability(ACID) properties, automatically updatable views, materialized views, triggers, foreign keys, and stored procedures.It is supported on all major operating systems, including Windows, Linux, macOS, FreeBSD, OpenBSD and NetBSD, and handles a range of workloads from single machines to data warehouses, data lakes, or web services with many concurrent users.\n\nThe PostgreSQL Global Development Group focuses only on developing a database engine and closely related components.\nThis core is, technically, what comprises PostgreSQL itself, but there is an extensive developer community and ecosystem that provides other important feature sets that might, traditionally, be provided by a proprietary software vendor. These include special-purpose database engine features, like those needed to support a geospatial or temporal database or features which emulate other database products.Also available from third parties are a wide variety of user and machine interface features, such as graphical user interfaces or load balancing and high availability toolsets.The large third-party PostgreSQL support network of people, companies, products, and projects, even though not part of The PostgreSQL Development Group, are essential to the PostgreSQL database engine's adoption and use and make up the PostgreSQL ecosystem writ large.\n\nPostgreSQL was originally named POSTGRES, referring to its origins as a successor to the Ingres database developed at the University of California, Berkeley.In 1996, the project was renamed PostgreSQL to reflect its support for SQL. After a review in 2007, the development team decided to keep the name PostgreSQL and the alias Postgres.\n\nHistory\n\nIngres and University POSTGRES (1982–1994)\n\nPostgreSQL evolved from the Ingres project at the University of California, Berkeley. In 1982, the leader of the Ingres team, Michael Stonebraker, left Berkeley to make a proprietary version of Ingres.He returned to Berkeley in 1985, and began a post-Ingres project to address the problems with contemporary database systems that had become increasingly clear during the early 1980s. He won the Turing Award in 2014 for these and other projects, and techniques pioneered in them.\n\nThe new project, POSTGRES, aimed to add the fewest features needed to completely support data types.These features included the ability to define types and to fully describe relationships–something used widely, but maintained entirely by the user. In POSTGRES, the database understood relationships, and could retrieve information in related tables in a natural way using rules. POSTGRES used many of the ideas of Ingres, but not its code.\n\nStarting in 1986, published papers described the basis of the system, and a prototype version was shown at the 1988 ACM SIGMOD Conference. The team released version 1 to a small number of users in June 1989, followed by version 2 with a re-written rules system in June 1990. Version 3, released in 1991, again re-wrote the rules system, and added support for multiple storage managers and an improved query engine. By 1993, the number of users began to overwhelm the project with requests for support and features. After releasing version 4.2 on June 30, 1994–primarily a cleanup–the project ended. Berkeley released POSTGRES under an MIT License variant, which enabled other developers to use the code for any use. At the time, POSTGRES used an Ingres-influenced POSTQUEL query language interpreter, which could be interactively used with a console application named monitor.\n\nPostgres95 (1994–1996)\n\nIn 1994, Berkeley graduate students Andrew Yu and Jolly Chen replaced the POSTQUEL query language interpreter with one for the SQL query language, creating Postgres95. The monitor console was also replaced by psql. Yu and Chen announced the first version (0.01) to beta testers on May 5, 1995. Version 1.0 of Postgres95 was announced on September 5, 1995, with a more liberal license that enabled the software to be freely modifiable.\n\nOn July 8, 1996, Marc Fournier at Hub.org Networking Services provided the first non-university development server for the open-source development effort.With the participation of Bruce Momjian and Vadim B. Mikheev, work began to stabilize the code inherited from Berkeley.\n\nPostgreSQL (1996–present)\n\nIn 1996, the project was renamed to PostgreSQL to reflect its support for SQL. The online presence at the website PostgreSQL.org began on October 22, 1996.The first PostgreSQL release formed version 6.0 on January 29, 1997. Since then developers and volunteers around the world have maintained the software as The PostgreSQL Global Development Group.\n\nThe project continues to make releases available under its free and open-source software PostgreSQL License. Code comes from contributions from proprietary\n\n[Content truncated...]",
+            "type": "text"
+          }
+        ]
+      },
+      "tool": "fetch"
+    }
+  ],
+  "tools": {
+    "tools": [
+      {
+        "description": "Fetch a URL and return its readable text content (HTML is stripped, scripts and styles removed).",
+        "inputSchema": {
+          "properties": {
+            "max_length": {
+              "description": "Maximum characters to return (default 6000)",
+              "type": "integer"
+            },
+            "url": {
+              "description": "Absolute http(s) URL to fetch",
+              "type": "string"
+            }
+          },
+          "required": [
+            "url"
+          ],
+          "type": "object"
+        },
+        "name": "fetch"
+      }
+    ]
+  }
+}
