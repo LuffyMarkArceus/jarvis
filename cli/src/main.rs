@@ -433,7 +433,7 @@ async fn main() -> anyhow::Result<()> {
                 Err(_) => {
                     // Fallback to direct mode
                     info!("Daemon not running, using direct mode");
-                    let orch = Orchestrator::new();
+                    let orch = Orchestrator::new()?;
                     let response = orch.run_with(&prompt, Some(&TerminalConfirmer)).await?;
                     println!("{}", response);
                 }
@@ -443,7 +443,16 @@ async fn main() -> anyhow::Result<()> {
             DaemonCommands::Run => {
                 info!("Starting Jarvis daemon in foreground...");
                 let config = jarvis_core::config::Config::load();
-                let daemon = jarvis_core::daemon::Daemon::new(config.clone());
+                let daemon = match jarvis_core::daemon::Daemon::new(config.clone()) {
+                    Ok(daemon) => daemon,
+                    Err(e) => {
+                        // `daemon start` sends stderr to /dev/null, so the
+                        // log is the only place this reason can be read.
+                        error!("Daemon cannot start: {}", e);
+                        eprintln!("Daemon cannot start: {}", e);
+                        std::process::exit(1);
+                    }
+                };
                 daemon.write_pid().await?;
                 let daemon_arc = std::sync::Arc::new(tokio::sync::Mutex::new(daemon.clone()));
                 let server =
@@ -471,6 +480,14 @@ async fn main() -> anyhow::Result<()> {
                 if daemon_responds().await {
                     println!("Daemon is already running.");
                 } else {
+                    // Check the provider here, in the foreground, so a typo
+                    // in the config is reported to the user instead of only
+                    // to a log behind a 5-second "did not start".
+                    let config = jarvis_core::config::Config::load();
+                    if let Err(e) = jarvis_core::provider::from_config(&config) {
+                        eprintln!("Daemon cannot start: {}", e);
+                        std::process::exit(1);
+                    }
                     println!("Starting daemon in background...");
                     std::process::Command::new(std::env::current_exe()?)
                         .arg("daemon")
@@ -541,16 +558,36 @@ async fn main() -> anyhow::Result<()> {
                 Ok(response) => {
                     if response.ok {
                         if let Some(result) = response.result {
-                            match result.get("tools").and_then(|t| t.as_array()) {
-                                Some(tools) => print_tools(tools),
-                                None => println!("{}", serde_json::to_string_pretty(&result)?),
+                            let field = |key: &str| {
+                                result
+                                    .get(key)
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("unknown")
+                                    .to_string()
+                            };
+                            println!("Daemon:   running");
+                            println!("Provider: {} ({})", field("provider"), field("base_url"));
+                            println!("Model:    {}", field("model"));
+                            println!("Session:  {}", field("session_id"));
+                            if let Some(tools) = result.get("tools").and_then(|t| t.as_array()) {
+                                println!();
+                                print_tools(tools);
                             }
                         }
                     }
                 }
                 Err(_) => {
-                    println!("Jarvis CLI v0.1.0 - Direct mode (daemon not running)");
-                    println!("Ollama: http://127.0.0.1:11434");
+                    // Report the configuration a direct-mode turn would use,
+                    // not a hard-coded default.
+                    let config = jarvis_core::config::Config::load();
+                    println!("Daemon:   not running (direct mode)");
+                    match jarvis_core::provider::from_config(&config) {
+                        Ok(provider) => {
+                            println!("Provider: {} ({})", provider.name(), config.model.base_url)
+                        }
+                        Err(e) => println!("Provider: error - {}", e),
+                    }
+                    println!("Model:    {}", config.model.default_model);
                 }
             }
         }

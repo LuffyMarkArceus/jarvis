@@ -297,10 +297,14 @@ async fn handle_request(
     match request.method.as_str() {
         "status" => {
             let sid = daemon_lock.session_id().await;
+            let (provider, model, base_url) = daemon_lock.model_info().await;
             Response::ok(
                 request.id,
                 serde_json::json!({
                     "status": "running",
+                    "provider": provider,
+                    "model": model,
+                    "base_url": base_url,
                     "tools": daemon_lock.list_tools().await,
                     "session_id": sid,
                 }),

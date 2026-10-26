@@ -154,20 +154,16 @@ pub struct Orchestrator {
 }
 
 impl Orchestrator {
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self> {
         Self::with_config(Config::load())
     }
 
-    pub fn with_config(config: Config) -> Self {
-        // A bad provider name is a configuration mistake. Falling back to the
-        // local server keeps the assistant usable, but it must be visible.
-        let client = match provider::from_config(&config) {
-            Ok(provider) => provider,
-            Err(e) => {
-                warn!("{}; using the local Ollama server instead", e);
-                Arc::new(provider::OllamaProvider::new(&config.model.base_url))
-            }
-        };
+    /// Fails if the configured provider cannot be built. A bad provider name
+    /// is not recovered from by switching to Ollama: for a user who chose a
+    /// hosted model that would quietly change where prompts go, and for one
+    /// who chose local-only it would hide a typo behind a working assistant.
+    pub fn with_config(config: Config) -> Result<Self> {
+        let client = provider::from_config(&config)?;
         let mut tools = ToolRegistry::new();
         tools.register(Box::new(ListDirTool));
         tools.register(Box::new(ReadFileTool));
@@ -195,7 +191,7 @@ impl Orchestrator {
                 warn!("MCP startup failed: {}", e);
             }
         });
-        Self {
+        Ok(Self {
             config,
             client,
             tools,
@@ -203,7 +199,16 @@ impl Orchestrator {
             session_id,
             permissions,
             mcp,
-        }
+        })
+    }
+
+    /// The provider and model a turn will be sent to, for `jarvis status`.
+    pub fn model_info(&self) -> (&'static str, &str, &str) {
+        (
+            self.client.name(),
+            &self.config.model.default_model,
+            &self.config.model.base_url,
+        )
     }
 
     pub fn session_id(&self) -> &str {
@@ -1177,12 +1182,6 @@ impl Orchestrator {
             }
         }
         args
-    }
-}
-
-impl Default for Orchestrator {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

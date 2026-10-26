@@ -139,6 +139,12 @@ api_key_env = "OPENROUTER_API_KEY"
 The variable is read at startup and sent as a bearer token. If it is named but
 unset, the provider reports that rather than running unauthenticated.
 
+An unknown `provider` name stops startup instead of falling back to Ollama.
+A fallback would silently change where prompts are sent - to a hosted server
+the user did not pick, or away from one they did. `jarvis daemon start` checks
+the provider in the foreground so the error is printed, not only logged, and
+`jarvis status` shows the provider, URL and model a turn will use.
+
 The two formats differ in ways the provider absorbs, so the rest of the code
 does not branch on them: tool results carry a `tool_call_id` that must match
 the model's call, tool arguments arrive as a JSON string (in fragments while

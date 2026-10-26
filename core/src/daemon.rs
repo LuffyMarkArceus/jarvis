@@ -20,9 +20,9 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config) -> Result<Self> {
         let memory = MemoryManager::new(config.clone()).ok();
-        let mut orchestrator = Orchestrator::with_config(config.clone());
+        let mut orchestrator = Orchestrator::with_config(config.clone())?;
 
         // A restart should resume the conversation the user was having. Only
         // trust an id that still exists in the database, though: pruning or
@@ -40,11 +40,11 @@ impl Daemon {
             }
         }
 
-        Self {
+        Ok(Self {
             orchestrator: Arc::new(Mutex::new(orchestrator)),
             config: config.clone(),
             memory,
-        }
+        })
     }
 
     /// Handle one turn with no way to reach a human (headless callers).
@@ -207,6 +207,13 @@ impl Daemon {
         orch.list_tools()
     }
 
+    /// `(provider, model, base_url)` for the status report.
+    pub async fn model_info(&self) -> (String, String, String) {
+        let orch = self.orchestrator.lock().await;
+        let (provider, model, url) = orch.model_info();
+        (provider.to_string(), model.to_string(), url.to_string())
+    }
+
     pub async fn session_id(&self) -> String {
         let orch = self.orchestrator.lock().await;
         orch.session_id().to_string()
@@ -288,7 +295,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("jarvis-daemon-test-{}", Uuid::new_v4()));
         let config = test_config(&dir);
 
-        let first = Daemon::new(config.clone());
+        let first = Daemon::new(config.clone()).expect("daemon");
         let saved = first.new_session().await.expect("new session");
         first
             .memory
@@ -297,7 +304,7 @@ mod tests {
             .add_message(&saved, "user", "remember this")
             .expect("add message");
 
-        let second = Daemon::new(config);
+        let second = Daemon::new(config).expect("daemon");
         assert_eq!(second.session_id().await, saved);
         assert_eq!(
             second.load_active_session().as_deref(),
@@ -313,7 +320,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("temp dir");
         std::fs::write(active_session_path(&dir), Uuid::new_v4().to_string()).expect("save id");
 
-        let daemon = Daemon::new(test_config(&dir));
+        let daemon = Daemon::new(test_config(&dir)).expect("daemon");
         assert_ne!(
             Some(daemon.session_id().await),
             daemon.load_active_session(),
@@ -326,7 +333,7 @@ mod tests {
     #[tokio::test]
     async fn deleting_the_current_session_starts_a_new_one() {
         let dir = std::env::temp_dir().join(format!("jarvis-daemon-test-{}", Uuid::new_v4()));
-        let daemon = Daemon::new(test_config(&dir));
+        let daemon = Daemon::new(test_config(&dir)).expect("daemon");
 
         let current = daemon.session_id().await;
         daemon.delete_session(&current).await.expect("delete");
