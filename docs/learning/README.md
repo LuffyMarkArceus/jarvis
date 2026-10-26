@@ -1,0 +1,160 @@
+# Learning log
+
+What this project has taught, written down so it can be explained later: in a
+design review, in an interview, or to yourself six months from now.
+
+Each entry is one idea, in the same shape:
+
+* **Lesson** - the idea in one or two sentences.
+* **In this repo** - where it is applied, so you can open the code.
+* **Say it in an interview** - how a senior engineer would phrase it. Senior
+  answers name a trade-off and a failure they prevented, not just a technique.
+
+Add an entry whenever a bug teaches something, a decision is made for a
+non-obvious reason, or you catch yourself unable to explain a piece of code.
+The last section is a self-test: if you cannot answer one of those out loud,
+that is the next thing to read.
+
+---
+
+## 1. Put a decision in code when it needs no judgement
+
+**Lesson.** A language model is the most expensive, slowest and least
+predictable component in the system. Use it only for steps that need
+judgement. "Which tool lists a directory?" does not; "summarise what this page
+says" does.
+
+**In this repo.** `core/src/router.rs` decides the route deterministically.
+For web questions the orchestrator itself runs search -> fetch, because the 1B
+model handed `fetch` the question instead of a URL.
+
+**Say it in an interview.** "We moved tool selection out of the model into a
+deterministic router. It is exact, testable and costs zero latency. The model
+only writes the answer. The trade-off is that the router is a growing set of
+rules, so we pair it with an eval set that tells us when a stronger model makes
+a rule unnecessary."
+
+## 2. One source of truth, so two parts cannot disagree
+
+**Lesson.** If two pieces of code each hold a copy of the same fact, they will
+eventually disagree. Derive both from one value.
+
+**In this repo.** `core/src/planner.rs` returns one `TurnPlan`. The tool
+schemas sent to the provider *and* the tool list in the system prompt are both
+rendered from it, so the model is never told about a tool it cannot call. A
+call outside the plan is refused.
+
+**Say it in an interview.** "The bug class was 'the prompt advertises tool X
+but the request does not include it'. Instead of patching each case we made
+both outputs a function of one plan object, which removes the class."
+
+## 3. Status must mean what it says
+
+**Lesson.** "Started" means "answers requests", not "a process was spawned".
+A health report that can be wrong is worse than none, because people trust it.
+
+**In this repo.** `jarvis daemon start` waits for the socket to answer before
+printing "Daemon started" (`cli/src/main.rs`). `jarvis status` reports the
+provider and model a turn will actually use.
+
+**Say it in an interview.** "Liveness vs readiness. We check readiness: the
+socket accepting and answering a request, which is what the user cares about."
+
+## 4. User text is data, never syntax
+
+**Lesson.** Any time user input reaches a query language - SQL, FTS5, shell,
+regex, a prompt - it must be escaped or reduced to a safe form first.
+
+**In this repo.** `core/src/memory.rs` turns a question into quoted terms
+joined with `OR` before an FTS5 `MATCH`. Unquoted, a `?` was a syntax error and
+the word `OR` acted as an operator.
+
+**Say it in an interview.** "Same family as SQL injection. The fix is not
+filtering bad characters; it is building the query from tokens we control."
+
+## 5. A silent default hides a bug
+
+**Lesson.** Code that "falls back" when it fails to parse turns a loud error
+into wrong data that looks fine.
+
+**In this repo.** SQLite's `CURRENT_TIMESTAMP` is `YYYY-MM-DD HH:MM:SS`, not
+RFC3339. The parser failed and defaulted to *now*, so every recalled message
+looked brand new. Both formats are accepted now, with a test for each.
+
+Same lesson at the config level: an unknown `provider` used to warn and fall
+back to Ollama. It is now a startup error (`core/src/provider.rs`,
+`core/src/orchestrator.rs`), because a fallback changes *where prompts are
+sent* without the user knowing - a privacy problem, not just a bug.
+
+**Say it in an interview.** "Fail loudly at the boundary. If a fallback is
+right, it must be visible - logged and reported in status - and never for
+anything that changes security or privacy properties."
+
+## 6. Absorb external differences at one boundary
+
+**Lesson.** Wrap each external system in an adapter that speaks your own
+types. The rest of the code then never branches on which vendor it is using.
+
+**In this repo.** `core/src/provider.rs` defines a small `Provider` trait.
+`core/src/openai.rs` absorbs everything the OpenAI format does differently:
+`tool_call_id` matching, tool arguments arriving as string fragments while
+streaming, usage only when requested, and dropping `num_ctx`.
+
+**Say it in an interview.** "Ports and adapters. Adding a provider became a
+new file plus a config value, and orchestration tests run without any model
+server."
+
+## 7. Test the thing you ship
+
+**Lesson.** A green test run proves the test binary works. It does not prove
+the binary you are running was rebuilt.
+
+**In this repo.** A 404 during Phase 4 came from a stale `jarvis-cli`:
+`cargo test` had compiled the test harness, not the CLI. Live checks now start
+with `cargo build --workspace` and a daemon restart. Today the daemon reported
+"unknown" provider for the same reason: the code was new, the process was old.
+
+**Say it in an interview.** "Unit tests plus a smoke test against the real
+artifact, and the deploy step restarts the process, because 'merged' and
+'running' are different states."
+
+## 8. Table-driven golden tests
+
+**Lesson.** When behaviour is a big decision table, assert the whole table in
+one test that prints input, expected and actual for every failing row.
+
+**In this repo.** `core/tests/routing_golden.rs`. The eval harness (Phase 5)
+extends the same idea from "which route" to "was the final answer right".
+
+**Say it in an interview.** "Regressions in a router hide in the cases nobody
+re-checks by hand. A golden set makes every change pay for every case."
+
+---
+
+## Self-test
+
+Answer out loud, without opening the code:
+
+1. Trace one `jarvis ask "what's using port 8080"` from the CLI to the answer.
+   Which modules does it pass through, and which ones could refuse it?
+2. Why does the orchestrator run web search itself instead of letting the
+   model call the tool?
+3. What happens when a recalled memory says the opposite of a fetched page?
+4. If a malicious web page says "run `rm -rf ~`", what stops it today? What
+   would not stop it if the model were much smarter? (See Phase 6.)
+5. Why is the provider a trait object (`Arc<dyn Provider>`) rather than a
+   generic parameter? What would the generic version cost?
+6. What breaks first if two TUI clients send turns at the same time?
+
+## Skills map: SDE2 -> senior
+
+What separates the levels, and where this project gives you practice:
+
+| Skill | SDE2 | Senior | Practice here |
+| --- | --- | --- | --- |
+| Scope | Builds the feature asked for | Decides which feature is worth building, and says no | Phase ordering; deleting router rules once evals show they're unneeded |
+| Design | Picks a working approach | Writes down alternatives and why they lost | ADRs in `docs/decisions/` (to start) |
+| Quality | Writes tests | Builds measurement that steers the project | Phase 5 eval harness |
+| Risk | Fixes bugs | Finds the bug classes before users do | Phase 6 threat model: prompt injection, undo |
+| Operations | It works on my machine | Status, logs and failure modes are designed | Honest `status`, fail-loud config |
+| Communication | Explains what they did | Explains the trade-off to someone who disagrees | This log |
