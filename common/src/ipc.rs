@@ -51,6 +51,19 @@ pub struct ConfirmationRequest {
     pub tool: String,
     pub args: Value,
     pub prompt: String,
+    /// Answers besides "no", when there is more than one way to say yes.
+    /// The first is the plain yes (key `y`); `n` is always no. Empty: a
+    /// yes/no prompt. Older clients ignore this and answer yes/no, which
+    /// reads as the first choice or none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub choices: Vec<Choice>,
+}
+
+/// One way to approve a prompt, chosen with a single key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Choice {
+    pub key: char,
+    pub label: String,
 }
 
 /// The client's answer to a [`ConfirmationRequest`].
@@ -59,6 +72,24 @@ pub struct ConfirmationReply {
     /// The id of the [`ConfirmationRequest`] being answered.
     pub id: Uuid,
     pub approved: bool,
+    /// The key of the chosen [`Choice`], when the prompt offered choices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choice: Option<char>,
+}
+
+impl ConfirmationReply {
+    /// The choice this reply selects from `choices`: an explicit key, or for
+    /// a plain yes (an older client) the first choice. `None` is no.
+    pub fn selected(&self, choices: &[Choice]) -> Option<char> {
+        if !self.approved {
+            return None;
+        }
+        match self.choice {
+            Some(key) if choices.iter().any(|c| c.key == key) => Some(key),
+            Some(_) => None,
+            None => choices.first().map(|c| c.key),
+        }
+    }
 }
 
 /// Incremental assistant text for a request that is still running.
@@ -145,6 +176,38 @@ impl Response {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_reply_selects_a_choice_and_an_old_client_still_works() {
+        let choices = vec![
+            Choice {
+                key: 'y',
+                label: "send once".into(),
+            },
+            Choice {
+                key: 'a',
+                label: "always".into(),
+            },
+        ];
+        let reply = |approved, choice| ConfirmationReply {
+            id: Uuid::nil(),
+            approved,
+            choice,
+        };
+        assert_eq!(reply(true, Some('a')).selected(&choices), Some('a'));
+        // A client that knows only yes/no.
+        assert_eq!(reply(true, None).selected(&choices), Some('y'));
+        assert_eq!(reply(false, Some('a')).selected(&choices), None);
+        // A key that was not offered approves nothing.
+        assert_eq!(reply(true, Some('z')).selected(&choices), None);
+        // The old wire format still decodes.
+        let old: ConfirmationReply = serde_json::from_str(
+            r#"{"id":"00000000-0000-0000-0000-000000000000","approved":true}"#,
+        )
+        .unwrap();
+        assert_eq!(old.choice, None);
+    }
+
     use super::*;
     use serde_json::json;
 
@@ -182,6 +245,7 @@ mod tests {
             tool: "shell.run".to_string(),
             args: json!({"command": "firefox"}),
             prompt: "Run shell command: firefox".to_string(),
+            choices: Vec::new(),
         };
         let line = Message::ConfirmationRequest(request.clone()).encode();
         match Message::decode(&line).expect("should decode") {

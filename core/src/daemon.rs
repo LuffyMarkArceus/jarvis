@@ -227,6 +227,16 @@ impl Daemon {
         (provider.to_string(), model.to_string(), url.to_string())
     }
 
+    /// Switch the tier turns go to. Lasts until switched back, for every
+    /// client of this daemon; the footer shows which tier answered.
+    pub async fn set_remote(&self, on: bool) -> Result<()> {
+        self.orchestrator.lock().await.set_remote(on)
+    }
+
+    pub async fn uses_remote(&self) -> bool {
+        self.orchestrator.lock().await.uses_remote()
+    }
+
     /// The privacy notice for the configured provider.
     pub async fn privacy(&self) -> String {
         let orch = self.orchestrator.lock().await;

@@ -15,7 +15,7 @@
 //! * streaming is server-sent events (`data: {...}`) rather than NDJSON.
 
 use crate::cancel::Cancellation;
-use crate::config::Config;
+use crate::config::{Config, ModelConfig};
 use crate::error::{JarvisError, Result};
 use crate::model::{ChatMessage, ChatTurn, ModelFunction, ModelToolCall};
 use crate::provider::{ChatRequest, Provider};
@@ -23,8 +23,8 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedSender;
 
 /// Read a key from the environment, as named in the configuration.
-fn api_key(config: &Config) -> Result<Option<String>> {
-    let Some(variable) = config.model.api_key_env.as_deref() else {
+fn api_key(model: &ModelConfig) -> Result<Option<String>> {
+    let Some(variable) = model.api_key_env.as_deref() else {
         return Ok(None);
     };
     match std::env::var(variable) {
@@ -51,7 +51,11 @@ impl OpenAiProvider {
     }
 
     pub fn from_config(config: &Config) -> Result<Self> {
-        Ok(Self::new(&config.model.base_url, api_key(config)?))
+        Self::from_model(&config.model)
+    }
+
+    pub fn from_model(model: &ModelConfig) -> Result<Self> {
+        Ok(Self::new(&model.base_url, api_key(model)?))
     }
 
     fn request(&self, url: String) -> reqwest::RequestBuilder {

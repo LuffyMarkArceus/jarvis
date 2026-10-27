@@ -263,3 +263,199 @@ async fn a_local_model_gets_everything_unchanged() {
     assert!(!report.remote);
     assert_eq!(report.redacted, 0);
 }
+
+// ------------------------------------------------------------ two tiers
+
+use jarvis_core::config::{ModelConfig, RemoteConfig};
+use jarvis_core::orchestrator::{footer, Choice};
+
+/// Answers each kind of prompt as told and records every prompt.
+struct Owner {
+    send: Option<char>,
+    answer_locally: bool,
+    asked: Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl ConfirmationHandler for Owner {
+    async fn confirm(&self, tool: &str, _args: &Value) -> bool {
+        self.asked.lock().unwrap().push(tool.to_string());
+        tool == "egress.local" && self.answer_locally
+    }
+
+    async fn choose(&self, tool: &str, _args: &Value, choices: &[Choice]) -> Option<char> {
+        let offered: String = choices.iter().map(|c| c.key).collect();
+        self.asked
+            .lock()
+            .unwrap()
+            .push(format!("{} [{}]", tool, offered));
+        self.send
+    }
+}
+
+fn owner(send: Option<char>, answer_locally: bool) -> Owner {
+    Owner {
+        send,
+        answer_locally,
+        asked: Mutex::new(Vec::new()),
+    }
+}
+
+struct Tiers {
+    dir: PathBuf,
+    jarvis: Orchestrator,
+    local: Arc<RecordingProvider>,
+    remote: Arc<RecordingProvider>,
+}
+
+impl Drop for Tiers {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// `[model]` is local llama, `[remote]` a cloud model new sessions start on.
+fn tiers() -> Tiers {
+    let dir = std::env::temp_dir().join(format!("jarvis-tiers-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(dir.join("notes")).unwrap();
+    let mut config = Config::default();
+    config.general.data_dir = dir.clone();
+    config.memory.db_path = dir.join("memory.db");
+    config.memory.recall_enabled = false;
+    config.remote = Some(RemoteConfig {
+        model: ModelConfig {
+            provider: "openai".into(),
+            base_url: "https://models.example/v1".into(),
+            default_model: "cloud-model".into(),
+            ..ModelConfig::default()
+        },
+        default: true,
+    });
+    let permissions =
+        PermissionManager::with_paths(dir.join("permissions.toml"), dir.join("audit.db")).unwrap();
+    let local = Arc::new(RecordingProvider::replying("local answer"));
+    let remote = Arc::new(RecordingProvider::replying("remote answer"));
+    let jarvis = Orchestrator::with_parts(config, local.clone(), permissions)
+        .with_remote(Some(remote.clone()));
+    Tiers {
+        dir,
+        jarvis,
+        local,
+        remote,
+    }
+}
+
+impl Tiers {
+    async fn read_note(&self, name: &str, text: &str) {
+        let path = self.dir.join("notes").join(name);
+        std::fs::write(&path, text).unwrap();
+        self.jarvis
+            .run_turn(&format!("read {}", path.display()), None, None, None)
+            .await
+            .unwrap();
+    }
+
+    async fn ask(&self, input: &str, who: &Owner) -> TurnReport {
+        self.jarvis
+            .run_turn(input, Some(who), None, None)
+            .await
+            .unwrap()
+    }
+}
+
+#[tokio::test]
+async fn a_remote_session_sends_to_the_remote_model_and_says_so() {
+    let t = tiers();
+    let report = t.ask("hello", &owner(None, false)).await;
+    assert_eq!(t.remote.requests().len(), 1);
+    assert!(t.local.requests().is_empty());
+    assert_eq!(report.answer, "remote answer");
+    assert!(
+        footer(&report).starts_with("cloud-model · remote: recording"),
+        "{}",
+        footer(&report)
+    );
+}
+
+#[tokio::test]
+async fn declining_then_choosing_local_answers_locally_with_the_file() {
+    let t = tiers();
+    t.read_note("todo.txt", "dentist on friday").await;
+    let who = owner(None, true);
+    let report = t.ask("what was in that note?", &who).await;
+    assert!(
+        t.remote.requests().is_empty(),
+        "declined, yet sent remotely"
+    );
+    // Local gets the request whole: nothing leaves, so nothing is redacted.
+    assert!(t.local.requests().join("\n").contains("dentist on friday"));
+    assert_eq!(report.answer, "local answer");
+    assert!(!report.remote);
+    assert_eq!(footer(&report), "llama3.2:1b · local · 110 tokens");
+    assert_eq!(
+        *who.asked.lock().unwrap(),
+        ["egress.send [ya]", "egress.local"]
+    );
+}
+
+#[tokio::test]
+async fn declining_both_sends_nothing_anywhere() {
+    let t = tiers();
+    t.read_note("todo.txt", "dentist").await;
+    let report = t.ask("what was in that note?", &owner(None, false)).await;
+    assert!(t.remote.requests().is_empty() && t.local.requests().is_empty());
+    assert!(
+        report.answer.starts_with("Nothing was sent"),
+        "{}",
+        report.answer
+    );
+}
+
+#[tokio::test]
+async fn always_allow_saves_the_folder_and_stops_asking() {
+    let t = tiers();
+    t.read_note("todo.txt", "dentist").await;
+    t.ask("what was in that note?", &owner(Some('a'), false))
+        .await;
+    assert_eq!(t.remote.requests().len(), 1);
+    let saved = jarvis_core::egress::allowed_folders(&t.jarvis.allow_file());
+    assert_eq!(saved, vec![t.dir.join("notes").display().to_string()]);
+
+    // Another file from the same folder, another turn: no prompt.
+    t.read_note("shopping.txt", "oat milk").await;
+    let quiet = owner(None, false);
+    t.ask("and that one?", &quiet).await;
+    assert!(
+        quiet.asked.lock().unwrap().is_empty(),
+        "{:?}",
+        quiet.asked.lock().unwrap()
+    );
+    assert!(t.remote.requests().last().unwrap().contains("oat milk"));
+}
+
+#[tokio::test]
+async fn a_never_file_offers_only_the_local_model() {
+    let t = tiers();
+    t.read_note(".env", "DB_PASSWORD=hunter22").await;
+    let who = owner(Some('y'), true);
+    let report = t.ask("what is the password?", &who).await;
+    assert_eq!(
+        *who.asked.lock().unwrap(),
+        ["egress.local"],
+        "nothing to approve for sending"
+    );
+    assert!(t.remote.requests().is_empty());
+    assert_eq!(report.answer, "local answer");
+}
+
+#[tokio::test]
+async fn a_session_switches_tiers_and_cannot_switch_to_a_missing_one() {
+    let t = tiers();
+    t.jarvis.set_remote(false).unwrap();
+    t.ask("hello", &owner(None, false)).await;
+    assert_eq!(t.local.requests().len(), 1);
+    assert!(t.remote.requests().is_empty());
+
+    let s = setup("local", "ok", &[]);
+    assert!(s.jarvis.set_remote(true).is_err());
+}

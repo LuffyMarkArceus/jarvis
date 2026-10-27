@@ -46,7 +46,7 @@
 //! present (a headless run) the call is denied, never silently allowed.
 
 use crate::cancel::Cancellation;
-use crate::config::Config;
+use crate::config::{Config, ModelConfig};
 use crate::context::{self, ContextPlan};
 use crate::egress::redact::Redactor;
 use crate::egress::{
@@ -84,11 +84,45 @@ use uuid::Uuid;
 pub trait ConfirmationHandler: Send + Sync {
     /// `true` if the user approved running `tool` with `args`.
     async fn confirm(&self, tool: &str, args: &Value) -> bool;
+
+    /// Pick one of `choices`, or `None` for no. A handler that only knows
+    /// yes/no answers through `confirm`, and its yes is the first choice -
+    /// which is why the first choice must always be the narrowest yes.
+    async fn choose(&self, tool: &str, args: &Value, choices: &[Choice]) -> Option<char> {
+        if self.confirm(tool, args).await {
+            choices.first().map(|c| c.key)
+        } else {
+            None
+        }
+    }
 }
+
+pub use jarvis_common::ipc::Choice;
 
 /// The name under which sending to a remote provider is confirmed. Not a
 /// real tool: it reuses the confirmation path every client already has.
 pub const EGRESS_TOOL: &str = "egress.send";
+
+/// Asked when a remote request was not sent: answer with the local model?
+pub const EGRESS_LOCAL_TOOL: &str = "egress.local";
+
+/// The parts of a model request that do not depend on the tier.
+struct Request<'a> {
+    system: &'a str,
+    messages: &'a [ChatMessage],
+    tools: Option<&'a [Value]>,
+}
+
+/// Where requests with these settings go. A config that cannot be read was
+/// already rejected at startup (`provider::from_config`); if one gets here
+/// anyway, it is treated as remote with an undeclared policy, which asks
+/// rather than sends.
+fn destination_of(model: &ModelConfig) -> Destination {
+    egress::destination(model).unwrap_or(Destination {
+        locality: Locality::Remote,
+        data_policy: DataPolicy::Unknown,
+    })
+}
 
 /// What came back from [`Orchestrator::ask_model`].
 enum ModelReply {
@@ -192,6 +226,9 @@ pub struct TurnReport {
     pub completion_tokens: Option<u64>,
     /// Whether a request of this turn went to a remote provider.
     pub remote: bool,
+    /// The model and provider that answered; empty when no model was used.
+    pub model: String,
+    pub provider: String,
     /// Distinct values replaced by placeholders before sending.
     pub redacted: usize,
 }
@@ -224,9 +261,20 @@ struct TurnRecorder {
     approved: std::sync::Mutex<Vec<Concern>>,
     /// Whether any request of this turn went to a remote provider.
     remote: std::sync::atomic::AtomicBool,
+    /// The model and provider that answered, for the footer: with a local
+    /// fallback it is not the configured one.
+    used: std::sync::Mutex<Option<(String, String)>>,
 }
 
 impl TurnRecorder {
+    fn used(&self, model: &ModelConfig, provider: &str, remote: bool) {
+        *self.used.lock().unwrap() = Some((model.default_model.clone(), provider.to_string()));
+        if remote {
+            self.remote
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     fn saw(&self, label: &Label) {
         self.label.lock().unwrap().absorb(label);
     }
@@ -269,7 +317,10 @@ impl TurnRecorder {
     fn finish(self, answer: String, plan: &TurnPlan) -> TurnReport {
         let (model_calls, prompt_tokens, completion_tokens) = *self.model.lock().unwrap();
         let redacted = self.redactor.lock().unwrap().count();
+        let (model, provider) = self.used.lock().unwrap().clone().unwrap_or_default();
         TurnReport {
+            model,
+            provider,
             remote: self.remote.load(std::sync::atomic::Ordering::Relaxed),
             redacted,
             answer,
@@ -287,7 +338,8 @@ impl TurnRecorder {
 ///
 /// Kept beside the answer, never in it: stored in history, it would be sent
 /// back to the model as content and imitated in later replies.
-pub fn footer(report: &TurnReport, model: &str, provider: &str) -> String {
+pub fn footer(report: &TurnReport) -> String {
+    let (model, provider) = (report.model.as_str(), report.provider.as_str());
     if report.model_calls == 0 {
         // A deterministic answer: say which tool, and that no model was used.
         return match report.calls.first() {
@@ -341,7 +393,12 @@ fn status_label(status: &OutcomeStatus) -> &'static str {
 
 pub struct Orchestrator {
     config: Config,
+    /// The `[model]` tier: local unless configured otherwise.
     client: Arc<dyn Provider>,
+    /// The `[remote]` tier, when configured.
+    remote: Option<Arc<dyn Provider>>,
+    /// Whether this session's turns go to the remote tier.
+    use_remote: std::sync::atomic::AtomicBool,
     tools: ToolRegistry,
     memory: Option<MemoryManager>,
     session_id: String,
@@ -360,8 +417,12 @@ impl Orchestrator {
     /// who chose local-only it would hide a typo behind a working assistant.
     pub fn with_config(config: Config) -> Result<Self> {
         let client = provider::from_config(&config)?;
+        let remote = match &config.remote {
+            Some(r) => Some(provider::from_model(&r.model)?),
+            None => None,
+        };
         let permissions = PermissionManager::new(&config)?;
-        let orchestrator = Self::with_parts(config, client, permissions);
+        let orchestrator = Self::with_parts(config, client, permissions).with_remote(remote);
         // Start MCP servers in the background: a slow or broken server must
         // not delay the first prompt, and discovery results simply appear in
         // the cache when they are ready.
@@ -404,12 +465,54 @@ impl Orchestrator {
         Self {
             config,
             client,
+            remote: None,
+            use_remote: std::sync::atomic::AtomicBool::new(false),
             tools,
             memory,
             session_id,
             permissions,
             mcp: McpClient::new(),
         }
+    }
+
+    /// Attach the `[remote]` tier's provider. New sessions start on it only
+    /// if `[remote] default = true`.
+    pub fn with_remote(mut self, client: Option<Arc<dyn Provider>>) -> Self {
+        let default = self.config.remote.as_ref().is_some_and(|r| r.default);
+        self.use_remote = std::sync::atomic::AtomicBool::new(client.is_some() && default);
+        self.remote = client;
+        self
+    }
+
+    /// Switch this session between the local and remote tier.
+    pub fn set_remote(&self, on: bool) -> Result<()> {
+        if on && self.remote.is_none() {
+            return Err(JarvisError::Config(
+                "no remote model is configured: add a [remote] section to config.toml".into(),
+            ));
+        }
+        self.use_remote
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    pub fn uses_remote(&self) -> bool {
+        self.use_remote.load(std::sync::atomic::Ordering::Relaxed) && self.remote.is_some()
+    }
+
+    /// The model settings and provider this session's turns go to.
+    fn tier(&self) -> (&ModelConfig, &Arc<dyn Provider>) {
+        match (&self.config.remote, &self.remote) {
+            (Some(cfg), Some(client)) if self.uses_remote() => (&cfg.model, client),
+            _ => (&self.config.model, &self.client),
+        }
+    }
+
+    /// The model to offer when a remote request was not sent: `[model]`,
+    /// if this session is on the remote tier and `[model]` is local.
+    fn local_fallback(&self) -> Option<(&ModelConfig, &Arc<dyn Provider>)> {
+        (self.uses_remote() && !destination_of(&self.config.model).is_remote())
+            .then_some((&self.config.model, &self.client))
     }
 
     /// Start the configured MCP servers and wait until discovery finishes.
@@ -422,11 +525,8 @@ impl Orchestrator {
 
     /// The provider and model a turn will be sent to, for `jarvis status`.
     pub fn model_info(&self) -> (&'static str, &str, &str) {
-        (
-            self.client.name(),
-            &self.config.model.default_model,
-            &self.config.model.base_url,
-        )
+        let (cfg, client) = self.tier();
+        (client.name(), &cfg.default_model, &cfg.base_url)
     }
 
     /// Where this orchestrator's requests go. A config that cannot be read
@@ -434,32 +534,37 @@ impl Orchestrator {
     /// here anyway, it is treated as remote with an undeclared policy, which
     /// asks rather than sends.
     pub fn destination(&self) -> Destination {
-        egress::destination(&self.config.model).unwrap_or(Destination {
-            locality: Locality::Remote,
-            data_policy: DataPolicy::Unknown,
-        })
+        destination_of(self.tier().0)
     }
 
     /// The owner's policy for remote requests, with their allow-list.
     fn egress_policy(&self) -> Policy {
         let home = dirs::home_dir().unwrap_or_default();
         let mut policy = Policy::defaults(&home);
+        let from_prompts = egress::allowed_folders(&self.allow_file());
         policy.file_allow = self
             .config
             .egress
             .file_allow
             .iter()
+            .chain(from_prompts.iter())
             .map(|d| std::path::PathBuf::from(crate::router::expand_tilde(d)))
             .collect();
         policy
     }
 
+    /// Where "always allow this folder" answers are kept.
+    pub fn allow_file(&self) -> std::path::PathBuf {
+        self.config.general.data_dir.join(egress::ALLOW_FILE)
+    }
+
     /// Every model request goes through here: the egress check, redaction,
     /// the call, and putting personal data back into what comes back.
     ///
-    /// A local provider gets the request unchanged. A remote one gets it only
-    /// if the policy allows everything in it or the user approves, and always
-    /// with secrets and personal data replaced by placeholders.
+    /// A local tier gets the request unchanged. A remote one gets it only if
+    /// the policy allows everything in it or the user approves, and always
+    /// with secrets and personal data replaced by placeholders. When it is
+    /// not sent, the user is asked whether the local model should answer.
     #[allow(clippy::too_many_arguments)]
     async fn ask_model(
         &self,
@@ -473,45 +578,117 @@ impl Orchestrator {
         rec: &TurnRecorder,
     ) -> Result<ModelReply> {
         rec.saw_request(system_label, messages);
-        let destination = self.destination();
-        let redacted = if destination.is_remote() {
-            let mut labels = vec![system_label.clone()];
-            labels.extend(egress::label(messages));
-            match egress::check(&labels, &self.egress_policy()) {
-                Verdict::Send => {}
-                Verdict::Never(concerns) => {
-                    return Ok(ModelReply::Withheld(self.withheld(&concerns, true)));
-                }
-                Verdict::Ask(concerns) => {
-                    let new: Vec<Concern> = {
-                        let approved = rec.approved.lock().unwrap();
-                        concerns
-                            .into_iter()
-                            .filter(|c| !approved.contains(c))
-                            .collect()
-                    };
-                    if !new.is_empty() {
-                        let args = json!({
-                            "provider": self.client.name(),
-                            "url": self.config.model.base_url,
-                            "would_send": new.iter().map(describe_concern).collect::<Vec<_>>(),
-                        });
-                        // Nobody to ask (headless, scheduled) means no.
-                        let approved = match confirm {
-                            Some(c) => c.confirm(EGRESS_TOOL, &args).await,
-                            None => false,
-                        };
-                        if !approved {
-                            return Ok(ModelReply::Withheld(self.withheld(&new, false)));
-                        }
-                        rec.approved.lock().unwrap().extend(new);
-                    }
+        let (cfg, client) = self.tier();
+        let request = Request {
+            system,
+            messages,
+            tools,
+        };
+        if !destination_of(cfg).is_remote() {
+            return self
+                .send(cfg, client, request, false, cancel, sink, rec)
+                .await;
+        }
+
+        let mut labels = vec![system_label.clone()];
+        labels.extend(egress::label(messages));
+        let refused = match egress::check(&labels, &self.egress_policy()) {
+            Verdict::Send => None,
+            Verdict::Never(concerns) => Some(self.withheld(cfg, client, &concerns, true)),
+            Verdict::Ask(concerns) => {
+                let new: Vec<Concern> = {
+                    let approved = rec.approved.lock().unwrap();
+                    concerns
+                        .into_iter()
+                        .filter(|c| !approved.contains(c))
+                        .collect()
+                };
+                if new.is_empty() || self.approve_sending(cfg, client, &new, confirm).await {
+                    rec.approved.lock().unwrap().extend(new);
+                    None
+                } else {
+                    Some(self.withheld(cfg, client, &new, false))
                 }
             }
-            rec.remote.store(true, std::sync::atomic::Ordering::Relaxed);
+        };
+
+        let Some(why) = refused else {
+            return self
+                .send(cfg, client, request, true, cancel, sink, rec)
+                .await;
+        };
+        // The owner's rule: when nothing could be sent, ask each time whether
+        // the local model should answer instead. Nobody to ask means no.
+        if let (Some((local_cfg, local)), Some(confirm)) = (self.local_fallback(), confirm) {
+            let args = json!({ "model": local_cfg.default_model, "reason": why });
+            if confirm.confirm(EGRESS_LOCAL_TOOL, &args).await {
+                return self
+                    .send(local_cfg, local, request, false, cancel, sink, rec)
+                    .await;
+            }
+        }
+        Ok(ModelReply::Withheld(why))
+    }
+
+    /// Ask whether `concerns` may be sent: once, or (for files) always from
+    /// their folders, which writes the allow file.
+    async fn approve_sending(
+        &self,
+        cfg: &ModelConfig,
+        client: &Arc<dyn Provider>,
+        concerns: &[Concern],
+        confirm: Option<&dyn ConfirmationHandler>,
+    ) -> bool {
+        let Some(confirm) = confirm else {
+            return false;
+        };
+        let folders = egress::folders_to_allow(concerns);
+        let mut choices = vec![Choice {
+            key: 'y',
+            label: "send once".into(),
+        }];
+        if !folders.is_empty() {
+            choices.push(Choice {
+                key: 'a',
+                label: format!("always allow {}", folders.join(", ")),
+            });
+        }
+        let args = json!({
+            "provider": client.name(),
+            "url": cfg.base_url,
+            "would_send": concerns.iter().map(describe_concern).collect::<Vec<_>>(),
+        });
+        match confirm.choose(EGRESS_TOOL, &args, &choices).await {
+            Some('a') => {
+                for folder in &folders {
+                    if let Err(e) = egress::allow_folder(&self.allow_file(), folder) {
+                        warn!("could not save allowed folder {}: {}", folder, e);
+                    }
+                }
+                true
+            }
+            Some(_) => true,
+            None => false,
+        }
+    }
+
+    /// Send one request to one tier, redacting and restoring when `remote`.
+    #[allow(clippy::too_many_arguments)]
+    async fn send(
+        &self,
+        cfg: &ModelConfig,
+        client: &Arc<dyn Provider>,
+        request: Request<'_>,
+        remote: bool,
+        cancel: Option<&Cancellation>,
+        sink: Option<&UnboundedSender<String>>,
+        rec: &TurnRecorder,
+    ) -> Result<ModelReply> {
+        let redacted = remote.then(|| {
             let mut redactor = rec.redactor.lock().unwrap();
-            let system = redactor.redact(system);
-            let messages: Vec<ChatMessage> = messages
+            let system = redactor.redact(request.system);
+            let messages: Vec<ChatMessage> = request
+                .messages
                 .iter()
                 .map(|m| {
                     let mut m = m.clone();
@@ -519,33 +696,27 @@ impl Orchestrator {
                     m
                 })
                 .collect();
-            Some((system, messages, redactor.count() > 0))
-        } else {
-            None
-        };
-
+            (system, messages, redactor.count() > 0)
+        });
         let (system, messages) = match &redacted {
             Some((s, m, _)) => (s.as_str(), m.as_slice()),
-            None => (system, messages),
+            None => (request.system, request.messages),
         };
-        let request = ChatRequest {
-            model: &self.config.model.default_model,
+        let chat = ChatRequest {
+            model: &cfg.default_model,
             system: Some(system),
             messages,
-            tools,
-            options: Some(self.model_options()),
+            tools: request.tools,
+            options: Some(self.model_options(cfg)),
         };
         // A placeholder can be split across streamed chunks and shown before
         // it is restored; a redacted remote answer is shown whole instead.
         let stream_to = sink.filter(|_| !redacted.as_ref().is_some_and(|r| r.2));
         let mut turn = match stream_to {
-            Some(sink) => {
-                self.client
-                    .chat_turn_streaming(request, cancel, sink)
-                    .await?
-            }
-            None => self.client.chat_turn(request, cancel).await?,
+            Some(sink) => client.chat_turn_streaming(chat, cancel, sink).await?,
+            None => client.chat_turn(chat, cancel).await?,
         };
+        rec.used(cfg, client.name(), remote);
         if redacted.is_some() {
             let redactor = rec.redactor.lock().unwrap();
             turn.message.content = redactor.restore(&turn.message.content);
@@ -560,7 +731,13 @@ impl Orchestrator {
     }
 
     /// The answer for a request that was not sent.
-    fn withheld(&self, concerns: &[Concern], never: bool) -> String {
+    fn withheld(
+        &self,
+        cfg: &ModelConfig,
+        client: &Arc<dyn Provider>,
+        concerns: &[Concern],
+        never: bool,
+    ) -> String {
         let items: Vec<String> = concerns.iter().map(describe_concern).collect();
         let why = if never {
             "which is never sent to a remote provider"
@@ -568,9 +745,10 @@ impl Orchestrator {
             "which was not approved for sending"
         };
         format!(
-            "Nothing was sent to {} ({}). This request would have included {}, {}.\n\n             Ask without that content, or allow the folder in `[egress] file_allow`.",
-            self.client.name(),
-            self.config.model.base_url,
+            "Nothing was sent to {} ({}). This request would have included {}, {}.\n\n\
+             Ask without that content, use /local, or allow a folder with `jarvis egress allow <folder>`.",
+            client.name(),
+            cfg.base_url,
             items.join(", "),
             why
         )
@@ -636,11 +814,7 @@ impl Orchestrator {
         sink: Option<&UnboundedSender<String>>,
     ) -> Result<(String, String)> {
         let report = self.run_turn(input, confirm, cancel, sink).await?;
-        let footer = footer(
-            &report,
-            &self.config.model.default_model,
-            self.client.name(),
-        );
+        let footer = footer(&report);
         Ok((report.answer, footer))
     }
 
@@ -1111,9 +1285,9 @@ impl Orchestrator {
     /// `num_ctx` is set explicitly instead of relying on the provider's
     /// default, which changes between versions and is what decides how much
     /// of the prompt survives.
-    fn model_options(&self) -> Value {
+    fn model_options(&self, model: &ModelConfig) -> Value {
         serde_json::json!({
-            "temperature": self.config.model.temperature,
+            "temperature": model.temperature,
             "num_ctx": self.config.context.num_ctx,
         })
     }
@@ -2183,13 +2357,16 @@ mod tests {
     }
 
     fn turn(
-        model_calls: u32,
+        model: &str,
+        provider: &str,
         tokens: Option<(u64, u64)>,
         remote: bool,
         redacted: usize,
     ) -> TurnReport {
         TurnReport {
-            model_calls,
+            model_calls: u32::from(!model.is_empty()),
+            model: model.into(),
+            provider: provider.into(),
             prompt_tokens: tokens.map(|t| t.0),
             completion_tokens: tokens.map(|t| t.1),
             remote,
@@ -2201,32 +2378,25 @@ mod tests {
     #[test]
     fn the_footer_says_what_answered_and_where() {
         assert_eq!(
-            footer(
-                &turn(1, Some((1100, 134)), false, 0),
-                "qwen2.5:3b",
-                "ollama"
-            ),
+            footer(&turn("qwen2.5:3b", "ollama", Some((1100, 134)), false, 0)),
             "qwen2.5:3b · local · 1.2k tokens"
         );
         assert_eq!(
-            footer(&turn(2, Some((30_000, 500)), true, 2), "claude", "openai"),
-            "claude · remote: openai · 30k tokens · 2 redacted"
+            footer(&turn("gemma", "openai", Some((30_000, 500)), true, 2)),
+            "gemma · remote: openai · 30k tokens · 2 redacted"
         );
-        assert_eq!(footer(&turn(1, None, false, 0), "m", "p"), "m · local");
+        assert_eq!(footer(&turn("m", "p", None, false, 0)), "m · local");
     }
 
     #[test]
     fn a_deterministic_answer_says_no_model_was_used() {
-        let mut report = turn(0, None, false, 0);
+        let mut report = turn("", "", None, false, 0);
         report.calls.push(ToolCallRecord {
             name: "system.info".into(),
             args: json!({}),
             status: "executed",
         });
-        assert_eq!(
-            footer(&report, "m", "p"),
-            "answered by system.info · no model"
-        );
+        assert_eq!(footer(&report), "answered by system.info · no model");
     }
 
     #[test]

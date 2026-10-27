@@ -1,7 +1,6 @@
 # Design: local and hosted model tiers (Phase 5b)
 
-Status: **decided** (2026-10-27). Steps 1-3 and 5 are built; step 4 (the
-scoped prompt and allow-list commands) is next. See "Build order".
+Status: **built** (2026-10-27): steps 1-5. Open items under "Known gaps".
 Decisions are the owner's; the rules and mechanisms are how they are kept.
 
 ## Problem
@@ -181,16 +180,18 @@ from tagged eval runs about which requests the local model fails.
    shows the notice). Every model request goes through
    `Orchestrator::ask_model`: check, ask, redact, send, restore. The footer
    is returned beside the answer and shown by CLI and TUI.
-4. **Next.** The scoped prompt (once / always for this folder / answer
-   locally) in CLI and TUI, replacing today's yes/no `egress.send`; allow-list
-   commands (`jarvis egress allow <dir>`); a second, local provider so
-   "answer locally" can actually answer, plus `/local` and `/remote`.
+4. **Done.** Two tiers: `[model]` (local) and `[remote]`, switched with
+   `jarvis tier local|remote` or `/local` `/remote`, daemon-wide until
+   switched back. The prompt offers `[y] send once`, `[a] always allow
+   <folders>` (files only) and `[n]`; the protocol carries choices
+   backwards-compatibly (an old client's yes is the first choice). "Always"
+   writes `egress-allow.toml` in the data directory; `jarvis egress
+   allow|remove|list` manage it. When a request is not sent and `[model]` is
+   local, the owner's rule applies: ask each time whether the local model
+   should answer (`egress.local`). The footer names the model that answered.
 5. **Done.** `remote = true` eval cases with `sent_contains` /
    `sent_excludes` (`evals/cases/egress.toml`), graded with or without a
    model.
-
-Until step 4, a declined or `never` request is not answered at all: there is
-only one provider, so "answer locally" has nothing to answer with.
 
 ## Known gaps
 

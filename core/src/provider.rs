@@ -13,7 +13,7 @@
 //! them.
 
 use crate::cancel::Cancellation;
-use crate::config::Config;
+use crate::config::{Config, ModelConfig};
 use crate::error::{JarvisError, Result};
 use crate::model::{ChatMessage, ChatTurn, OllamaClient};
 use serde_json::Value;
@@ -120,14 +120,20 @@ impl Provider for OllamaProvider {
 /// An unknown name is a configuration error, not a reason to guess: silently
 /// falling back would send prompts to a server the user did not choose.
 pub fn from_config(config: &Config) -> Result<Arc<dyn Provider>> {
+    if let Some(remote) = &config.remote {
+        from_model(&remote.model)?;
+    }
+    from_model(&config.model)
+}
+
+/// Build the provider for one model tier.
+pub fn from_model(model: &ModelConfig) -> Result<Arc<dyn Provider>> {
     // Locality and data policy decide what may be sent; a typo there must
     // stop startup like a typo in the provider name.
-    crate::egress::destination(&config.model)?;
-    match config.model.provider.as_str() {
-        "ollama" => Ok(Arc::new(OllamaProvider::new(&config.model.base_url))),
-        "openai" => Ok(Arc::new(crate::openai::OpenAiProvider::from_config(
-            config,
-        )?)),
+    crate::egress::destination(model)?;
+    match model.provider.as_str() {
+        "ollama" => Ok(Arc::new(OllamaProvider::new(&model.base_url))),
+        "openai" => Ok(Arc::new(crate::openai::OpenAiProvider::from_model(model)?)),
         other => Err(JarvisError::Config(format!(
             "unknown model provider '{other}' - expected 'ollama' or 'openai'"
         ))),

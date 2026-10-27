@@ -38,8 +38,14 @@ pub enum ClientEvent {
 
 enum Command {
     Request(Request),
-    Confirm { id: Uuid, approved: bool },
-    Cancel { id: Uuid },
+    Confirm {
+        id: Uuid,
+        approved: bool,
+        choice: Option<char>,
+    },
+    Cancel {
+        id: Uuid,
+    },
 }
 
 /// A handle to the background connection task.
@@ -64,8 +70,12 @@ impl Client {
         let _ = self.commands.send(Command::Request(request));
     }
 
-    pub fn confirm(&self, id: Uuid, approved: bool) {
-        let _ = self.commands.send(Command::Confirm { id, approved });
+    pub fn confirm(&self, id: Uuid, approved: bool, choice: Option<char>) {
+        let _ = self.commands.send(Command::Confirm {
+            id,
+            approved,
+            choice,
+        });
     }
 
     /// Ask the daemon to stop the request `id`. No response is sent.
@@ -143,9 +153,15 @@ async fn run(
                 let Some(command) = command else { return };
                 let message = match command {
                     Command::Request(request) => Message::Request(request),
-                    Command::Confirm { id, approved } => {
-                        Message::ConfirmationReply(ConfirmationReply { id, approved })
-                    }
+                    Command::Confirm {
+                        id,
+                        approved,
+                        choice,
+                    } => Message::ConfirmationReply(ConfirmationReply {
+                        id,
+                        approved,
+                        choice,
+                    }),
                     Command::Cancel { id } => Message::Cancel(Cancel { id }),
                 };
                 if let Err(e) = write_message(&mut writer, &message).await {

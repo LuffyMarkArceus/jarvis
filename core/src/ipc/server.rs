@@ -11,11 +11,13 @@
 //! interleaving is unambiguous.
 
 use crate::cancel::{Cancellation, TurnGuard, TurnRegistry};
-use crate::confirm::confirmation_prompt;
+use crate::confirm::choice_prompt;
 use crate::daemon::Daemon;
 use crate::error::{JarvisError, Result};
 use crate::orchestrator::ConfirmationHandler;
-use jarvis_common::ipc::{Chunk, ConfirmationRequest, Message, Request, Response};
+use jarvis_common::ipc::{
+    Choice, Chunk, ConfirmationReply, ConfirmationRequest, Message, Request, Response,
+};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -103,7 +105,7 @@ struct Conn {
     /// Prompts that are waiting for an answer, keyed by their id. The reader
     /// loop routes replies here instead of letting the confirmer read the
     /// socket, which would compete with cancellation messages.
-    confirmations: Arc<std::sync::Mutex<HashMap<Uuid, oneshot::Sender<bool>>>>,
+    confirmations: Arc<std::sync::Mutex<HashMap<Uuid, oneshot::Sender<ConfirmationReply>>>>,
 }
 
 impl Conn {
@@ -133,11 +135,27 @@ struct SocketConfirmer {
 #[async_trait::async_trait]
 impl ConfirmationHandler for SocketConfirmer {
     async fn confirm(&self, tool: &str, args: &Value) -> bool {
+        self.ask(tool, args, &[]).await.is_some_and(|r| r.approved)
+    }
+
+    async fn choose(&self, tool: &str, args: &Value, choices: &[Choice]) -> Option<char> {
+        self.ask(tool, args, choices)
+            .await
+            .and_then(|reply| reply.selected(choices))
+    }
+}
+
+impl SocketConfirmer {
+    /// Send a prompt and wait for the client's reply. `None` on cancel,
+    /// disconnect or timeout - all of which mean no.
+    async fn ask(&self, tool: &str, args: &Value, choices: &[Choice]) -> Option<ConfirmationReply> {
+        let prompt = choice_prompt(tool, args, choices);
         let request = ConfirmationRequest {
             id: Uuid::new_v4(),
             tool: tool.to_string(),
             args: args.clone(),
-            prompt: confirmation_prompt(tool, args),
+            prompt,
+            choices: choices.to_vec(),
         };
         let id = request.id;
         let (sender, receiver) = oneshot::channel();
@@ -154,7 +172,7 @@ impl ConfirmationHandler for SocketConfirmer {
                 .lock()
                 .expect("confirmation map poisoned")
                 .remove(&id);
-            return false;
+            return None;
         }
 
         let mut cancel = self.cancel.clone();
@@ -166,7 +184,7 @@ impl ConfirmationHandler for SocketConfirmer {
                 None
             }
             result = tokio::time::timeout(CONFIRM_TIMEOUT, receiver) => match result {
-                Ok(Ok(approved)) => Some(approved),
+                Ok(Ok(reply)) => Some(reply),
                 Ok(Err(_)) => {
                     info!("Client disconnected while confirming {}", tool);
                     None
@@ -187,7 +205,7 @@ impl ConfirmationHandler for SocketConfirmer {
             .lock()
             .expect("confirmation map poisoned")
             .remove(&id);
-        answer.unwrap_or(false)
+        answer
     }
 }
 
@@ -246,7 +264,7 @@ async fn handle_client(
                     Some(sender) => {
                         // The confirmer may have timed out or been cancelled
                         // between our lookup and this send; that is fine.
-                        let _ = sender.send(reply.approved);
+                        let _ = sender.send(reply);
                     }
                     None => info!("Ignoring reply for unknown prompt {}", reply.id),
                 }
@@ -306,6 +324,7 @@ async fn handle_request(
                     "model": model,
                     "base_url": base_url,
                     "privacy": daemon_lock.privacy().await,
+                    "tier": if daemon_lock.uses_remote().await { "remote" } else { "local" },
                     "tools": daemon_lock.list_tools().await,
                     "session_id": sid,
                 }),
@@ -325,6 +344,24 @@ async fn handle_request(
                 .unwrap_or(20) as usize;
             match daemon_lock.list_sessions(limit).await {
                 Ok(sessions) => Response::ok(request.id, serde_json::json!({"sessions": sessions})),
+                Err(e) => Response::err(request.id, e.to_string()),
+            }
+        }
+        "tier.set" => {
+            let remote = request.params.get("tier").and_then(Value::as_str) == Some("remote");
+            match daemon_lock.set_remote(remote).await {
+                Ok(()) => {
+                    let (provider, model, _) = daemon_lock.model_info().await;
+                    Response::ok(
+                        request.id,
+                        serde_json::json!({
+                            "tier": if remote { "remote" } else { "local" },
+                            "model": model,
+                            "provider": provider,
+                            "privacy": daemon_lock.privacy().await,
+                        }),
+                    )
+                }
                 Err(e) => Response::err(request.id, e.to_string()),
             }
         }

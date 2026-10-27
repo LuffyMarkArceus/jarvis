@@ -22,6 +22,11 @@ const MAX_ACTION_CHARS: usize = 120;
 /// A one-line statement of what the call will do.
 pub fn describe_action(tool: &str, args: &Value) -> String {
     match tool {
+        // Not a tool: the remote request was not sent; answer locally?
+        "egress.local" => format!(
+            "Answer with the local model {} instead - nothing leaves this machine",
+            str_arg(args, "model").unwrap_or("on this machine")
+        ),
         // Not a tool: the orchestrator asking before content leaves the machine.
         "egress.send" => {
             let items: Vec<&str> = args["would_send"]
@@ -86,6 +91,20 @@ pub fn describe_action(tool: &str, args: &Value) -> String {
 }
 
 /// The full prompt shown before a tool call is approved.
+/// The prompt with its answers listed, when there is more than yes/no.
+pub fn choice_prompt(tool: &str, args: &Value, choices: &[jarvis_common::ipc::Choice]) -> String {
+    let mut prompt = confirmation_prompt(tool, args);
+    if !choices.is_empty() {
+        let keys: Vec<String> = choices
+            .iter()
+            .map(|c| format!("[{}] {}", c.key, c.label))
+            .chain(std::iter::once("[n] no".to_string()))
+            .collect();
+        prompt.push_str(&format!("\n\n  {}", keys.join("   ")));
+    }
+    prompt
+}
+
 pub fn confirmation_prompt(tool: &str, args: &Value) -> String {
     format!(
         "Jarvis wants to: {}\n\n  tool: {}\n  args: {}",

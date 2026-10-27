@@ -17,6 +17,20 @@ pub struct Config {
     pub mcp: Option<McpConfig>,
     #[serde(default)]
     pub egress: EgressConfig,
+    /// An optional second, remote model. `[model]` stays the local one.
+    #[serde(default)]
+    pub remote: Option<RemoteConfig>,
+}
+
+/// The remote tier: the same settings as `[model]`, plus whether new
+/// sessions start on it. `/remote` and `/local` switch a session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteConfig {
+    #[serde(flatten)]
+    pub model: ModelConfig,
+    /// Start new sessions on the remote model. Off: local stays the default.
+    #[serde(default)]
+    pub default: bool,
 }
 
 /// What may be sent to a remote model provider. Local providers are not

@@ -11,6 +11,7 @@ jarvis eval --filter web         # cases whose id contains "web" or tagged "web"
 jarvis eval --offline            # scripted model: grade only what code decides
 jarvis eval --record             # re-record web tapes from the real servers
 jarvis eval diff                 # what changed since the previous run of this model
+jarvis eval --remote             # the [remote] model; sandbox fixtures are allowed to go
 ```
 
 Run it from the repository root. Each attempt prints PASS or FAIL with the

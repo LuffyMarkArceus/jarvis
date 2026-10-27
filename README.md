@@ -193,8 +193,26 @@ data_policy = "may_train"     # no_training | may_train | unknown
 file_allow = ["~/projects/jarvis"]
 ```
 
-`jarvis status` shows whether requests leave the machine and whether the
-provider may train on them. The design and its open items are in
+A remote model is a second tier beside the local one:
+
+```toml
+[remote]
+provider = "openai"
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+default_model = "google/gemma-4-31b-it:free"
+data_policy = "may_train"
+default = false               # sessions start local
+```
+
+`jarvis tier remote` (or `/remote` in the TUI) switches to it and `jarvis
+tier local` back. When a remote request is not sent, Jarvis asks whether the
+local model should answer instead. "Always allow" answers and `jarvis egress
+allow <folder>` add a folder to the allow-list; `jarvis egress list` shows
+it.
+
+`jarvis status` shows the tier, whether requests leave the machine and
+whether the provider may train on them. The design and its open items are in
 [docs/design/model-tiers.md](docs/design/model-tiers.md).
 
 ## MCP sidecars

@@ -167,6 +167,11 @@ impl Policy {
         }
     }
 
+    /// Is `path` somewhere nothing is ever sent from?
+    pub fn is_never(&self, path: &Path) -> bool {
+        self.never(path)
+    }
+
     fn never(&self, path: &Path) -> bool {
         let path = normalize(path);
         self.never_dirs
@@ -260,6 +265,84 @@ pub fn check(labels: &[Label], policy: &Policy) -> Verdict {
     } else {
         Verdict::Send
     }
+}
+
+/// The folders the user allowed from a prompt or `jarvis egress allow`,
+/// kept in Jarvis's data directory rather than in the hand-edited config,
+/// whose comments a rewrite would destroy.
+pub const ALLOW_FILE: &str = "egress-allow.toml";
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct AllowFile {
+    #[serde(default)]
+    file_allow: Vec<String>,
+}
+
+/// Folders in the allow file. A missing file is an empty list; an unreadable
+/// one is too, which can only make Jarvis ask more, never send more.
+pub fn allowed_folders(path: &Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| toml::from_str::<AllowFile>(&text).ok())
+        .map(|f| f.file_allow)
+        .unwrap_or_default()
+}
+
+/// Add `folder` to the allow file. Returns false if it was already there.
+pub fn allow_folder(path: &Path, folder: &str) -> Result<bool> {
+    let mut file = AllowFile {
+        file_allow: allowed_folders(path),
+    };
+    if file.file_allow.iter().any(|f| f == folder) {
+        return Ok(false);
+    }
+    file.file_allow.push(folder.to_string());
+    write_allow_file(path, &file)?;
+    Ok(true)
+}
+
+/// Remove `folder` from the allow file. Returns false if it was not there.
+pub fn disallow_folder(path: &Path, folder: &str) -> Result<bool> {
+    let mut file = AllowFile {
+        file_allow: allowed_folders(path),
+    };
+    let before = file.file_allow.len();
+    file.file_allow.retain(|f| f != folder);
+    if file.file_allow.len() == before {
+        return Ok(false);
+    }
+    write_allow_file(path, &file)?;
+    Ok(true)
+}
+
+fn write_allow_file(path: &Path, file: &AllowFile) -> Result<()> {
+    let text = toml::to_string(file).map_err(|e| JarvisError::Config(e.to_string()))?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, text)?;
+    Ok(())
+}
+
+/// The folders to offer for "always allow": the parent of every file
+/// concerned, but only if every concern is a file with a known path.
+/// Approving "always" for command output or machine details would be a far
+/// wider grant than one key suggests, so that is never offered.
+pub fn folders_to_allow(concerns: &[Concern]) -> Vec<String> {
+    let mut folders: Vec<String> = Vec::new();
+    for concern in concerns {
+        let (Origin::File, Some(path)) = (concern.origin, &concern.path) else {
+            return Vec::new();
+        };
+        let Some(parent) = Path::new(path).parent() else {
+            return Vec::new();
+        };
+        let parent = parent.display().to_string();
+        if !folders.contains(&parent) {
+            folders.push(parent);
+        }
+    }
+    folders
 }
 
 /// Whether a request leaves the machine.
@@ -574,6 +657,39 @@ mod tests {
     fn a_misspelt_locality_or_policy_is_an_error() {
         assert!(destination(&model("http://127.0.0.1", Some("lcoal"), None)).is_err());
         assert!(destination(&model("http://127.0.0.1", None, Some("never"))).is_err());
+    }
+
+    #[test]
+    fn the_allow_file_adds_and_removes_folders() {
+        let dir = std::env::temp_dir().join(format!("jarvis-allow-{}", uuid::Uuid::new_v4()));
+        let file = dir.join(ALLOW_FILE);
+        assert!(allowed_folders(&file).is_empty());
+        assert!(allow_folder(&file, "/home/u/notes").unwrap());
+        assert!(
+            !allow_folder(&file, "/home/u/notes").unwrap(),
+            "no duplicates"
+        );
+        assert_eq!(allowed_folders(&file), vec!["/home/u/notes"]);
+        assert!(disallow_folder(&file, "/home/u/notes").unwrap());
+        assert!(allowed_folders(&file).is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn always_is_offered_only_for_files() {
+        let file = |p: &str| Concern {
+            origin: Origin::File,
+            path: Some(p.into()),
+        };
+        assert_eq!(
+            folders_to_allow(&[file("/n/a.txt"), file("/n/b.txt"), file("/p/c")]),
+            vec!["/n", "/p"]
+        );
+        let shell = Concern {
+            origin: Origin::Shell,
+            path: None,
+        };
+        assert!(folders_to_allow(&[file("/n/a.txt"), shell]).is_empty());
     }
 
     #[test]

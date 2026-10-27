@@ -1,9 +1,9 @@
 mod eval;
 
 use clap::{Parser, Subcommand};
-use jarvis_common::ipc::{ConfirmationRequest, Message, Request, Response};
+use jarvis_common::ipc::{Choice, ConfirmationRequest, Message, Request, Response};
 use jarvis_core::{
-    confirm::confirmation_prompt,
+    confirm::{choice_prompt, confirmation_prompt},
     init_tracing,
     orchestrator::{ConfirmationHandler, Orchestrator},
     permissions::{PermissionAction, PermissionManager},
@@ -29,6 +29,47 @@ impl ConfirmationHandler for TerminalConfirmer {
     async fn confirm(&self, tool: &str, args: &serde_json::Value) -> bool {
         ask_yn(&confirmation_prompt(tool, args))
     }
+
+    async fn choose(
+        &self,
+        tool: &str,
+        args: &serde_json::Value,
+        choices: &[Choice],
+    ) -> Option<char> {
+        ask_choice(&choice_prompt(tool, args, choices), choices)
+    }
+}
+
+/// Show a prompt with several answers and read one key. `y` is the first
+/// choice; anything not offered is no.
+fn ask_choice(prompt: &str, choices: &[Choice]) -> Option<char> {
+    eprintln!();
+    eprintln!("{}", prompt);
+    let keys: String = choices.iter().map(|c| format!("{}/", c.key)).collect();
+    eprint!("Choose [{}N] ", keys);
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer).ok()?;
+    let key = answer.trim().to_ascii_lowercase().chars().next()?;
+    if key == 'y' {
+        return choices.first().map(|c| c.key);
+    }
+    choices.iter().find(|c| c.key == key).map(|c| c.key)
+}
+
+/// `~/x` or a relative path as an absolute folder, so the allow list does
+/// not depend on where the command was run.
+fn absolute_folder(folder: &str) -> anyhow::Result<PathBuf> {
+    let expanded = PathBuf::from(jarvis_core::router::expand_tilde(folder));
+    let absolute = if expanded.is_absolute() {
+        expanded
+    } else {
+        std::env::current_dir()?.join(expanded)
+    };
+    if !absolute.is_dir() {
+        anyhow::bail!("{} is not a folder", absolute.display());
+    }
+    Ok(absolute.canonicalize()?)
 }
 
 /// The line under an answer, dimmed on a terminal. When stdout is piped it
@@ -56,9 +97,14 @@ fn ask_yn(prompt: &str) -> bool {
     matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
-/// Answer a confirmation prompt that arrived over the daemon socket.
-fn answer_confirmation(request: &ConfirmationRequest) -> bool {
-    ask_yn(&request.prompt)
+/// Answer a confirmation prompt that arrived over the daemon socket:
+/// whether it was approved, and which choice if it offered several.
+fn answer_confirmation(request: &ConfirmationRequest) -> (bool, Option<char>) {
+    if request.choices.is_empty() {
+        return (ask_yn(&request.prompt), None);
+    }
+    let choice = ask_choice(&request.prompt, &request.choices);
+    (choice.is_some(), choice)
 }
 
 /// The short name of a permission action.
@@ -182,6 +228,13 @@ enum Commands {
     MemoryBackfill,
     /// Show memory statistics
     MemoryStats,
+    /// Show or switch the model tier: `local` or `remote`
+    Tier { tier: Option<String> },
+    /// Folders whose files may be sent to a remote model
+    Egress {
+        #[command(subcommand)]
+        action: EgressCommands,
+    },
     /// Run the eval suite and report pass rates
     #[command(args_conflicts_with_subcommands = true)]
     Eval {
@@ -199,6 +252,9 @@ enum Commands {
         /// Use a scripted model and grade only what the code decides
         #[arg(long)]
         offline: bool,
+        /// Evaluate the [remote] model (with --model to pick one of its models)
+        #[arg(long)]
+        remote: bool,
         /// Re-record web tapes from the real search and fetch servers
         #[arg(long)]
         record: bool,
@@ -209,6 +265,16 @@ enum Commands {
         #[arg(long, default_value = "evals")]
         dir: std::path::PathBuf,
     },
+}
+
+#[derive(Subcommand)]
+enum EgressCommands {
+    /// Allow files in this folder to be sent to a remote model
+    Allow { folder: String },
+    /// Stop allowing a folder
+    Remove { folder: String },
+    /// List allowed folders
+    List,
 }
 
 #[derive(Subcommand)]
@@ -397,10 +463,11 @@ async fn send_request_streaming(
             // The daemon needs a decision before it can answer. Prompt, send
             // the answer back, and keep reading for the real response.
             Message::ConfirmationRequest(request) => {
-                let approved = answer_confirmation(&request);
+                let (approved, choice) = answer_confirmation(&request);
                 let reply = Message::ConfirmationReply(jarvis_common::ipc::ConfirmationReply {
                     id: request.id,
                     approved,
+                    choice,
                 });
                 writer
                     .write_all(format!("{}\n", reply.encode()).as_bytes())
@@ -457,6 +524,7 @@ async fn main() -> anyhow::Result<()> {
             repeat,
             model,
             offline,
+            remote,
             record,
             timeout,
             dir,
@@ -467,6 +535,7 @@ async fn main() -> anyhow::Result<()> {
                 repeat,
                 model,
                 offline,
+                remote,
                 record,
                 timeout,
             })
@@ -663,6 +732,7 @@ async fn main() -> anyhow::Result<()> {
                             println!("Daemon:   running");
                             println!("Provider: {} ({})", field("provider"), field("base_url"));
                             println!("Model:    {}", field("model"));
+                            println!("Tier:     {}", field("tier"));
                             println!("Privacy:  {}", field("privacy"));
                             println!("Session:  {}", field("session_id"));
                             if let Some(tools) = result.get("tools").and_then(|t| t.as_array()) {
@@ -1056,6 +1126,93 @@ async fn main() -> anyhow::Result<()> {
                     println!("Error: {}", response.error.unwrap_or_default());
                 }
                 Err(_) => println!("Daemon not running"),
+            }
+        }
+        Commands::Tier { tier } => {
+            let Some(tier) = tier else {
+                let response = send_request(Request::new("status", json!({}))).await?;
+                let tier = response
+                    .result
+                    .as_ref()
+                    .and_then(|r| r.get("tier"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                println!("{}", tier);
+                return Ok(());
+            };
+            if tier != "local" && tier != "remote" {
+                anyhow::bail!("tier must be 'local' or 'remote', not '{}'", tier);
+            }
+            let response = send_request(Request::new("tier.set", json!({ "tier": tier }))).await?;
+            match (response.ok, response.result) {
+                (true, Some(result)) => {
+                    let field = |k: &str| {
+                        result
+                            .get(k)
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?")
+                            .to_string()
+                    };
+                    println!("Now answering with {} ({})", field("model"), field("tier"));
+                    println!("{}", field("privacy"));
+                }
+                _ => anyhow::bail!(
+                    "{}",
+                    response
+                        .error
+                        .unwrap_or_else(|| "could not switch tier".into())
+                ),
+            }
+        }
+        Commands::Egress { action } => {
+            let config = jarvis_core::config::Config::load();
+            let file = config
+                .general
+                .data_dir
+                .join(jarvis_core::egress::ALLOW_FILE);
+            match action {
+                EgressCommands::List => {
+                    let from_config = &config.egress.file_allow;
+                    let from_prompts = jarvis_core::egress::allowed_folders(&file);
+                    if from_config.is_empty() && from_prompts.is_empty() {
+                        println!("No folders allowed: files are asked about before they are sent.");
+                    }
+                    for folder in from_config {
+                        println!("{}  (config.toml)", folder);
+                    }
+                    for folder in from_prompts {
+                        println!("{}", folder);
+                    }
+                }
+                EgressCommands::Allow { folder } => {
+                    let folder = absolute_folder(&folder)?;
+                    let home = dirs::home_dir().unwrap_or_default();
+                    let policy = jarvis_core::egress::Policy::defaults(&home);
+                    if policy.is_never(&folder) {
+                        anyhow::bail!(
+                            "files under {} are never sent to a remote model; allowing it would have no effect",
+                            folder.display()
+                        );
+                    }
+                    let folder = folder.display().to_string();
+                    if jarvis_core::egress::allow_folder(&file, &folder)? {
+                        println!(
+                            "Allowed: files in {} may be sent to a remote model (redacted).",
+                            folder
+                        );
+                    } else {
+                        println!("Already allowed: {}", folder);
+                    }
+                }
+                EgressCommands::Remove { folder } => {
+                    let folder = absolute_folder(&folder)?.display().to_string();
+                    if jarvis_core::egress::disallow_folder(&file, &folder)? {
+                        println!("Removed: files in {} will be asked about again.", folder);
+                    } else {
+                        println!("Not in the list: {}", folder);
+                    }
+                }
             }
         }
         Commands::MemoryStats => {

@@ -274,6 +274,12 @@ fn attempt_config(case: &Case, sandbox: &Sandbox, options: &RunOptions) -> Resul
     config.general.data_dir = sandbox.data.clone();
     config.memory.db_path = sandbox.data.join("memory.db");
     config.mcp = None;
+    // Fixture files are not private. With a remote model, asking before
+    // sending them would grade the privacy rules instead of the model; the
+    // egress cases (`remote = true`) test those rules and keep them.
+    if !case.remote {
+        config.egress.file_allow = vec![sandbox.files.display().to_string()];
+    }
     if case.web {
         let mut servers = Vec::new();
         for name in WEB_SERVERS {

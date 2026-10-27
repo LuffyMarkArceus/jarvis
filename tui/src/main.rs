@@ -112,8 +112,12 @@ fn perform(
                     app.on_disconnected(offline_message(socket));
                 }
             }
-            Action::Confirm { id, approved } => match client.as_ref() {
-                Some(client) => client.confirm(id, approved),
+            Action::Confirm {
+                id,
+                approved,
+                choice,
+            } => match client.as_ref() {
+                Some(client) => client.confirm(id, approved, choice),
                 None => app.note(Entry::error(
                     "Cannot answer: the daemon is not connected.".to_string(),
                 )),

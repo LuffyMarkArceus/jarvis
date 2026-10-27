@@ -159,6 +159,7 @@ pub enum Pending {
     Recall,
     Status,
     Tools,
+    Tier,
 }
 
 /// What `main` has to do after a key press or daemon event.
@@ -169,10 +170,11 @@ pub enum Action {
         params: Value,
         pending: Pending,
     },
-    /// Answer a tool confirmation prompt.
+    /// Answer a tool confirmation prompt; `choice` when it offered several.
     Confirm {
         id: Uuid,
         approved: bool,
+        choice: Option<char>,
     },
     /// Stop a running request without closing the connection.
     Cancel {
@@ -229,6 +231,8 @@ pub enum Command {
     Tools,
     Session,
     Recall(String),
+    /// `/remote` (true) or `/local` (false).
+    Tier(bool),
     Clear,
     Quit,
 }
@@ -246,6 +250,8 @@ pub fn parse_command(text: &str) -> Option<Command> {
         "/prune" => Command::Prune,
         "/recall" => Command::Recall(rest),
         "/status" => Command::Status,
+        "/remote" => Command::Tier(true),
+        "/local" => Command::Tier(false),
         "/tools" => Command::Tools,
         "/session" => Command::Session,
         "/clear" => Command::Clear,
@@ -508,6 +514,11 @@ impl App {
                 params: json!({}),
                 pending: Pending::Tools,
             }],
+            Command::Tier(remote) => vec![Action::Request {
+                method: "tier.set",
+                params: json!({ "tier": if remote { "remote" } else { "local" } }),
+                pending: Pending::Tier,
+            }],
         }
     }
 
@@ -692,6 +703,22 @@ impl App {
                 )));
                 vec![]
             }
+            Some(Pending::Tier) => {
+                let field = |k: &str| {
+                    result
+                        .get(k)
+                        .and_then(Value::as_str)
+                        .unwrap_or("?")
+                        .to_string()
+                };
+                self.note(Entry::system(format!(
+                    "Now answering with {} ({}). {}",
+                    field("model"),
+                    field("tier"),
+                    field("privacy")
+                )));
+                vec![]
+            }
             Some(Pending::Tools) => {
                 let tools = result
                     .get("tools")
@@ -760,6 +787,7 @@ impl App {
                 return vec![Action::Confirm {
                     id: request.id,
                     approved: false,
+                    choice: None,
                 }];
             }
             if matches!(self.pending, Some(Pending::Turn)) {
@@ -840,20 +868,29 @@ impl App {
         match overlay {
             Overlay::Help => vec![],
             Overlay::Recall(_) => vec![],
-            Overlay::Confirm(request) => match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => vec![Action::Confirm {
+            Overlay::Confirm(request) => {
+                let answer = |approved, choice| Action::Confirm {
                     id: request.id,
-                    approved: true,
-                }],
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => vec![Action::Confirm {
-                    id: request.id,
-                    approved: false,
-                }],
-                _ => {
-                    self.overlay = Some(Overlay::Confirm(request));
-                    vec![]
+                    approved,
+                    choice,
+                };
+                match key.code {
+                    // `y` is the plain yes: the first choice, if any.
+                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+                        vec![answer(true, request.choices.first().map(|c| c.key))]
+                    }
+                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                        vec![answer(false, None)]
+                    }
+                    KeyCode::Char(c) if request.choices.iter().any(|x| x.key == c) => {
+                        vec![answer(true, Some(c))]
+                    }
+                    _ => {
+                        self.overlay = Some(Overlay::Confirm(request));
+                        vec![]
+                    }
                 }
-            },
+            }
             Overlay::Sessions { rows, mut selected } => {
                 let last = rows.len().saturating_sub(1);
                 match key.code {
@@ -1179,6 +1216,7 @@ mod tests {
             tool: "shell.run".into(),
             args: json!({"command": "firefox"}),
             prompt: "Run shell command: firefox".into(),
+            choices: Vec::new(),
         }));
 
         // An unrelated key must not dismiss or approve the request.
@@ -1189,9 +1227,46 @@ mod tests {
         let actions = press(&mut app, KeyCode::Char('n'));
         assert!(matches!(
             actions.as_slice(),
-            [Action::Confirm { id: answer, approved: false }] if *answer == id
+            [Action::Confirm { id: answer, approved: false, .. }] if *answer == id
         ));
         assert!(app.overlay.is_none());
+    }
+
+    #[test]
+    fn a_prompt_with_choices_answers_with_the_key_pressed() {
+        let prompt = || {
+            Overlay::Confirm(ConfirmationRequest {
+                id: Uuid::nil(),
+                tool: "egress.send".into(),
+                args: json!({}),
+                prompt: "Send?".into(),
+                choices: vec![
+                    jarvis_common::ipc::Choice {
+                        key: 'y',
+                        label: "send once".into(),
+                    },
+                    jarvis_common::ipc::Choice {
+                        key: 'a',
+                        label: "always".into(),
+                    },
+                ],
+            })
+        };
+        let mut app = App::new("test".into());
+        for (key, expected) in [('a', Some('a')), ('y', Some('y'))] {
+            app.overlay = Some(prompt());
+            let actions = press(&mut app, KeyCode::Char(key));
+            assert!(
+                matches!(actions.as_slice(), [Action::Confirm { approved: true, choice, .. }] if *choice == expected),
+                "{}: {:?}",
+                key,
+                actions
+            );
+        }
+        // A key that was not offered neither approves nor dismisses.
+        app.overlay = Some(prompt());
+        assert!(press(&mut app, KeyCode::Char('x')).is_empty());
+        assert!(app.overlay.is_some());
     }
 
     #[test]
@@ -1202,6 +1277,7 @@ mod tests {
             tool: "shell.run".into(),
             args: json!({}),
             prompt: "Run?".into(),
+            choices: Vec::new(),
         }));
         app.on_disconnected("gone".into());
         assert!(app.overlay.is_none());
@@ -1255,6 +1331,7 @@ mod tests {
             tool: "shell.run".into(),
             args: json!({"command": "firefox"}),
             prompt: "Run shell command: firefox".into(),
+            choices: Vec::new(),
         }));
         let actions = app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert!(matches!(

@@ -20,6 +20,8 @@ pub struct EvalArgs {
     pub repeat: usize,
     pub model: Option<String>,
     pub offline: bool,
+    /// Evaluate the `[remote]` model instead of `[model]`.
+    pub remote: bool,
     pub record: bool,
     pub timeout: u64,
 }
@@ -37,6 +39,13 @@ pub async fn run(args: EvalArgs) -> anyhow::Result<()> {
     }
 
     let mut base = Config::load();
+    if args.remote {
+        let remote = base
+            .remote
+            .clone()
+            .context("--remote needs a [remote] section in config.toml")?;
+        base.model = remote.model;
+    }
     if let Some(model) = &args.model {
         base.model.default_model = model.clone();
     }
