@@ -184,6 +184,47 @@ and the eval tells us what fails next. A score that did not move after a
 correct fix is information: it means a second cause was hidden behind the
 first, and the trace shows which."
 
+## 12. Write the expectation from intent, then triage every mismatch
+
+**Lesson.** Expectations come from what the right behaviour is, never from
+what the code does today; otherwise every case passes by construction and
+the suite defends the current bugs. Then every failure goes into one of
+three bins, each with its own response: a **code bug** is fixed, a **wrong
+case** is corrected with the reason in its note, and a **model limit** is
+left failing, because it is the gap a better model should close.
+
+**In this repo.** Of 21 new cases, the first llama3.2:1b run failed 13.
+Three were code: "how do I list files in python?" listed the current
+directory; "clean up /x by removing everything" listed /x; "how much RAM"
+went to the model, which said 16 GB on a 15.5 GiB machine (`router.rs`,
+`tools/system.rs`). One was my case: it required the word "recursive" and
+failed "deletes a directory and all its contents". The rest were the model:
+"good morning" in Spanish answered as "bonjour", a path segment dropped.
+
+**Say it in an interview.** "We write expectations from the spec, not from
+the output, and triage each failure as code, case or model. The bins matter
+because the responses are opposite: you fix code, you correct a case, and
+you deliberately leave a model failure red, because it is the gap that
+justifies a model upgrade."
+
+## 13. A grounding check catches invented facts, not misplaced ones
+
+**Lesson.** Checking that every figure in an answer appears in the sources
+catches fabrication. It does not catch a real fact from the source attached
+to the wrong question, which is often the more convincing error.
+
+**In this repo.** For "who won the Nobel Prize in Physics in 2024?" search
+returned the general prize article, whose infobox lists the most recent
+(2026) laureate. llama3.2:1b answered with that name. Every word was in the
+source, so the figure check had nothing to flag. The root cause is
+retrieval - only the top hit is read - and `web.latest_news` fails the same
+way, which is how two cases point at one fix.
+
+**Say it in an interview.** "Our hallucination guard checks that claims are
+in the retrieved text. That is necessary but not sufficient: 'in the
+source' is not 'answers the question'. We found it through an eval case,
+and traced it to reading only the top search result."
+
 ---
 
 ## Self-test
@@ -206,6 +247,10 @@ Answer out loud, without opening the code:
    stored on the `Orchestrator`?
 9. CI grades the suite with a scripted model. Name one bug it can catch and
    one it cannot.
+10. `route.python_listing` passed in CI while the real run listed the repo.
+    Which missing line in the case let that happen?
+11. Why does the router send "what would rm -rf /x do?" to `Direct` rather
+    than to the model with tools?
 
 ## Skills map: SDE2 -> senior
 

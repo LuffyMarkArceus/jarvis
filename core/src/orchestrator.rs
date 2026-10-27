@@ -1476,13 +1476,17 @@ fn compact_output(tool: &str, res: &Value) -> String {
             Some(path) => format!("wrote {}", path),
             None => serde_json::to_string(res).unwrap_or_default(),
         },
+        // Every field the tool returns. A list of names here once dropped
+        // memory_total when the tool gained it.
         "system.info" => {
-            let parts: Vec<String> = ["hostname", "os", "arch"]
-                .iter()
-                .filter_map(|k| {
-                    res.get(*k)
-                        .and_then(|v| v.as_str())
-                        .map(|v| format!("{}={}", k, v))
+            let parts: Vec<String> = res
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter_map(|(k, v)| match v {
+                    Value::String(s) => Some(format!("{}={}", k, s)),
+                    Value::Null => None,
+                    other => Some(format!("{}={}", k, other)),
                 })
                 .collect();
             if parts.is_empty() {
@@ -1892,6 +1896,25 @@ mod tests {
 
     fn path_and_content() -> Vec<String> {
         vec!["path".into(), "content".into()]
+    }
+
+    #[test]
+    fn every_system_info_field_reaches_the_answer() {
+        // The renderer used to name hostname, os and arch, and silently
+        // dropped memory_total when the tool started returning it.
+        let res = json!({
+            "hostname": "box", "os": "linux", "arch": "x86_64",
+            "memory_total": "15.5 GiB", "cpu_threads": 4, "cpu_model": null
+        });
+        let out = compact_output("system.info", &res);
+        for part in ["hostname=box", "memory_total=15.5 GiB", "cpu_threads=4"] {
+            assert!(out.contains(part), "{} missing from {}", part, out);
+        }
+        assert!(
+            !out.contains("cpu_model"),
+            "null fields are left out: {}",
+            out
+        );
     }
 
     #[test]
