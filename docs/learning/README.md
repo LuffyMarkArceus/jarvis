@@ -282,6 +282,25 @@ reason in the other direction.
 separate fields in the protocol, stdout versus stderr in the CLI - because
 anything stored inside the content will eventually be treated as content."
 
+## 17. Change a protocol so the old reading stays correct
+
+**Lesson.** When a message gains a field, an old client that ignores it
+must still behave safely. Make new fields optional, and define what their
+absence means so it maps onto the old behaviour. Then ask what an old
+client's answer would *mean* under the new rules.
+
+**In this repo.** The confirmation prompt gained choices (`[y] send once`,
+`[a] always allow <folder>`). A client that knows only yes/no replies
+`approved: true` with no choice; `ConfirmationReply::selected` reads that as
+the *first* choice. So the first choice must always be the narrowest yes -
+"send once", never "always" - or an old client would grant more than its
+user saw. A key that was not offered approves nothing.
+
+**Say it in an interview.** "We version by additive, optional fields and
+pin down the default meaning of an absent field. The design rule that fell
+out was that the default yes must be the least permissive option, because
+that is what every client that predates the change will send."
+
 ---
 
 ## Self-test
@@ -315,6 +334,8 @@ Answer out loud, without opening the code:
     Why did that break role-based labelling, and where is the label set now?
 14. Your search questions leave the machine even with a local model. Why
     does the egress check not see them?
+15. Why is "always allow" offered for a file but never for command output?
+16. Why must the first choice in a prompt be the narrowest yes?
 
 ## Skills map: SDE2 -> senior
 
