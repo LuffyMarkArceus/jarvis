@@ -232,9 +232,10 @@ pub fn diff(results: &Path, old: Option<&str>, new: Option<&str>) -> anyhow::Res
     let old_run = match old {
         Some(name) => load(&find(name)?)?,
         // The previous run of the same model and grading - comparing against
-        // another model would mostly measure the model - preferring one that
-        // covers every case of the new run: a run filtered to six cases is a
-        // poor baseline for a full one.
+        // another model would mostly measure the model - that shares the most
+        // cases with the new one, newest first among equals. A run filtered
+        // to five cases is a poor baseline for a full one, and when a suite
+        // gains cases no earlier run covers them all.
         None => {
             let earlier: Vec<Run> = files
                 .iter()
@@ -243,8 +244,19 @@ pub fn diff(results: &Path, old: Option<&str>, new: Option<&str>) -> anyhow::Res
                 .filter_map(|p| load(p).ok())
                 .filter(|r| r.model == new_run.model && r.grading == new_run.grading)
                 .collect();
-            let covers = |r: &Run| new_run.cases.keys().all(|k| r.cases.contains_key(k));
-            let pick = earlier.iter().position(covers).unwrap_or(0);
+            let shared = |r: &Run| {
+                new_run
+                    .cases
+                    .keys()
+                    .filter(|k| r.cases.contains_key(*k))
+                    .count()
+            };
+            // `earlier` is newest first, and max_by_key keeps the last
+            // maximum, so search it reversed to keep the newest.
+            let pick = (0..earlier.len())
+                .rev()
+                .max_by_key(|i| shared(&earlier[*i]))
+                .unwrap_or(0);
             earlier
                 .into_iter()
                 .nth(pick)
