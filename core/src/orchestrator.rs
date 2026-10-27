@@ -283,6 +283,43 @@ impl TurnRecorder {
     }
 }
 
+/// The line shown under every answer: what produced it and where it ran.
+///
+/// Kept beside the answer, never in it: stored in history, it would be sent
+/// back to the model as content and imitated in later replies.
+pub fn footer(report: &TurnReport, model: &str, provider: &str) -> String {
+    if report.model_calls == 0 {
+        // A deterministic answer: say which tool, and that no model was used.
+        return match report.calls.first() {
+            Some(call) => format!("answered by {} · no model", call.name),
+            None => "no model".to_string(),
+        };
+    }
+    let mut parts = vec![model.to_string()];
+    parts.push(if report.remote {
+        format!("remote: {}", provider)
+    } else {
+        "local".to_string()
+    });
+    let tokens = report.prompt_tokens.unwrap_or(0) + report.completion_tokens.unwrap_or(0);
+    if report.prompt_tokens.is_some() || report.completion_tokens.is_some() {
+        parts.push(format!("{} tokens", short_count(tokens)));
+    }
+    if report.redacted > 0 {
+        parts.push(format!("{} redacted", report.redacted));
+    }
+    parts.join(" · ")
+}
+
+/// 950 -> "950", 1234 -> "1.2k", 15000 -> "15k".
+fn short_count(n: u64) -> String {
+    match n {
+        0..=999 => n.to_string(),
+        1_000..=9_999 => format!("{:.1}k", n as f64 / 1000.0),
+        _ => format!("{}k", n / 1000),
+    }
+}
+
 /// The route in the spelling used by the golden routing test and eval cases.
 pub fn route_label(route: &Route) -> String {
     match route {
@@ -588,6 +625,23 @@ impl Orchestrator {
         self.run_turn(input, confirm, cancel, sink)
             .await
             .map(|report| report.answer)
+    }
+
+    /// One turn's answer and its footer, for clients that show both.
+    pub async fn run_with_footer(
+        &self,
+        input: &str,
+        confirm: Option<&dyn ConfirmationHandler>,
+        cancel: Option<&Cancellation>,
+        sink: Option<&UnboundedSender<String>>,
+    ) -> Result<(String, String)> {
+        let report = self.run_turn(input, confirm, cancel, sink).await?;
+        let footer = footer(
+            &report,
+            &self.config.model.default_model,
+            self.client.name(),
+        );
+        Ok((report.answer, footer))
     }
 
     /// Handle one user turn and report what happened in it, not just the
@@ -2126,6 +2180,53 @@ mod tests {
 
     fn path_and_content() -> Vec<String> {
         vec!["path".into(), "content".into()]
+    }
+
+    fn turn(
+        model_calls: u32,
+        tokens: Option<(u64, u64)>,
+        remote: bool,
+        redacted: usize,
+    ) -> TurnReport {
+        TurnReport {
+            model_calls,
+            prompt_tokens: tokens.map(|t| t.0),
+            completion_tokens: tokens.map(|t| t.1),
+            remote,
+            redacted,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_footer_says_what_answered_and_where() {
+        assert_eq!(
+            footer(
+                &turn(1, Some((1100, 134)), false, 0),
+                "qwen2.5:3b",
+                "ollama"
+            ),
+            "qwen2.5:3b · local · 1.2k tokens"
+        );
+        assert_eq!(
+            footer(&turn(2, Some((30_000, 500)), true, 2), "claude", "openai"),
+            "claude · remote: openai · 30k tokens · 2 redacted"
+        );
+        assert_eq!(footer(&turn(1, None, false, 0), "m", "p"), "m · local");
+    }
+
+    #[test]
+    fn a_deterministic_answer_says_no_model_was_used() {
+        let mut report = turn(0, None, false, 0);
+        report.calls.push(ToolCallRecord {
+            name: "system.info".into(),
+            args: json!({}),
+            status: "executed",
+        });
+        assert_eq!(
+            footer(&report, "m", "p"),
+            "answered by system.info · no model"
+        );
     }
 
     #[test]

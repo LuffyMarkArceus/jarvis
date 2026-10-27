@@ -23,6 +23,8 @@ pub enum Role {
 pub struct Entry {
     pub role: Role,
     pub text: String,
+    /// Under an answer: what produced it and where it ran.
+    pub footer: Option<String>,
 }
 
 impl Entry {
@@ -30,6 +32,7 @@ impl Entry {
         Self {
             role: Role::User,
             text: text.into(),
+            footer: None,
         }
     }
 
@@ -37,6 +40,7 @@ impl Entry {
         Self {
             role: Role::Assistant,
             text: text.into(),
+            footer: None,
         }
     }
 
@@ -44,6 +48,7 @@ impl Entry {
         Self {
             role: Role::System,
             text: text.into(),
+            footer: None,
         }
     }
 
@@ -51,6 +56,7 @@ impl Entry {
         Self {
             role: Role::Error,
             text: text.into(),
+            footer: None,
         }
     }
 }
@@ -569,17 +575,20 @@ impl App {
                     self.note(Entry::system("Cancelled."));
                     return vec![];
                 }
+                let footer = result
+                    .get("footer")
+                    .and_then(Value::as_str)
+                    .map(String::from);
                 if text.trim().is_empty() {
                     self.note(Entry::error("The daemon returned an empty answer."));
-                } else if let Some(index) = streaming_index {
-                    if index < self.entries.len() {
-                        self.entries[index].role = Role::Assistant;
-                        self.entries[index].text = text;
-                    } else {
-                        self.note(Entry::assistant(text));
-                    }
+                } else if let Some(index) = streaming_index.filter(|i| *i < self.entries.len()) {
+                    self.entries[index].role = Role::Assistant;
+                    self.entries[index].text = text;
+                    self.entries[index].footer = footer;
                 } else {
-                    self.note(Entry::assistant(text));
+                    let mut entry = Entry::assistant(text);
+                    entry.footer = footer;
+                    self.note(entry);
                 }
                 vec![]
             }
@@ -1041,6 +1050,23 @@ mod tests {
         app.input.insert_str("two");
         assert_eq!(app.input.text(), "one\ntwo");
         assert!(app.entries.iter().all(|entry| entry.role != Role::User));
+    }
+
+    #[test]
+    fn the_footer_is_kept_beside_the_answer_not_in_it() {
+        let mut app = App::new("test".into());
+        let request = Request::new("ask", json!({"prompt": "hi"}));
+        app.begin_request(request.id, Pending::Turn);
+        app.on_response(Response::ok(
+            request.id,
+            json!({"response": "hello", "footer": "qwen2.5:3b · local · 40 tokens"}),
+        ));
+        let entry = app.entries.last().unwrap();
+        assert_eq!(entry.text, "hello");
+        assert_eq!(
+            entry.footer.as_deref(),
+            Some("qwen2.5:3b · local · 40 tokens")
+        );
     }
 
     #[test]

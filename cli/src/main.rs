@@ -31,6 +31,17 @@ impl ConfirmationHandler for TerminalConfirmer {
     }
 }
 
+/// The line under an answer, dimmed on a terminal. When stdout is piped it
+/// goes to stderr: it describes the answer and is not part of it, so
+/// `jarvis ask ... | grep` sees only the answer.
+fn print_footer(footer: &str, terminal: bool) {
+    if terminal {
+        println!("\x1b[2m{}\x1b[0m", footer);
+    } else {
+        eprintln!("{}", footer);
+    }
+}
+
 /// Show a prompt and read a yes/no answer. Anything but an explicit yes is no.
 fn ask_yn(prompt: &str) -> bool {
     eprintln!();
@@ -495,6 +506,12 @@ async fn main() -> anyhow::Result<()> {
                             if !printed {
                                 println!("{}", resp);
                             }
+                            if let Some(footer) = result
+                                .and_then(|r| r.get("footer"))
+                                .and_then(|f| f.as_str())
+                            {
+                                print_footer(footer, interactive);
+                            }
                             return Ok(());
                         }
                     }
@@ -509,8 +526,11 @@ async fn main() -> anyhow::Result<()> {
                     // Fallback to direct mode
                     info!("Daemon not running, using direct mode");
                     let orch = Orchestrator::new()?;
-                    let response = orch.run_with(&prompt, Some(&TerminalConfirmer)).await?;
+                    let (response, footer) = orch
+                        .run_with_footer(&prompt, Some(&TerminalConfirmer), None, None)
+                        .await?;
                     println!("{}", response);
+                    print_footer(&footer, std::io::stdout().is_terminal());
                 }
             }
         }

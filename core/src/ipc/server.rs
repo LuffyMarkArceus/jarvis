@@ -456,7 +456,7 @@ async fn handle_ask(
             cancel: cancel.clone(),
         };
         daemon_lock
-            .ask_streaming(&prompt, Some(&confirmer), Some(&cancel), Some(&sink))
+            .ask_with_footer(&prompt, Some(&confirmer), Some(&cancel), Some(&sink))
             .await
     };
 
@@ -464,7 +464,10 @@ async fn handle_ask(
     let _ = chunk_task.await;
 
     match result {
-        Ok(response) => Response::ok(id, serde_json::json!({"response": response})),
+        Ok((response, footer)) => Response::ok(
+            id,
+            serde_json::json!({"response": response, "footer": footer}),
+        ),
         // Cancellation is a client action, not a failure of the request.
         Err(JarvisError::Cancelled) => {
             Response::ok(id, serde_json::json!({"cancelled": true, "response": ""}))

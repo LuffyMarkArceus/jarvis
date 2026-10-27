@@ -74,9 +74,22 @@ impl Daemon {
         cancel: Option<&Cancellation>,
         sink: Option<&UnboundedSender<String>>,
     ) -> Result<String> {
+        self.ask_with_footer(prompt, confirm, cancel, sink)
+            .await
+            .map(|(answer, _)| answer)
+    }
+
+    /// A turn's answer and the footer line shown under it.
+    pub async fn ask_with_footer(
+        &self,
+        prompt: &str,
+        confirm: Option<&dyn ConfirmationHandler>,
+        cancel: Option<&Cancellation>,
+        sink: Option<&UnboundedSender<String>>,
+    ) -> Result<(String, String)> {
         let orch = self.orchestrator.lock().await;
         let session_id = orch.session_id().to_string();
-        let result = orch.run_with_options(prompt, confirm, cancel, sink).await?;
+        let (result, footer) = orch.run_with_footer(prompt, confirm, cancel, sink).await?;
         // Auto-title if this is a new session with few messages
         if let Some(ref mem) = self.memory {
             if let Ok(count) = mem.get_message_count(&session_id) {
@@ -103,7 +116,7 @@ impl Daemon {
                 }
             }
         }
-        Ok(result)
+        Ok((result, footer))
     }
 
     pub async fn set_session(&self, session_id: &str) -> Result<()> {

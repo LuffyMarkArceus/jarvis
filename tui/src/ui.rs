@@ -120,6 +120,9 @@ fn transcript_lines(entries: &[Entry], width: usize) -> Vec<Line<'static>> {
         for wrapped in wrap::wrap(&entry.text, body_width) {
             lines.push(Line::styled(format!("  {wrapped}"), body_style));
         }
+        if let Some(footer) = &entry.footer {
+            lines.push(Line::styled(format!("  {footer}"), dim));
+        }
     }
 
     lines
