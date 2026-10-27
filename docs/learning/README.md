@@ -245,6 +245,43 @@ is quoted into a reply or saved to history, its origin can no longer be
 read off the message. This is the same idea as taint tracking for prompt
 injection, so one mechanism serves privacy and security."
 
+## 15. A test that passed first time has not been tested yet
+
+**Lesson.** A new test that passes at once proves only that it does not
+fail. Before trusting it, break the code it protects and watch it fail.
+This is mutation testing done by hand, and it matters most for protective
+code, where the bug you fear is "the protection silently does nothing".
+
+**In this repo.** The redactor's nine tests passed first time; a harder
+test then found that redacting twice turned `<SECRET_1>` into `<SECRET_3>`.
+For the egress gateway, the check was switched off (`if false && ...`): the
+five protection tests failed and the three allowed-behaviour tests still
+passed - which shows each test measures what its name says. The same
+mutation run against the eval cases showed that `asked` was not graded
+without a model, which no passing run could have revealed.
+
+**Say it in an interview.** "For security-relevant code we break the
+protection on purpose and check the suite goes red. Green-first tests often
+assert something incidental. It also told us which checks our CI mode
+silently skipped."
+
+## 16. Metadata travels beside content, not inside it
+
+**Lesson.** Information *about* a message - who produced it, what it cost,
+where it came from - must not be stored as part of the message. Mixed into
+the content, it is re-read as content later.
+
+**In this repo.** The footer (`qwen2.5:3b · local · 1.2k tokens`) is
+returned as its own field, never appended to the answer: in history it
+would be sent back to the model and imitated. The CLI writes it to stderr
+when stdout is piped, so scripts get only the answer. The egress label
+lives in `ChatMessage` as a field that is never serialized, for the same
+reason in the other direction.
+
+**Say it in an interview.** "Content and metadata get separate channels -
+separate fields in the protocol, stdout versus stderr in the CLI - because
+anything stored inside the content will eventually be treated as content."
+
 ---
 
 ## Self-test
@@ -274,6 +311,10 @@ Answer out loud, without opening the code:
 12. The owner allowed `memory` to go to a remote model and required an
     allow-list for files. How could a file still leave as "memory", and what
     stops it?
+13. A text-embedded tool call's result is sent back with the `user` role.
+    Why did that break role-based labelling, and where is the label set now?
+14. Your search questions leave the machine even with a local model. Why
+    does the egress check not see them?
 
 ## Skills map: SDE2 -> senior
 

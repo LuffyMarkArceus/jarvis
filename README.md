@@ -6,9 +6,10 @@ Python sidecars + TypeScript UI.
 ## Status
 
 Phase 5 - an eval harness (`jarvis eval`, see [evals/README.md](evals/README.md))
-that measures answers per model, on top of Phase 4's web search, answer
-grounding, recall across sessions and provider abstraction (Ollama and any
-OpenAI-compatible server).
+that measures answers per model, and privacy rules for remote models
+(redaction, per-folder allow-lists, a footer on every answer), on top of
+Phase 4's web search, answer grounding, recall across sessions and provider
+abstraction (Ollama and any OpenAI-compatible server).
 
 ## Build
 
@@ -153,6 +154,48 @@ streaming), and token counts are absent unless the request asks for them with
 `stream_options.include_usage`. Options are translated too - `num_ctx` has no
 equivalent and is dropped rather than sent as an unknown field, which some
 servers reject.
+
+## Privacy: local and remote models
+
+Every answer ends with a footer saying what produced it and where:
+
+```
+qwen2.5:3b · local · 1.2k tokens
+answered by system.info · no model
+claude · remote: openai · 30k tokens · 2 redacted
+```
+
+A provider on this machine (`127.0.0.1`, `localhost`) is local; anything
+else, including the home network, is remote unless `model.locality` says
+otherwise. Requests to a remote provider pass through one check
+(`core/src/egress`):
+
+* Secrets (key formats, private keys, tokens, `PASSWORD=...`) and structured
+  personal data (emails, phone numbers, card numbers, IPs) are replaced by
+  placeholders such as `<EMAIL_1>`. Personal data is put back into the
+  answer on this machine; secrets never are. Names and free-text personal
+  details are **not** detected.
+* File contents go only from folders in `[egress] file_allow`; anything else
+  is asked about first, and `~/.ssh`, `~/.gnupg`, `~/.aws`,
+  `~/.config/jarvis` and `.env` files are never sent.
+* Command output and machine information are asked about.
+* Each message's origin is stored with it, so a file shown last week does
+  not leave as "memory".
+
+```toml
+[model]
+provider = "openai"
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+data_policy = "may_train"     # no_training | may_train | unknown
+
+[egress]
+file_allow = ["~/projects/jarvis"]
+```
+
+`jarvis status` shows whether requests leave the machine and whether the
+provider may train on them. The design and its open items are in
+[docs/design/model-tiers.md](docs/design/model-tiers.md).
 
 ## MCP sidecars
 

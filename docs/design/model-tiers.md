@@ -1,6 +1,7 @@
 # Design: local and hosted model tiers (Phase 5b)
 
-Status: **decided** (2026-10-27), being built in the order at the end.
+Status: **decided** (2026-10-27). Steps 1-3 and 5 are built; step 4 (the
+scoped prompt and allow-list commands) is next. See "Build order".
 Decisions are the owner's; the rules and mechanisms are how they are kept.
 
 ## Problem
@@ -171,12 +172,36 @@ from tagged eval runs about which requests the local model fails.
 
 ## Build order
 
-1. Redactor (`core/src/egress/redact.rs`): pure, the most test-heavy part.
-   **Done.**
+1. Redactor (`core/src/egress/redact.rs`). **Done.**
 2. Origins, propagation and the policy check (`core/src/egress/mod.rs`).
    **Done.**
-3. Labels persisted with each message (schema change) and carried by recall;
-   provider `locality` and `data_policy`; the check wired in front of the
-   provider; the footer.
-4. The ask prompt in CLI and TUI; the allow-list commands.
-5. Eval: recording provider and `sent_excludes` cases.
+3. **Done.** Labels travel inside `ChatMessage` (never serialized) and are
+   stored with each message; recall carries them. `model.locality` and
+   `model.data_policy` (a misspelt value stops startup; `jarvis status`
+   shows the notice). Every model request goes through
+   `Orchestrator::ask_model`: check, ask, redact, send, restore. The footer
+   is returned beside the answer and shown by CLI and TUI.
+4. **Next.** The scoped prompt (once / always for this folder / answer
+   locally) in CLI and TUI, replacing today's yes/no `egress.send`; allow-list
+   commands (`jarvis egress allow <dir>`); a second, local provider so
+   "answer locally" can actually answer, plus `/local` and `/remote`.
+5. **Done.** `remote = true` eval cases with `sent_contains` /
+   `sent_excludes` (`evals/cases/egress.toml`), graded with or without a
+   model.
+
+Until step 4, a declined or `never` request is not answered at all: there is
+only one provider, so "answer locally" has nothing to answer with.
+
+## Known gaps
+
+* **Web search queries leave the machine on any tier.** The search sidecar
+  sends the query to its backend, and this check covers model requests
+  only, so a query is neither checked nor redacted. It needs its own rule
+  (at least the redactor) at the MCP call.
+* **Names and free-text personal details** are not redacted (see
+  Redaction).
+* **A redacted remote answer is not streamed**: a placeholder split across
+  chunks would be shown before it is restored. A small look-behind buffer
+  would allow streaming again.
+* **Symlinks** are not resolved when matching paths: a link inside an
+  allowed folder that points into `~/.ssh` is judged by the link's path.
