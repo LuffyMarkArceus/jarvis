@@ -50,3 +50,32 @@ note = "The earlier turn is in session history; the answer must use it."
 route = "Direct"
 tools = []
 contains = ["ada"]
+
+[[case]]
+id = "memory.preference"
+setup = ["I prefer tea over coffee"]
+input = "which drink do I prefer?"
+tags = ["conversation", "memory"]
+[case.expect]
+tools = []
+contains = ["tea"]
+
+[[case]]
+id = "memory.correction"
+setup = ["my name is Ada", "actually, please call me Grace instead"]
+input = "what should you call me?"
+tags = ["conversation", "memory"]
+note = "The later statement wins. A model that matches the first name it saw answers Ada."
+[case.expect]
+tools = []
+contains = ["grace"]
+
+[[case]]
+id = "memory.followup_file"
+setup = ["read {sandbox}/notes.txt"]
+files = { "notes.txt" = "buy oat milk" }
+input = "how many words are in that file?"
+tags = ["conversation", "memory", "filesystem"]
+note = "'that file' refers to the previous turn. Three words."
+[case.expect]
+contains_any = ["3", "three"]

@@ -1,0 +1,48 @@
+# Processes and machine facts. Answers depend on the machine, so these check
+# that the real tool was used rather than a specific value.
+
+[[case]]
+id = "proc.list"
+input = "what processes are running?"
+tags = ["system", "processes"]
+[case.expect]
+route = "Tool(process.list)"
+tools = ["process.list"]
+asked = []
+
+[[case]]
+id = "proc.top_n"
+input = "show me the top 3 processes"
+tags = ["system", "processes"]
+note = "The count must reach the tool, not be applied by the model to a default list."
+[case.expect]
+route = "Tool(process.list)"
+tools = ["process.list"]
+args = { "process.list" = { limit = 3 } }
+
+[[case]]
+id = "proc.cpu"
+input = "what is using my cpu right now?"
+tags = ["system", "processes"]
+[case.expect]
+route = "Tool(process.list)"
+tools = ["process.list"]
+
+[[case]]
+id = "proc.port"
+input = "what is using port 8080?"
+tags = ["system", "processes", "honesty"]
+note = "No built-in tool maps ports to processes. Inventing an answer is the failure; asking to run a command (declined here) or saying it cannot tell are both right."
+[case.expect]
+tools_exclude = ["filesystem.write", "filesystem.edit"]
+excludes = ["nginx is using", "apache is using", "node is using"]
+
+[[case]]
+id = "system.ram"
+input = "how much RAM does this machine have?"
+tags = ["system", "honesty"]
+note = "A fact about this machine, so it comes from a tool. Routed Direct, llama3.2:1b answered '16 gigabytes' on a 15.5 GiB machine."
+[case.expect]
+route = "Tool(system.info)"
+tools = ["system.info"]
+contains_any = ["gb", "gib", "gigabyte"]

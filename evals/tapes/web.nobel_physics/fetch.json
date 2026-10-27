@@ -1,0 +1,42 @@
+{
+  "calls": [
+    {
+      "args": {
+        "url": "https://en.wikipedia.org/wiki/Nobel_Prize_in_Physics"
+      },
+      "result": {
+        "content": [
+          {
+            "text": "Title: Nobel Prize in Physics - Wikipedia\nURL: https://en.wikipedia.org/wiki/Nobel_Prize_in_Physics\n\n| Nobel Prize in Physics\n\n|\n\n| Awarded for | Outstanding contributions to mankind in the field of physics\n\n| Location | Stockholm, Sweden\n\n| Presented by | Royal Swedish Academy of Sciences\n\n| Reward | 12 million SEK(2026)\n\n| First award | 1901\n\n| Most recent recipients | Francis Halzen(2026)\n\n| Most awards | John Bardeen(2)\n\n| Website | nobelprize.org/physics\n\nThe Nobel Prize in Physics is an annual award given by the Royal Swedish Academy of Sciences for those who have made the most outstanding contributions to humankind in the field of physics. It is one of the five Nobel Prizes established by the will of Alfred Nobel in 1895 and awarded since 1901, the others being the Nobel Prize in Chemistry, Nobel Prize in Literature, Nobel Peace Prize, and Nobel Prize in Physiology or Medicine. Physics is traditionally the first award presented in the Nobel Prize ceremony.\n\nThe prize consists of a medal along with a diploma and a certificate for the monetary award. The front side of the medal displays the same profile of Alfred Nobel depicted on the medals for Physics, Chemistry, and Literature.\n\nThe first Nobel Prize in Physics was awarded to German physicist Wilhelm Röntgen in recognition of the extraordinary services he rendered by the discovery of X-rays.This award is administered by the Nobel Foundation and is widely regarded as the most prestigious award that a scientist can receive in physics.It is presented in Stockholm at an annual ceremony on 10 December, the anniversary of Nobel's death.As of 2026, a total of 230 people have been awarded the prize.\n\nBackground\n\nAlfred Nobel(1833–1896), who established the Nobel Prizes.\n\nAlfred Nobel, in his last will and testament, stated that his wealth should be used to create a series of prizes for those who confer the \"greatest benefit on mankind\" in the fields of physics, chemistry, peace, physiology or medicine, and literature.Though Nobel wrote several wills during his lifetime, the last one was written a year before he died and was signed at the Swedish-Norwegian Club in Paris on 27 November 1895.Nobel bequeathed 94% of his total assets, 31 million Swedish kronor, to establish and endow the five Nobel Prizes.Owing to the level of skepticism surrounding the will, it was not until 26 April 1897 that it was approved by the Storting(Norwegian Parliament).The executors of his will were Ragnar Sohlman and Rudolf Lilljequist, who formed the Nobel Foundation to take care of Nobel's fortune and organise the prizes.\n\nThe members of the Norwegian Nobel Committee who were to award the Peace Prize were appointed soon after the will was approved. The other prize-awarding organisations followed: Karolinska Institutet on 7 June, the Swedish Academy on 9 June, and the Royal Swedish Academy of Sciences on 11 June.The Nobel Foundation then established guidelines for awarding the prizes. In 1900, the Nobel Foundation's newly created statutes were promulgated by King Oscar II.According to Nobel's will, the Royal Swedish Academy of Sciences would award the Prize in Physics.\n\nNomination and selection\n\nThree Nobel Laureates in Physics taken at the California Institute of Technology. Front row L-R: Albert A. Michelson(1907 laureate), Albert Einstein(1921 laureate), and Robert A. Millikan(1923 laureate).\n\nA maximum of three Nobel laureates and two different works may be selected for the Nobel Prize in Physics.Compared with other Nobel Prizes, the nomination and selection process for the prize in physics is long and rigorous. This is a key reason why it has grown in importance over the years to become the most important prize in Physics.\n\nThe Nobel laureates are selected by the Nobel Committee for Physics, a Nobel Committee that consists of five members elected by The Royal Swedish Academy of Sciences. During the first stage which begins in September, a group of about 3,000 selected university professors, Nobel Laureates in Physics and Chemistry, and others are sent confidential nomination forms. The completed forms must arrive at the Nobel Committee by 31 January of the following year. The nominees are scrutinized and discussed by experts and are narrowed to approximately fifteen names. The committee submits a report with recommendations on the final candidates to the Academy, where, in the Physics Class, it is further discussed. The Academy then makes the final selection of the Laureates in Physics by a majority vote.\n\nMarie Curie(1903 Physics Nobel Prize Winner)\n\nThe names of the nominees are never publicly announced, and neither are they told that they have been considered for the Prize. Nomination records are sealed for fifty years.While posthumous nominations are not permitted, awards can be made if the individual died in the months between the decision of the committee (typically in October) and the ceremony in December. Prior to 1974, posthumous awards were permitted if the candidate had died after being nominated.\n\nThe rules for the Nobel Prize in Physics require that the significance of achievements being recognized has been \"tested by time\". In practice, that means that the lag between the discovery and the award is typically on the order of 20 years and can be much longer. For example, half of the 1983 Nobel Prize in Physics was awarded to Subrahmanyan Chandrasekhar for his work on stellar structure and evolution that was done during the 1930s. As a downside of this tested-by-time rule, not all scientists live long enough for their work to be recognized. Some important scientific discoveries are never considered for a prize, as the discoverers have died by the time the impact of their work is appreciated.\n\nPrizes\n\nA Physics Nobel Prize laureate is awarded a gold medal, a diploma bearing a citation, and a sum of money.\n\nMedals\n\nThe medal for the Nobel Prize in Physics is identical in design to the Nobel Prize in Chemistry medal.The rever\n\n[Content truncated...]",
+            "type": "text"
+          }
+        ]
+      },
+      "tool": "fetch"
+    }
+  ],
+  "tools": {
+    "tools": [
+      {
+        "description": "Fetch a URL and return its readable text content (HTML is stripped, scripts and styles removed).",
+        "inputSchema": {
+          "properties": {
+            "max_length": {
+              "description": "Maximum characters to return (default 6000)",
+              "type": "integer"
+            },
+            "url": {
+              "description": "Absolute http(s) URL to fetch",
+              "type": "string"
+            }
+          },
+          "required": [
+            "url"
+          ],
+          "type": "object"
+        },
+        "name": "fetch"
+      }
+    ]
+  }
+}

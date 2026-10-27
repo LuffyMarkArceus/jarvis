@@ -45,3 +45,13 @@ note = "No recency marker: answering must not cost a search."
 route = "Direct"
 tools = []
 contains = ["riemann"]
+
+[[case]]
+id = "web.nobel_physics"
+input = "who won the nobel prize in physics in 2024?"
+web = true
+tags = ["web", "grounding"]
+note = "Known gap: the top search hit is the general prize article, whose infobox names the most recent (2026) laureate; the 2024 winners are on result 2, which is never read. llama3.2:1b answered Halzen, a real name from the page attached to the wrong year, which the figure check cannot catch. Fails until retrieval reads past the top hit."
+[case.expect]
+tools_include = ["mcp.search.search"]
+contains_any = ["hopfield", "hinton"]

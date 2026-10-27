@@ -1,0 +1,53 @@
+{
+  "calls": [
+    {
+      "args": {
+        "query": "who won the nobel prize in physics in 2024?"
+      },
+      "result": {
+        "content": [
+          {
+            "text": "Backend: wikipedia\nQuery: who won the nobel prize in physics in 2024?\n\n1. Nobel Prize in Physics\n   https://en.wikipedia.org/wiki/Nobel_Prize_in_Physics\n   The Nobel Prize in Physics is an annual award given by the Royal Swedish Academy of Sciences for those who have made the most outstanding contributions\n2. List of Nobel laureates in Physics\n   https://en.wikipedia.org/wiki/List_of_Nobel_laureates_in_Physics\n   The Nobel Prize in Physics (Swedish: Nobelpriset i fysik) is awarded annually by the Royal Swedish Academy of Sciences to scientists in the various fields\n3. Nobel Prize in Physics controversies\n   https://en.wikipedia.org/wiki/Nobel_Prize_in_Physics_controversies\n   award in 1901, conferment of the Nobel Prizes, including the Nobel Prize in Physics, has engendered criticism and controversies. After his death in 1896\n4. 2024 Nobel Prizes\n   https://en.wikipedia.org/wiki/2024_Nobel_Prizes\n   The 2024 Nobel Prizes were awarded by the Nobel Foundation, based in Sweden. Six categories were awarded: Physics, Chemistry, Physiology or Medicine,\n5. 1901 Nobel Prize in Physics\n   https://en.wikipedia.org/wiki/1901_Nobel_Prize_in_Physics\n   The 1901 Nobel Prize in Physics was presented in a ceremony in Stockholm, Sweden to the German Wilhelm Conrad Röntgen, \"in recognition of the extraordinary",
+            "type": "text"
+          }
+        ]
+      },
+      "tool": "search"
+    }
+  ],
+  "tools": {
+    "tools": [
+      {
+        "description": "Search for web pages about a topic and return titles, URLs and snippets. Use it to find a page, then fetch that URL for details.",
+        "inputSchema": {
+          "properties": {
+            "backend": {
+              "description": "Search backend; leave unset to choose automatically",
+              "enum": [
+                "auto",
+                "wikipedia",
+                "instant",
+                "searx",
+                "brave"
+              ],
+              "type": "string"
+            },
+            "max_results": {
+              "description": "Maximum results to return (default 5)",
+              "type": "integer"
+            },
+            "query": {
+              "description": "What to search for",
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "name": "search"
+      }
+    ]
+  }
+}
