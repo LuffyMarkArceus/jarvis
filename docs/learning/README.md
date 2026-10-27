@@ -164,6 +164,26 @@ ones. When we first read through our passes, two were wrong answers.
 Expectations now name the correct value, which the recorded tapes make
 stable."
 
+## 11. A correct fix can leave the score unchanged
+
+**Lesson.** A failure often has several causes stacked on top of each other.
+Fixing the first one moves the case to the next failure, not to a pass.
+Judge the fix by whether *its* symptom is gone, not by the headline number.
+
+**In this repo.** `fs.write.approved` failed because llama3.2:1b sent
+`{"properties": {"path": ..., "content": ...}, "type": "object"}`.
+`unwrap_echoed_schema` in `core/src/orchestrator.rs` now unwraps it, with
+unit tests taken from that eval log, including one where `properties` holds
+the schema itself and must *not* be unwrapped. The re-run still scored 0/5:
+the arguments now arrived flat, but the model wrote to the sandbox directory
+rather than `notes.md` inside it. The fix was right; the case had a second
+cause.
+
+**Say it in an interview.** "Each fix gets a unit test for its own symptom,
+and the eval tells us what fails next. A score that did not move after a
+correct fix is information: it means a second cause was hidden behind the
+first, and the trace shows which."
+
 ---
 
 ## Self-test

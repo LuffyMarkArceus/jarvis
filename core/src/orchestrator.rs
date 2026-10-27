@@ -1327,23 +1327,36 @@ impl Orchestrator {
         } else {
             self.tools.required_args(tool)
         };
-        if required.is_empty() {
-            return args;
-        }
-        if required.iter().all(|k| args.get(k).is_some()) {
-            return args;
-        }
-        if let Some(params) = args.get("parameters").and_then(|p| p.as_object()) {
-            let nested = Value::Object(params.clone());
-            if required.iter().all(|k| nested.get(k).is_some()) {
-                return nested;
-            }
-        }
-        args
+        unwrap_echoed_schema(args, &required)
     }
 }
 
 // ------------------------------------------------------------------ helpers
+
+/// The real arguments, when a model nested them inside an echo of the tool
+/// schema: `{"parameters": {...}}` or `{"properties": {...}, "type": "object"}`.
+/// Arguments that already have every required key are left alone.
+///
+/// A nested object is used only if every required key holds a value. When the
+/// model echoes the schema itself, `properties.path` is `{"type": "string"}`;
+/// passing that on would turn "no arguments" into a wrong argument.
+fn unwrap_echoed_schema(args: Value, required: &[String]) -> Value {
+    if required.is_empty() {
+        return args;
+    }
+    if required.iter().all(|k| args.get(k).is_some()) {
+        return args;
+    }
+    let is_value = |v: &Value| !(v.is_object() && v.get("type").is_some());
+    for wrapper in ["parameters", "properties"] {
+        if let Some(nested) = args.get(wrapper).and_then(|p| p.as_object()) {
+            if required.iter().all(|k| nested.get(k).is_some_and(is_value)) {
+                return Value::Object(nested.clone());
+            }
+        }
+    }
+    args
+}
 
 /// Tool arguments sometimes arrive as a JSON-encoded string.
 fn normalize_arguments(args: Value) -> Value {
@@ -1875,6 +1888,61 @@ fn blocked_report(trace: &[ToolOutcome]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn path_and_content() -> Vec<String> {
+        vec!["path".into(), "content".into()]
+    }
+
+    #[test]
+    fn arguments_with_every_required_key_are_left_alone() {
+        let args = json!({"path": "/tmp/a", "content": "hi"});
+        assert_eq!(
+            unwrap_echoed_schema(args.clone(), &path_and_content()),
+            args
+        );
+    }
+
+    #[test]
+    fn arguments_nested_in_parameters_are_unwrapped() {
+        let args = json!({"type": "function", "parameters": {"path": "/tmp/a", "content": "hi"}});
+        assert_eq!(
+            unwrap_echoed_schema(args, &path_and_content()),
+            json!({"path": "/tmp/a", "content": "hi"})
+        );
+    }
+
+    #[test]
+    fn arguments_nested_in_properties_are_unwrapped() {
+        // llama3.2:1b, eval case fs.write.approved.
+        let args = json!({
+            "properties": {"content": "hello", "path": "/tmp/notes.md"},
+            "required": ["path", "content"],
+            "type": "object"
+        });
+        assert_eq!(
+            unwrap_echoed_schema(args, &path_and_content()),
+            json!({"content": "hello", "path": "/tmp/notes.md"})
+        );
+    }
+
+    #[test]
+    fn an_echoed_schema_without_values_is_not_unwrapped() {
+        // Same model, next call: the schema itself, no values. Unwrapping it
+        // would hand the tool `{"type": "string"}` as a path.
+        let args = json!({
+            "properties": {
+                "path": {"description": "File path", "type": "string"},
+                "content": {"description": "Text to write", "type": "string"}
+            },
+            "required": ["path", "content"],
+            "type": "object"
+        });
+        assert_eq!(
+            unwrap_echoed_schema(args.clone(), &path_and_content()),
+            args
+        );
+    }
 
     #[test]
     fn the_first_url_is_the_top_result() {
