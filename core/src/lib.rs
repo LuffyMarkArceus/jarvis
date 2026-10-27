@@ -5,6 +5,7 @@ pub mod config;
 pub mod confirm;
 pub mod context;
 pub mod daemon;
+pub mod egress;
 pub mod error;
 pub mod eval;
 pub mod ipc;
