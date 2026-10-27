@@ -172,7 +172,10 @@ enum Commands {
     /// Show memory statistics
     MemoryStats,
     /// Run the eval suite and report pass rates
+    #[command(args_conflicts_with_subcommands = true)]
     Eval {
+        #[command(subcommand)]
+        action: Option<EvalCommands>,
         /// Only cases whose id contains this, or that carry this tag
         #[arg(short, long)]
         filter: Option<String>,
@@ -192,6 +195,21 @@ enum Commands {
         #[arg(long, default_value = "180")]
         timeout: u64,
         /// Directory holding cases/, tapes/ and results/
+        #[arg(long, default_value = "evals")]
+        dir: std::path::PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum EvalCommands {
+    /// Show which cases changed between two runs. Exits 1 if any got worse.
+    ///
+    /// Without arguments: the newest run against the one before it with the
+    /// same model and grading. Each run is a results file or part of its id.
+    Diff {
+        old: Option<String>,
+        new: Option<String>,
+        /// Directory holding results/
         #[arg(long, default_value = "evals")]
         dir: std::path::PathBuf,
     },
@@ -417,6 +435,13 @@ async fn main() -> anyhow::Result<()> {
     }
     match cli.command {
         Commands::Eval {
+            action: Some(EvalCommands::Diff { old, new, dir }),
+            ..
+        } => {
+            return eval::diff(&dir.join("results"), old.as_deref(), new.as_deref());
+        }
+        Commands::Eval {
+            action: None,
             filter,
             repeat,
             model,

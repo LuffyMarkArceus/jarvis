@@ -21,6 +21,7 @@
 
 pub mod case;
 pub mod check;
+pub mod diff;
 
 use crate::config::{Config, McpConfig, McpServerConfig};
 use crate::error::{JarvisError, Result};

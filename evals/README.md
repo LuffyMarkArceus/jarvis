@@ -10,6 +10,7 @@ jarvis eval --model qwen2.5:3b   # same suite, another model
 jarvis eval --filter web         # cases whose id contains "web" or tagged "web"
 jarvis eval --offline            # scripted model: grade only what code decides
 jarvis eval --record             # re-record web tapes from the real servers
+jarvis eval diff                 # what changed since the previous run of this model
 ```
 
 Run it from the repository root. Each attempt prints PASS or FAIL with the
@@ -23,6 +24,23 @@ failing checks. The summary gives two numbers:
 Every attempt is also written as one JSON line to `evals/results/`, with the
 model, git SHA, route, tool calls, latency and tokens. Results are not
 committed.
+
+## Two models: one for development, one for verification
+
+* **While developing**, run the suite on `llama3.2:1b` and compare with
+  `jarvis eval diff`. Its score tops out around 85% for reasons that are the
+  model's, so the absolute number says little; a case that *changed* is what
+  a code change caused. `diff` exits 1 when any case got worse.
+* **When a feature or phase is complete**, run the full suite on
+  `qwen2.5:3b` (`--model qwen2.5:3b`) and add a line to
+  [BASELINES.md](BASELINES.md).
+
+`jarvis eval diff` with no arguments compares the newest run with the one
+before it that used the same model and grading. Either run can be named by
+a path or by part of its id (`jarvis eval diff ddffd5e qwen`). Pass rates and
+latency are computed over the cases both runs contain, so a run filtered with
+`--filter` is still compared fairly. A case that moved by a single attempt is
+marked as possible noise: with three attempts that happens by chance.
 
 ## How an attempt runs
 
