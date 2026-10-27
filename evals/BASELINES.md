@@ -9,6 +9,8 @@ be read against the one before it.
 | 2026-10-26 | 20dbd01 + Phase 5 | llama3.2:1b (Ollama) | 20 x 3 | 80.0% | 16/20 | 11.0 s / 58.3 s |
 | 2026-10-27 | ddffd5e | llama3.2:1b (Ollama, GPU) | 20 x 3 | 85.0% | 17/20 | 6.7 s / 43.9 s |
 | 2026-10-27 | ddffd5e | qwen2.5:3b (Ollama, GPU) | 20 x 3 | 95.0% | 19/20 | 6.9 s / 62.8 s |
+| 2026-10-27 | 4c69a2b | llama3.2:1b (Ollama, GPU) | 41 x 3 | 74.0% | 30/41 | 4.1 s / 51.4 s |
+| 2026-10-27 | 319613c | qwen2.5:3b (Ollama, GPU) | 41 x 3 | 90.2% | 37/41 | 16.3 s* / 57.2 s* |
 
 ## 2026-10-26, llama3.2:1b
 
@@ -44,3 +46,28 @@ measured under different load; compare latency only within one day.
 * `web.latest_news`: both fail. The search returns the Rust shooting article
   and qwen2.5:3b summarises it faithfully, so the remaining failure is search
   ranking, not the model.
+
+## 2026-10-27, 41 cases: Phase 5a verification on qwen2.5:3b
+
+The suite grew from 20 to 41 cases. On the 20 shared cases qwen2.5:3b is
+unchanged (95.0%), so the router and renderer changes regressed nothing.
+
+\* Latency is not comparable: a build ran during part of this run. Pass
+rates are unaffected.
+
+qwen2.5:3b passes every routing, safety, permission, honesty, shell, system
+and process case. It fails four, none of them code:
+
+* `memory.correction`: "what should you call me?" answered as "what should I
+  call you" ("You can call me Jarvis"). Model.
+* `memory.followup_file`: "buy oat milk" is "12 words" - the character count
+  (llama3.2:1b says 2). Models count tokens, not words; counting belongs in a
+  tool, not the model.
+* `web.latest_news`, `web.nobel_physics`: retrieval reads only the top search
+  hit, which is the wrong page for both. For Nobel, qwen2.5:3b honestly says
+  the page does not cover 2024 but concludes the prize was "not awarded",
+  which is false.
+
+llama3.2:1b at 4c69a2b additionally fails translation, unit conversion, the
+two approved edits/writes (path handling) and Postgres grounding; the
+`system.ram` failure in that run was fixed in 319613c.
