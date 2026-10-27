@@ -17,3 +17,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1.0"
 thiserror = "1.0"
 async-trait = "0.1"
+
+# Full debug info is most of a dev build's size. Line tables keep file:line in
+# panics and backtraces; switch to `debug = true` locally to use a debugger.
+[profile.dev]
+debug = "line-tables-only"
