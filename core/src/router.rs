@@ -242,6 +242,14 @@ pub fn route(input: &str) -> Route {
         };
     }
 
+    // 2a. A request for instructions or an explanation. "how do I list files
+    //     in python" wants an explanation; listing the current directory
+    //     answered a question nobody asked. After explicit commands, so
+    //     "run ..." still runs.
+    if asks_how_to(&lower) {
+        return Route::Direct;
+    }
+
     // 2b. Fetch/web requests - route to MCP fetch if available
     if let Some(url) = extract_url(raw) {
         if lower.contains("fetch")
@@ -712,8 +720,29 @@ fn is_system_info(lower: &str) -> bool {
     if SYSTEM_INFO_PHRASES.iter().any(|p| lower.contains(p)) {
         return true;
     }
+    // "how much RAM does this machine have", "how many cores": the size of
+    // the machine. "how much memory is chrome using" asks about live usage
+    // and is left to the process rule.
+    let tokens = words(lower);
+    let has = |w: &str| tokens.iter().any(|t| t == w);
+    let capacity = (lower.contains("how much") && (has("ram") || has("memory")))
+        || (lower.contains("how many") && (has("cores") || has("cpus") || has("threads")));
+    let usage = [
+        "using",
+        "use",
+        "uses",
+        "used",
+        "consuming",
+        "free",
+        "available",
+    ]
+    .iter()
+    .any(|w| has(w));
+    if capacity && !usage {
+        return true;
+    }
     // A bare "os" token, but not "osx" inside another word.
-    words(lower).iter().any(|w| *w == "os")
+    has("os")
 }
 
 /// Remove path-like tokens so they cannot trip the system-info phrases
@@ -865,8 +894,9 @@ fn mentions_files(lower: &str) -> bool {
 }
 
 /// Does the request look like it wants something done on the machine?
-/// Verbs that ask for something on disk to change. Whole words only, so a
-/// path such as `/tmp/created` does not count.
+/// Verbs that ask for something on disk to change, and the commands that do
+/// it: "what would rm -rf /x do" is a question for the model, not a listing
+/// of /x. Whole words only, so a path such as `/tmp/created` does not count.
 const CHANGE_WORDS: &[&str] = &[
     "create",
     "write",
@@ -884,12 +914,63 @@ const CHANGE_WORDS: &[&str] = &[
     "modify",
     "replace",
     "insert",
+    "clean",
+    "wipe",
+    "erase",
+    "purge",
+    "shred",
+    "rm",
+    "mv",
+    "cp",
+    "chmod",
+    "chown",
 ];
 
+/// "how do I ...", "how to ...", "what would rm -rf /x do": a question about
+/// doing something, not a request to do it. "how big" and "how many" ask
+/// about the machine, and "what does /etc/hostname contain" asks to read a
+/// file, so neither is included.
+fn asks_how_to(lower: &str) -> bool {
+    let effect = ["what does ", "what would ", "what will "]
+        .iter()
+        .any(|o| lower.starts_with(o))
+        && lower
+            .trim_end_matches(['?', '.', '!', ' '])
+            .ends_with(" do");
+    if effect {
+        return true;
+    }
+    const OPENERS: &[&str] = &[
+        "how do i ",
+        "how can i ",
+        "how should i ",
+        "how would i ",
+        "how do you ",
+        "how does one ",
+        "how to ",
+    ];
+    OPENERS.iter().any(|o| lower.starts_with(o))
+}
+
+/// Any regular form of a change verb counts: "removing", "deleted".
+///
+/// This errs towards the model. A false positive ("list my saved games in
+/// /x") costs a slower model turn that still has the read tools; a miss
+/// answers a destructive request with a directory listing.
 fn wants_change(lower: &str) -> bool {
     words(lower)
         .iter()
-        .any(|w| CHANGE_WORDS.contains(&w.as_str()))
+        .any(|w| CHANGE_WORDS.iter().any(|verb| is_form_of(w, verb)))
+}
+
+fn is_form_of(word: &str, verb: &str) -> bool {
+    let suffix_of = |stem: &str, suffixes: &[&str]| {
+        word.strip_prefix(stem)
+            .is_some_and(|rest| suffixes.contains(&rest))
+    };
+    // "remove" -> "removing", "removed"; "edit" -> "editing", "edited".
+    let stem = verb.strip_suffix('e').unwrap_or(verb);
+    word == verb || suffix_of(verb, &["s", "es", "ing", "ed"]) || suffix_of(stem, &["ing", "ed"])
 }
 
 fn has_action_word(lower: &str) -> bool {
@@ -1205,14 +1286,23 @@ mod tests {
     }
 
     #[test]
+    fn change_verbs_match_their_forms_but_not_longer_words() {
+        for word in ["remove", "removing", "removed", "removes", "edits", "rm"] {
+            assert!(wants_change(word), "{} should count", word);
+        }
+        // Same prefix, different word; and a path is not a verb.
+        for word in ["removal", "copyright", "editor", "rmdir", "tmp/created"] {
+            assert!(!wants_change(word), "{} should not count", word);
+        }
+    }
+
+    #[test]
     fn memory_size_questions_are_not_process_questions() {
         // "how much memory does this machine have" is not "what is using
         // memory right now", and answering it with a process list would be
         // wrong.
-        assert_eq!(
-            route("how much memory does this machine have"),
-            Route::Direct
-        );
+        let r = route("how much memory does this machine have");
+        assert_eq!(tool_of(&r).unwrap().0, "system.info");
     }
 
     #[test]

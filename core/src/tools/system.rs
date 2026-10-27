@@ -12,7 +12,7 @@ impl Tool for GetSystemInfoTool {
     }
 
     fn description(&self) -> &str {
-        "Get the operating system, CPU architecture and hostname of this computer. Use ONLY when the user asks about system specs. Do NOT use to list files or directories."
+        "Get the operating system, CPU architecture, CPU model and thread count, total memory and hostname of this computer. Use ONLY when the user asks about system specs. Do NOT use to list files or directories."
     }
 
     fn schema(&self) -> Value {
@@ -29,12 +29,42 @@ impl Tool for GetSystemInfoTool {
             .unwrap_or_default()
             .trim()
             .to_string();
+        let read = |path: &'static str| async move {
+            tokio::fs::read_to_string(path).await.unwrap_or_default()
+        };
+        // A unit in the value, not kB: a small model converting 16269620 kB
+        // to gigabytes is a reliable way to get a wrong answer.
         Ok(json!({
             "hostname": hostname,
             "os": std::env::consts::OS,
             "arch": std::env::consts::ARCH,
+            "cpu_model": cpu_model(&read("/proc/cpuinfo").await),
+            "cpu_threads": std::thread::available_parallelism().map(|n| n.get()).ok(),
+            "memory_total": memory_total(&read("/proc/meminfo").await),
         }))
     }
+}
+
+/// `MemTotal` from `/proc/meminfo`, as "15.5 GiB".
+fn memory_total(meminfo: &str) -> Option<String> {
+    let kb: f64 = meminfo
+        .lines()
+        .find_map(|l| l.strip_prefix("MemTotal:"))?
+        .trim()
+        .strip_suffix("kB")?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(format!("{:.1} GiB", kb / (1024.0 * 1024.0)))
+}
+
+/// The first `model name` in `/proc/cpuinfo`.
+fn cpu_model(cpuinfo: &str) -> Option<String> {
+    cpuinfo
+        .lines()
+        .find(|l| l.starts_with("model name"))
+        .and_then(|l| l.split_once(':'))
+        .map(|(_, v)| v.trim().to_string())
 }
 
 /// How many processes to return when the caller does not say.
@@ -145,6 +175,22 @@ fn parse_process_line(line: &str) -> Option<Value> {
 mod tests {
     use super::*;
     use crate::tools::Tool;
+
+    #[test]
+    fn total_memory_is_reported_with_its_unit() {
+        let meminfo = "MemTotal:       16269620 kB\nMemFree:          812344 kB\n";
+        assert_eq!(memory_total(meminfo).as_deref(), Some("15.5 GiB"));
+        assert_eq!(memory_total("MemFree: 1 kB\n"), None);
+    }
+
+    #[test]
+    fn the_cpu_model_comes_from_the_first_processor() {
+        let cpuinfo = "processor\t: 0\nmodel name\t: Intel(R) Core(TM) i5-7200U CPU @ 2.50GHz\n\nprocessor\t: 1\nmodel name\t: other\n";
+        assert_eq!(
+            cpu_model(cpuinfo).as_deref(),
+            Some("Intel(R) Core(TM) i5-7200U CPU @ 2.50GHz")
+        );
+    }
 
     #[test]
     fn parses_a_ps_line() {

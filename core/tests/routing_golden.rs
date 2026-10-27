@@ -76,6 +76,38 @@ const GOLDEN: &[(&str, Expect)] = &[
     // A stable historical fact with no recency marker does not need one.
     ("what are the millennium prize problems", Expect::Direct),
     ("when did the second world war end", Expect::Direct),
+    // ---- machine specs vs live usage ------------------------------------
+    // The model guessed "16 gigabytes" when this went Direct; it is a fact
+    // about this machine, so it comes from a tool.
+    (
+        "how much RAM does this machine have?",
+        Expect::Tool("system.info"),
+    ),
+    (
+        "how many cores does my cpu have",
+        Expect::Tool("system.info"),
+    ),
+    (
+        "how much memory is chrome using",
+        Expect::Tool("process.list"),
+    ),
+    // ---- asking how, not asking for it ---------------------------------
+    // Instructions, never an action: this listed the current directory.
+    (
+        "how do I list files in a directory in python?",
+        Expect::Direct,
+    ),
+    ("how can i delete /tmp/old.log safely", Expect::Direct),
+    ("how to see what is using port 8080", Expect::Direct),
+    // Asking what a command does. With a path in it, the model was offered
+    // write tools and llama3.2:1b called one; the permission prompt stopped it.
+    ("what would rm -rf /tmp/keep do?", Expect::Direct),
+    ("what does chmod 777 /tmp/x do", Expect::Direct),
+    // ...but asking what a file contains is still a read.
+    (
+        "what does /etc/hostname contain",
+        Expect::Tool("filesystem.read"),
+    ),
     // ---- ambiguous machine actions --------------------------------------
     ("create a file called notes.md", Expect::Model),
     // A path does not make a change into a read. These listed the directory
@@ -87,6 +119,15 @@ const GOLDEN: &[(&str, Expect)] = &[
     ("write hello to /tmp/a.txt", Expect::Model),
     ("delete /tmp/old.log", Expect::Model),
     ("rename /tmp/a.txt to /tmp/b.txt", Expect::Model),
+    // Any form of the verb, and verbs that mean "make it empty".
+    (
+        "clean up /tmp/keep by removing everything in it",
+        Expect::Model,
+    ),
+    ("i'm deleting /tmp/old.log, ok?", Expect::Model),
+    ("wipe /tmp/cache", Expect::Model),
+    // Reads stay deterministic.
+    ("list /tmp/keep", Expect::Tool("filesystem.list_dir")),
     ("check the git status of this repo", Expect::Model),
 ];
 
