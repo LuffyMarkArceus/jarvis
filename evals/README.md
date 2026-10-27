@@ -36,7 +36,9 @@ committed.
   [BASELINES.md](BASELINES.md).
 
 `jarvis eval diff` with no arguments compares the newest run with the one
-before it that used the same model and grading. Either run can be named by
+before it that used the same model and grading, preferring a run that
+covers all of the new run's cases (so a `--filter` run is not picked as the
+baseline for a full one). Either run can be named by
 a path or by part of its id (`jarvis eval diff ddffd5e qwen`). Pass rates and
 latency are computed over the cases both runs contain, so a run filtered with
 `--filter` is still compared fairly. A case that moved by a single attempt is

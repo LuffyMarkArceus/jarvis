@@ -231,15 +231,25 @@ pub fn diff(results: &Path, old: Option<&str>, new: Option<&str>) -> anyhow::Res
     let new_run = load(&new_path)?;
     let old_run = match old {
         Some(name) => load(&find(name)?)?,
-        // The previous run of the same model and grading: comparing against
-        // another model would mostly measure the model.
-        None => files
-            .iter()
-            .rev()
-            .filter(|p| **p < new_path)
-            .filter_map(|p| load(p).ok())
-            .find(|r| r.model == new_run.model && r.grading == new_run.grading)
-            .with_context(|| format!("no earlier {} run to compare with", new_run.model))?,
+        // The previous run of the same model and grading - comparing against
+        // another model would mostly measure the model - preferring one that
+        // covers every case of the new run: a run filtered to six cases is a
+        // poor baseline for a full one.
+        None => {
+            let earlier: Vec<Run> = files
+                .iter()
+                .rev()
+                .filter(|p| **p < new_path)
+                .filter_map(|p| load(p).ok())
+                .filter(|r| r.model == new_run.model && r.grading == new_run.grading)
+                .collect();
+            let covers = |r: &Run| new_run.cases.keys().all(|k| r.cases.contains_key(k));
+            let pick = earlier.iter().position(covers).unwrap_or(0);
+            earlier
+                .into_iter()
+                .nth(pick)
+                .with_context(|| format!("no earlier {} run to compare with", new_run.model))?
+        }
     };
 
     println!("old: {}\nnew: {}", old_run.id, new_run.id);
