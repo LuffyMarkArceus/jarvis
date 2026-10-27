@@ -315,6 +315,7 @@ impl OpenAiStream {
                     Some(tool_calls)
                 },
                 tool_name: None,
+                label: None,
             },
             prompt_tokens: self.prompt_tokens,
             completion_tokens: self.completion_tokens,
@@ -498,6 +499,7 @@ pub fn parse_completion(json: &Value) -> Result<ChatTurn> {
             content,
             tool_calls,
             tool_name: None,
+            label: None,
         },
         prompt_tokens: usage
             .and_then(|u| u.get("prompt_tokens"))

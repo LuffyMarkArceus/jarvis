@@ -38,6 +38,7 @@
 //! can be corrected with evidence instead of faith.
 
 use crate::config::ContextConfig;
+use crate::egress::{Label, Origin};
 use crate::memory::Message;
 use crate::model::ChatMessage;
 
@@ -70,6 +71,17 @@ pub struct ContextPlan {
     pub estimated_tokens: usize,
     /// Whether the current request had to be shortened in the middle.
     pub request_truncated: bool,
+    /// Where the condensed history in `system` came from. Every older
+    /// message counts, condensed or not: a superset is safe, a subset is not.
+    pub system_label: Label,
+}
+
+/// A stored message's label, or the label for not knowing.
+fn stored_label(message: &Message) -> Label {
+    message
+        .label
+        .clone()
+        .unwrap_or_else(|| Label::unknown(&message.role))
 }
 
 /// Estimate the token cost of a piece of text.
@@ -175,15 +187,21 @@ pub fn assemble(
     let omitted_messages = to_condense.len() - condensed_count;
 
     let mut system = base_system.to_string();
+    let mut system_label = Label::default();
     if let Some(section) = condensed {
         system.push_str(&section);
+        for message in &to_condense {
+            system_label.absorb(&stored_label(message));
+        }
     }
 
     let mut messages: Vec<ChatMessage> = Vec::with_capacity(kept.len() + 1);
     for message in &kept {
-        messages.push(ChatMessage::text(&message.role, &message.content));
+        messages.push(
+            ChatMessage::text(&message.role, &message.content).with_label(stored_label(message)),
+        );
     }
-    messages.push(ChatMessage::text("user", &request));
+    messages.push(ChatMessage::text("user", &request).with_label(Label::of(Origin::User)));
 
     let estimated_tokens = total_tokens(&system, &messages, reserved_tokens);
 
@@ -194,6 +212,7 @@ pub fn assemble(
         condensed_messages: condensed_count,
         estimated_tokens,
         request_truncated,
+        system_label,
     }
 }
 
@@ -341,6 +360,7 @@ mod tests {
             role: role.to_string(),
             content: content.to_string(),
             created_at: Utc::now(),
+            label: None,
         }
     }
 
@@ -503,6 +523,43 @@ mod tests {
                 .map(|m| m.content.clone())
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn history_keeps_its_labels_and_the_unknown_stay_unknown() {
+        let mut labelled = message("assistant", "Contents of /n: milk");
+        labelled.label = Some(Label::of(Origin::File));
+        let history = vec![
+            message("user", "read /n"),
+            labelled,
+            message("assistant", "old"),
+        ];
+        let plan = assemble("sys", "next", &history, &config(), 0);
+        let labels: Vec<_> = plan
+            .messages
+            .iter()
+            .map(|m| m.label.clone().unwrap())
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                Label::of(Origin::User),
+                Label::of(Origin::File),
+                Label::of(Origin::Other),
+                Label::of(Origin::User),
+            ]
+        );
+    }
+
+    #[test]
+    fn condensed_history_labels_the_system_prompt() {
+        let mut config = config();
+        config.max_history_messages = 0;
+        let mut labelled = message("assistant", "Contents of /n: milk");
+        labelled.label = Some(Label::of(Origin::File));
+        let plan = assemble("sys", "next", &[labelled], &config, 0);
+        assert!(plan.system.len() > "sys".len(), "history was condensed");
+        assert!(plan.system_label.origins.contains(&Origin::File));
     }
 
     #[test]

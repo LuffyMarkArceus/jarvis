@@ -48,6 +48,7 @@
 use crate::cancel::Cancellation;
 use crate::config::Config;
 use crate::context::{self, ContextPlan};
+use crate::egress::{self, Label, Origin};
 use crate::error::{JarvisError, Result};
 use crate::mcp::client::McpClient;
 use crate::memory::{self, MemoryManager, Message};
@@ -184,10 +185,33 @@ pub struct ToolCallRecord {
 struct TurnRecorder {
     calls: std::sync::Mutex<Vec<ToolCallRecord>>,
     model: std::sync::Mutex<(u32, Option<u64>, Option<u64>)>,
+    /// Everything this turn's answer may contain: the tools it ran and the
+    /// context the model was given. Stored with the answer.
+    label: std::sync::Mutex<Label>,
 }
 
 impl TurnRecorder {
+    fn saw(&self, label: &Label) {
+        self.label.lock().unwrap().absorb(label);
+    }
+
+    fn label(&self) -> Label {
+        self.label.lock().unwrap().clone()
+    }
+
+    /// The labels of a request about to go to the model.
+    fn saw_request(&self, system: &Label, messages: &[ChatMessage]) {
+        self.saw(system);
+        for label in egress::label(messages) {
+            self.saw(&label);
+        }
+    }
+
     fn tool(&self, outcome: &ToolOutcome, status: &'static str) {
+        // Only output that was produced can end up in the answer.
+        if status == "executed" {
+            self.saw(&Label::of_tool(&outcome.name, &outcome.args));
+        }
         self.calls.lock().unwrap().push(ToolCallRecord {
             name: outcome.name.clone(),
             args: outcome.args.clone(),
@@ -402,8 +426,14 @@ impl Orchestrator {
         let history = self.history_for_prompt();
 
         if let Some(ref m) = self.memory {
-            let _ = m.add_message(&self.session_id, "user", input);
+            let _ = m.add_labeled_message(
+                &self.session_id,
+                "user",
+                input,
+                Some(&Label::of(Origin::User)),
+            );
         }
+        rec.saw(&Label::of(Origin::User));
 
         let route = router::route(input);
         // One decision, one owner: the planner narrows the route and produces
@@ -444,7 +474,7 @@ impl Orchestrator {
             }
         };
 
-        self.persist_assistant(&answer);
+        self.persist_assistant(&answer, &rec.label());
         Ok(rec.finish(answer, &plan))
     }
 
@@ -474,14 +504,13 @@ impl Orchestrator {
         sink: Option<&UnboundedSender<String>>,
         rec: &TurnRecorder,
     ) -> Result<String> {
-        let plan = context::assemble(
-            &self.with_recall(input, self.conversation_system_prompt()),
-            input,
-            history,
-            &self.config.context,
-            0,
-        );
+        let (system_prompt, recall_label) =
+            self.with_recall(input, self.conversation_system_prompt());
+        let plan = context::assemble(&system_prompt, input, history, &self.config.context, 0);
         self.log_plan(&plan);
+        let mut system_label = plan.system_label.clone();
+        system_label.absorb(&recall_label);
+        rec.saw_request(&system_label, &plan.messages);
         let result = match sink {
             Some(sink) => {
                 self.client
@@ -551,7 +580,8 @@ impl Orchestrator {
         // The offered tools are the request's tools. There is no second
         // filter here, and no way for the prompt to mention anything else.
         let tools = plan.schemas();
-        let system_prompt = self.with_recall(input, self.tool_system_prompt(&plan.tools));
+        let (system_prompt, recall_label) =
+            self.with_recall(input, self.tool_system_prompt(&plan.tools));
         let reserved = self.tool_schema_tokens(&tools);
         let assembled = context::assemble(
             &system_prompt,
@@ -563,6 +593,8 @@ impl Orchestrator {
         self.log_plan(&assembled);
 
         let system = assembled.system;
+        let mut system_label = assembled.system_label;
+        system_label.absorb(&recall_label);
         let mut messages = assembled.messages;
         // How many leading messages are history. Everything after them is the
         // current request and the tool trace, which must never be dropped.
@@ -602,6 +634,7 @@ impl Orchestrator {
             // Tool results grow the prompt. Shed the oldest history until it
             // fits again rather than letting the provider truncate the front.
             self.fit_prompt(&system, &mut messages, &mut history_len, reserved);
+            rec.saw_request(&system_label, &messages);
 
             let result = self
                 .client
@@ -641,10 +674,13 @@ impl Orchestrator {
                 ));
                 for call in calls {
                     let outcome = self.execute_native_call(call, plan, confirm, rec).await;
-                    messages.push(ChatMessage::tool_result(
-                        &outcome.name,
-                        &self.prompt_tool_output(&outcome.output),
-                    ));
+                    messages.push(
+                        ChatMessage::tool_result(
+                            &outcome.name,
+                            &self.prompt_tool_output(&outcome.output),
+                        )
+                        .with_label(Label::of_tool(&outcome.name, &outcome.args)),
+                    );
                     trace.push(outcome);
                     if cancel.is_some_and(Cancellation::is_cancelled) {
                         return self.cancelled_result(&trace);
@@ -665,14 +701,20 @@ impl Orchestrator {
                 messages.push(ChatMessage::text("assistant", &turn.message.content));
                 for call in &text_calls {
                     let outcome = self.execute_text_call(call, plan, confirm, rec).await;
-                    messages.push(ChatMessage::text(
-                        "user",
-                        &format!(
-                            "Result of {}:\n{}",
-                            outcome.name,
-                            self.prompt_tool_output(&outcome.output)
-                        ),
-                    ));
+                    // Sent with the user role, but it is the tool's output:
+                    // labelled as such, so egress does not take it for the
+                    // user's own words.
+                    messages.push(
+                        ChatMessage::text(
+                            "user",
+                            &format!(
+                                "Result of {}:\n{}",
+                                outcome.name,
+                                self.prompt_tool_output(&outcome.output)
+                            ),
+                        )
+                        .with_label(Label::of_tool(&outcome.name, &outcome.args)),
+                    );
                     trace.push(outcome);
                     if cancel.is_some_and(Cancellation::is_cancelled) {
                         return self.cancelled_result(&trace);
@@ -963,11 +1005,16 @@ impl Orchestrator {
     /// Every `jarvis ask` is a new session, so without this the assistant
     /// meets the same user as a stranger each time. The current session is
     /// excluded: its recent messages are already in `history`.
-    fn with_recall(&self, input: &str, prompt: String) -> String {
-        append_recall(prompt, self.recall_block(input))
+    ///
+    /// Also returns where the recalled text came from: `memory`, plus the
+    /// label each recalled message was stored with, so a file shown in an
+    /// earlier session does not leave as "memory".
+    fn with_recall(&self, input: &str, prompt: String) -> (String, Label) {
+        let (block, label) = self.recall_block(input).unwrap_or_default();
+        (append_recall(prompt, block), label)
     }
 
-    fn recall_block(&self, input: &str) -> Option<String> {
+    fn recall_block(&self, input: &str) -> Option<(Option<String>, Label)> {
         if !self.config.memory.recall_enabled {
             return None;
         }
@@ -986,10 +1033,20 @@ impl Orchestrator {
             .filter(|result| !memory::is_echo(result, input))
             .collect();
         let block = memory::render_recall(&results, self.config.memory.recall_max_chars);
+        let mut label = Label::default();
         if block.is_some() {
             info!("recall: {} earlier message(s) added", results.len());
+            label.absorb(&Label::of(Origin::Memory));
+            for result in &results {
+                label.absorb(
+                    &result
+                        .label
+                        .clone()
+                        .unwrap_or_else(|| Label::unknown(&result.role)),
+                );
+            }
         }
-        block
+        Some((block, label))
     }
 
     /// Recent history, oldest first. How much of it reaches the model is
@@ -1020,9 +1077,9 @@ impl Orchestrator {
         )
     }
 
-    fn persist_assistant(&self, content: &str) {
+    fn persist_assistant(&self, content: &str, label: &Label) {
         if let Some(ref m) = self.memory {
-            let _ = m.add_message(&self.session_id, "assistant", content);
+            let _ = m.add_labeled_message(&self.session_id, "assistant", content, Some(label));
         }
     }
 
@@ -1382,7 +1439,10 @@ fn push_synthetic_exchange(messages: &mut Vec<ChatMessage>, outcome: &ToolOutcom
             },
         }],
     ));
-    messages.push(ChatMessage::tool_result(&outcome.name, seen));
+    messages.push(
+        ChatMessage::tool_result(&outcome.name, seen)
+            .with_label(Label::of_tool(&outcome.name, &outcome.args)),
+    );
 }
 
 /// The first absolute URL in a tool's output.

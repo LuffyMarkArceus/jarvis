@@ -11,6 +11,7 @@
 //!   models without a native function-calling interface.
 
 use crate::cancel::Cancellation;
+use crate::egress::Label;
 use crate::error::{JarvisError, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -52,15 +53,26 @@ pub struct ChatMessage {
     pub tool_calls: Option<Vec<ModelToolCall>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
+    /// Where the content came from. Never sent to a provider: it exists so
+    /// the egress check can judge the message wherever it travels (history,
+    /// trimming, context assembly) without guessing from its role.
+    #[serde(skip)]
+    pub label: Option<Label>,
 }
 
 impl ChatMessage {
+    pub fn with_label(mut self, label: Label) -> Self {
+        self.label = Some(label);
+        self
+    }
+
     pub fn text(role: &str, content: &str) -> Self {
         Self {
             role: role.to_string(),
             content: content.to_string(),
             tool_calls: None,
             tool_name: None,
+            label: None,
         }
     }
 
@@ -71,6 +83,7 @@ impl ChatMessage {
             content: content.to_string(),
             tool_calls: Some(calls),
             tool_name: None,
+            label: None,
         }
     }
 
@@ -81,6 +94,7 @@ impl ChatMessage {
             content: content.to_string(),
             tool_calls: None,
             tool_name: Some(tool_name.to_string()),
+            label: None,
         }
     }
 }
@@ -191,6 +205,7 @@ impl StreamState {
                     Some(self.tool_calls)
                 },
                 tool_name: None,
+                label: None,
             },
             prompt_tokens: self.prompt_tokens,
             completion_tokens: self.completion_tokens,

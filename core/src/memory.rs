@@ -1,6 +1,7 @@
 //! Memory system - episodic memory with SQLite
 
 use crate::config::Config;
+use crate::egress::Label;
 use crate::error::{JarvisError, Result};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rusqlite::{params, Connection};
@@ -15,6 +16,10 @@ pub struct Message {
     pub role: String,
     pub content: String,
     pub created_at: DateTime<Utc>,
+    /// Where the content came from; `None` for messages stored before
+    /// labels existed (see `Label::unknown`).
+    #[serde(default)]
+    pub label: Option<Label>,
 }
 
 #[derive(Debug, Clone)]
@@ -82,6 +87,23 @@ impl MemoryManager {
             ",
         )
         .map_err(|e| JarvisError::Memory(format!("Schema init failed: {}", e)))?;
+        Self::add_label_column(&conn)
+    }
+
+    /// Databases created before message labels lack the column. Adding it is
+    /// idempotent: this runs on every start, against old and new files.
+    fn add_label_column(conn: &Connection) -> Result<()> {
+        let has: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = 'label'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| JarvisError::Memory(format!("Schema check failed: {}", e)))?;
+        if has == 0 {
+            conn.execute("ALTER TABLE messages ADD COLUMN label TEXT", [])
+                .map_err(|e| JarvisError::Memory(format!("Migration failed: {}", e)))?;
+        }
         Ok(())
     }
 
@@ -110,11 +132,24 @@ impl MemoryManager {
     }
 
     pub fn add_message(&self, session_id: &str, role: &str, content: &str) -> Result<i64> {
+        self.add_labeled_message(session_id, role, content, None)
+    }
+
+    /// Store a message with where its content came from, so a later turn
+    /// (or recall from another session) can still tell.
+    pub fn add_labeled_message(
+        &self,
+        session_id: &str,
+        role: &str,
+        content: &str,
+        label: Option<&Label>,
+    ) -> Result<i64> {
         self.create_session(session_id)?;
+        let label = label.and_then(|l| serde_json::to_string(l).ok());
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO messages (session_id, role, content) VALUES (?1, ?2, ?3)",
-            params![session_id, role, content],
+            "INSERT INTO messages (session_id, role, content, label) VALUES (?1, ?2, ?3, ?4)",
+            params![session_id, role, content, label],
         )
         .map_err(|e| JarvisError::Memory(format!("Failed to add message: {}", e)))?;
 
@@ -131,7 +166,7 @@ impl MemoryManager {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
-                "SELECT id, session_id, role, content, created_at 
+                "SELECT id, session_id, role, content, created_at, label
                  FROM messages 
                  WHERE session_id = ?1 
                  ORDER BY created_at DESC, id DESC
@@ -149,6 +184,7 @@ impl MemoryManager {
                     role: row.get(2)?,
                     content: row.get(3)?,
                     created_at,
+                    label: parse_label(row.get(5)?),
                 })
             })
             .map_err(|e| JarvisError::Memory(format!("Query map failed: {}", e)))?;
@@ -242,7 +278,7 @@ impl MemoryManager {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
-                "SELECT id, session_id, role, content, created_at 
+                "SELECT id, session_id, role, content, created_at, label
                  FROM messages 
                  WHERE session_id = ?1 
                  ORDER BY created_at ASC, id ASC",
@@ -259,6 +295,7 @@ impl MemoryManager {
                     role: row.get(2)?,
                     content: row.get(3)?,
                     created_at,
+                    label: parse_label(row.get(5)?),
                 })
             })
             .map_err(|e| JarvisError::Memory(format!("Query map failed: {}", e)))?;
@@ -337,6 +374,7 @@ pub struct RecallResult {
     pub snippet: String,
     pub rank: f64,
     pub created_at: DateTime<Utc>,
+    pub label: Option<Label>,
 }
 
 /// Words that carry no retrieval signal on their own.
@@ -552,7 +590,7 @@ impl MemoryManager {
 
         let sql = "SELECT f.session_id, f.role, f.content, f.rowid, f.rank,
                           snippet(messages_fts, 2, '', '', ' ... ', 40) as snip,
-                          m.created_at
+                          m.created_at, m.label
                    FROM messages_fts f
                    JOIN messages m ON m.id = f.rowid
                    WHERE messages_fts MATCH ?1
@@ -611,7 +649,7 @@ impl MemoryManager {
         let term = terms.first().cloned().unwrap_or_default();
         let mut stmt = conn
             .prepare(
-                "SELECT session_id, role, content, id, 0.0 as rank, content, created_at
+                "SELECT session_id, role, content, id, 0.0 as rank, content, created_at, label
                  FROM messages
                  WHERE content LIKE '%' || ?1 || '%'
                    AND (?2 IS NULL OR session_id != ?2)
@@ -673,7 +711,14 @@ fn row_to_recall(row: &rusqlite::Row<'_>) -> rusqlite::Result<RecallResult> {
         rank: row.get(4)?,
         snippet: row.get(5)?,
         created_at: parse_timestamp(&created_at),
+        label: parse_label(row.get(7)?),
     })
+}
+
+/// A stored label. Unreadable JSON is treated as no label, which the egress
+/// check handles as unknown - never as allowed.
+fn parse_label(raw: Option<String>) -> Option<Label> {
+    raw.and_then(|r| serde_json::from_str(&r).ok())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -739,6 +784,7 @@ mod tests {
             snippet: content.to_string(),
             rank: 1.0,
             created_at: Utc::now(),
+            label: None,
         }
     }
 
@@ -915,6 +961,52 @@ mod tests {
         config.memory.db_path = dir.join("memory.db");
         let manager = MemoryManager::new(config).expect("manager");
         (manager, dir)
+    }
+
+    #[test]
+    fn a_label_is_stored_and_read_back_with_its_message() {
+        let (manager, dir) = temp_manager();
+        let mut label = Label::of(crate::egress::Origin::File);
+        label.paths.insert("/home/u/notes.txt".into());
+        manager
+            .add_labeled_message("s", "assistant", "Contents of notes: milk", Some(&label))
+            .unwrap();
+        manager.add_message("s", "user", "and the milk?").unwrap();
+        let history = manager.get_recent_messages("s", 10).unwrap();
+        assert_eq!(history[0].label.as_ref(), Some(&label));
+        assert_eq!(history[1].label, None);
+        let recalled = manager.recall("milk", 5).unwrap();
+        assert!(recalled.iter().any(|r| r.label.as_ref() == Some(&label)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_database_from_before_labels_is_migrated_once() {
+        let dir = std::env::temp_dir().join(format!("jarvis-migrate-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("memory.db");
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
+                 role TEXT NOT NULL, content TEXT NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+                 INSERT INTO messages (session_id, role, content) VALUES ('s', 'assistant', 'old');",
+            )
+            .unwrap();
+        }
+        let mut config = Config::default();
+        config.general.data_dir = dir.clone();
+        config.memory.db_path = db;
+        // Twice: the second start must find the column and do nothing.
+        for _ in 0..2 {
+            let manager = MemoryManager::new(config.clone()).expect("migrated");
+            let old = manager.get_recent_messages("s", 10).unwrap();
+            assert_eq!(
+                (old[0].content.as_str(), old[0].label.clone()),
+                ("old", None)
+            );
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

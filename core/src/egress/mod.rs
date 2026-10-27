@@ -8,11 +8,13 @@
 pub mod redact;
 
 use crate::model::ChatMessage;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 
 /// Where a piece of context came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Origin {
     User,
     Memory,
@@ -35,13 +37,42 @@ pub fn tool_origin(tool: &str) -> Origin {
 }
 
 /// The origins of one message's content, and the files it came from.
-#[derive(Debug, Clone, Default, PartialEq)]
+/// Stored with each message in memory as JSON.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Label {
     pub origins: BTreeSet<Origin>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub paths: BTreeSet<String>,
 }
 
 impl Label {
+    /// The label of a message that was stored before labels existed. User
+    /// text is the user's; anything else may contain anything, and unknown
+    /// must not mean allowed.
+    pub fn unknown(role: &str) -> Self {
+        Label::of(if role == "user" {
+            Origin::User
+        } else {
+            Origin::Other
+        })
+    }
+
+    /// A tool's result: its origin, and the file it read if it is a file tool.
+    pub fn of_tool(tool: &str, args: &serde_json::Value) -> Self {
+        let origin = tool_origin(tool);
+        let mut label = Label::of(origin);
+        if origin == Origin::File {
+            if let Some(path) = args["path"].as_str().filter(|p| !p.is_empty()) {
+                label.paths.insert(path.to_string());
+            }
+        }
+        label
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.origins.is_empty() && self.paths.is_empty()
+    }
+
     pub fn of(origin: Origin) -> Self {
         Label {
             origins: BTreeSet::from([origin]),
@@ -49,7 +80,7 @@ impl Label {
         }
     }
 
-    fn absorb(&mut self, other: &Label) {
+    pub fn absorb(&mut self, other: &Label) {
         self.origins.extend(other.origins.iter().copied());
         self.paths.extend(other.paths.iter().cloned());
     }
@@ -57,17 +88,17 @@ impl Label {
 
 /// Label every message of a request.
 ///
-/// `stored` holds labels persisted with earlier messages, by index; `None`
-/// means not known and the message is labelled from its role. A tool result
-/// takes its origin from the tool and its path from the call that asked for
-/// it. An assistant message takes every origin before it in the request:
-/// after a file is read, the reply may quote it.
-pub fn label(messages: &[ChatMessage], stored: &[Option<Label>]) -> Vec<Label> {
+/// A message that carries a label (set where it was created, or stored with
+/// it in memory) keeps it. Otherwise a tool result takes its origin from the
+/// tool and its path from the call that asked for it. An assistant message
+/// also takes every origin before it in the request: after a file is read,
+/// the reply may quote it.
+pub fn label(messages: &[ChatMessage]) -> Vec<Label> {
     let mut seen = Label::default();
     let mut calls: Vec<(String, Option<String>)> = Vec::new();
     let mut labels = Vec::with_capacity(messages.len());
-    for (i, message) in messages.iter().enumerate() {
-        let mut label = match stored.get(i).cloned().flatten() {
+    for message in messages {
+        let mut label = match message.label.clone() {
             Some(known) => known,
             None => match message.role.as_str() {
                 "tool" => {
@@ -256,7 +287,7 @@ mod tests {
     }
 
     fn verdict(messages: &[ChatMessage]) -> Verdict {
-        check(&label(messages, &[]), &policy())
+        check(&label(messages), &policy())
     }
 
     fn user(text: &str) -> ChatMessage {
@@ -339,7 +370,7 @@ mod tests {
             ChatMessage::tool_result("filesystem.read", "buy milk"),
             ChatMessage::text("assistant", "Your note says: buy milk"),
         ];
-        let labels = label(&m, &[]);
+        let labels = label(&m);
         assert!(labels[2].origins.contains(&Origin::File));
         assert!(labels[2].paths.contains("/home/u/notes/todo.txt"));
     }
@@ -347,14 +378,59 @@ mod tests {
     #[test]
     fn a_stored_label_overrides_the_role() {
         // An assistant answer saved from an earlier turn that showed a file.
-        let m = [ChatMessage::text(
-            "assistant",
-            "Contents of /home/u/notes/todo.txt: buy milk",
-        )];
         let mut stored = Label::of(Origin::File);
         stored.paths.insert("/home/u/notes/todo.txt".into());
-        let labels = label(&m, &[Some(stored)]);
+        let m = [
+            ChatMessage::text("assistant", "Contents of /home/u/notes/todo.txt: buy milk")
+                .with_label(stored),
+        ];
+        let labels = label(&m);
         assert!(matches!(check(&labels, &policy()), Verdict::Ask(_)));
+    }
+
+    #[test]
+    fn a_tool_result_sent_as_user_text_keeps_its_origin() {
+        // Text-embedded tool calls return results in a "user" message.
+        let m = [
+            ChatMessage::text("user", "Result of filesystem.read:\nbuy milk").with_label(
+                Label::of_tool(
+                    "filesystem.read",
+                    &json!({"path": "/home/u/notes/todo.txt"}),
+                ),
+            ),
+        ];
+        assert!(matches!(verdict(&m), Verdict::Ask(_)));
+    }
+
+    #[test]
+    fn a_message_stored_before_labels_existed_is_not_trusted() {
+        let m = [
+            ChatMessage::text("assistant", "old answer").with_label(Label::unknown("assistant"))
+        ];
+        assert!(matches!(verdict(&m), Verdict::Ask(_)));
+        assert_eq!(Label::unknown("user"), Label::of(Origin::User));
+    }
+
+    #[test]
+    fn the_label_never_reaches_a_provider() {
+        let m = ChatMessage::text("user", "hi").with_label(Label::of(Origin::File));
+        let wire = serde_json::to_string(&m).unwrap();
+        assert!(
+            !wire.contains("label") && !wire.contains("file"),
+            "{}",
+            wire
+        );
+        let openai = crate::openai::to_openai_messages(&[m]);
+        assert!(!openai[0].to_string().contains("label"), "{}", openai[0]);
+    }
+
+    #[test]
+    fn a_label_survives_storage_as_json() {
+        let mut l = Label::of(Origin::File);
+        l.paths.insert("/a".into());
+        let json = serde_json::to_string(&l).unwrap();
+        assert_eq!(json, r#"{"origins":["file"],"paths":["/a"]}"#);
+        assert_eq!(serde_json::from_str::<Label>(&json).unwrap(), l);
     }
 
     #[test]
