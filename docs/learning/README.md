@@ -225,6 +225,26 @@ in the retrieved text. That is necessary but not sufficient: 'in the
 source' is not 'answers the question'. We found it through an eval case,
 and traced it to reading only the top search result."
 
+## 14. Provenance is stored, not inferred later
+
+**Lesson.** Where a piece of data came from must be recorded when it enters
+the system. Reconstructing it later from the data's shape fails as soon as
+the data is copied, summarised or saved somewhere else.
+
+**In this repo.** The egress check (`core/src/egress/mod.rs`) labels each
+message by origin so file contents need an allow-list to go to a remote
+model. But a deterministic `read notes.txt` is saved to history as an
+*assistant* message containing the file. On the next turn it looks like
+ordinary assistant text, and memory recall would send it as `memory`, which
+the owner allowed. The label is therefore persisted with each message
+(`label()` accepts stored labels), and the remote tier stays off until it is.
+
+**Say it in an interview.** "Data-flow policies fail at copies. We label
+data at ingestion and persist the label with it, because the moment content
+is quoted into a reply or saved to history, its origin can no longer be
+read off the message. This is the same idea as taint tracking for prompt
+injection, so one mechanism serves privacy and security."
+
 ---
 
 ## Self-test
@@ -251,6 +271,9 @@ Answer out loud, without opening the code:
     Which missing line in the case let that happen?
 11. Why does the router send "what would rm -rf /x do?" to `Direct` rather
     than to the model with tools?
+12. The owner allowed `memory` to go to a remote model and required an
+    allow-list for files. How could a file still leave as "memory", and what
+    stops it?
 
 ## Skills map: SDE2 -> senior
 

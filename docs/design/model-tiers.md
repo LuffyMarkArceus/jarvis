@@ -59,6 +59,16 @@ This is the taint tracking Phase 6 needs for prompt injection ("text that
 came from `web` must not trigger `shell` without asking"): one mechanism
 serves privacy and security.
 
+**Origins must be stored, not inferred.** A deterministic `read notes.txt`
+is saved to history as an *assistant* message containing the file, with no
+tool message beside it. On the next turn that file content looks like plain
+assistant text. Worse, memory recall would bring it back as `memory`, which
+may go remote - so "memory is allowed" would quietly override "files need
+an allow-list". Each persisted message therefore stores its label, and
+recall carries the stored label instead of `memory`. `label()` takes those
+stored labels; until persistence lands (step 3), the remote tier must not be
+enabled.
+
 The check sits in one place: where a request is handed to a provider. A
 local provider accepts everything. A remote provider gets the request only
 after the check passes.
@@ -162,8 +172,11 @@ from tagged eval runs about which requests the local model fails.
 ## Build order
 
 1. Redactor (`core/src/egress/redact.rs`): pure, the most test-heavy part.
+   **Done.**
 2. Origins, propagation and the policy check (`core/src/egress/mod.rs`).
-3. Provider `locality` and `data_policy`; the check wired in front of the
+   **Done.**
+3. Labels persisted with each message (schema change) and carried by recall;
+   provider `locality` and `data_policy`; the check wired in front of the
    provider; the footer.
 4. The ask prompt in CLI and TUI; the allow-list commands.
 5. Eval: recording provider and `sent_excludes` cases.
