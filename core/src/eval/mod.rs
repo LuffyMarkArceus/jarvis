@@ -124,7 +124,7 @@ pub async fn run_suite(
 pub async fn run_case(case: &Case, attempt: usize, options: &RunOptions) -> Attempt {
     let sandbox = Sandbox::new();
     let result = run_in(&sandbox, case, options).await;
-    let (resolved, report, asked, before, after, latency, error) = match result {
+    let run = match result {
         Ok(run) => run,
         Err(e) => {
             return Attempt {
@@ -140,36 +140,41 @@ pub async fn run_case(case: &Case, attempt: usize, options: &RunOptions) -> Atte
         }
     };
     let checks = check::grade(
-        &resolved,
+        &run.case,
         &Observed {
-            report: &report,
-            asked: &asked,
-            before: &before,
-            after: &after,
+            report: &run.report,
+            asked: &run.asked,
+            before: &run.before,
+            after: &run.after,
+            sent: &run.sent,
         },
         options.grading,
     );
     Attempt {
         case: case.id.clone(),
         attempt,
-        passed: error.is_none() && checks.iter().all(|c| c.passed),
+        passed: run.error.is_none() && checks.iter().all(|c| c.passed),
         checks,
-        report,
-        asked,
-        latency,
-        error,
+        report: run.report,
+        asked: run.asked,
+        latency: run.latency,
+        error: run.error,
     }
 }
 
-type Run = (
-    Case,
-    TurnReport,
-    Vec<String>,
-    Snapshot,
-    Snapshot,
-    Duration,
-    Option<String>,
-);
+/// Everything one attempt observed, before grading.
+struct Run {
+    /// The case with `{sandbox}` resolved.
+    case: Case,
+    report: TurnReport,
+    asked: Vec<String>,
+    before: Snapshot,
+    after: Snapshot,
+    latency: Duration,
+    error: Option<String>,
+    /// What the recording remote model received in the graded turn.
+    sent: Vec<String>,
+}
 
 async fn run_in(sandbox: &Sandbox, case: &Case, options: &RunOptions) -> Result<Run> {
     let case = case.resolve(&sandbox.files.display().to_string());
@@ -193,9 +198,22 @@ async fn run_in(sandbox: &Sandbox, case: &Case, options: &RunOptions) -> Result<
         std::fs::copy(source, &policy)?;
     }
 
-    let config = attempt_config(&case, sandbox, options)?;
+    let mut config = attempt_config(&case, sandbox, options)?;
+    // A remote case talks to a recording model on a non-local address, so
+    // the egress check applies and what it lets through can be graded.
+    let recorder = case
+        .remote
+        .then(|| Arc::new(RecordingProvider::replying(SCRIPTED_REPLY)));
+    let provider: Arc<dyn Provider> = match &recorder {
+        Some(r) => {
+            config.model.base_url = "https://remote.invalid/v1".into();
+            config.model.locality = Some("remote".into());
+            r.clone()
+        }
+        None => options.provider.clone(),
+    };
     let permissions = PermissionManager::with_paths(policy, sandbox.data.join("audit.db"))?;
-    let orchestrator = Orchestrator::with_parts(config, options.provider.clone(), permissions);
+    let orchestrator = Orchestrator::with_parts(config, provider, permissions);
     if case.web {
         tokio::time::timeout(Duration::from_secs(30), orchestrator.start_mcp())
             .await
@@ -214,6 +232,7 @@ async fn run_in(sandbox: &Sandbox, case: &Case, options: &RunOptions) -> Result<
     }
 
     let before = snapshot(&sandbox.files);
+    let sent_before = recorder.as_ref().map_or(0, |r| r.requests().len());
     let user = ScriptedUser::new(case.approve);
     let started = Instant::now();
     let outcome = tokio::time::timeout(
@@ -233,7 +252,19 @@ async fn run_in(sandbox: &Sandbox, case: &Case, options: &RunOptions) -> Result<
             Some(format!("timed out after {}s", options.timeout.as_secs())),
         ),
     };
-    Ok((case, report, asked, before, after, latency, error))
+    let sent = recorder
+        .map(|r| r.requests().split_off(sent_before))
+        .unwrap_or_default();
+    Ok(Run {
+        case,
+        report,
+        asked,
+        before,
+        after,
+        latency,
+        error,
+        sent,
+    })
 }
 
 /// The user's provider settings with everything stateful moved into the

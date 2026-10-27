@@ -89,7 +89,15 @@ contains = ["oat milk"]                  # all, case-insensitive
 contains_any = ["4", "four"]             # at least one
 excludes = ["I created"]                 # none
 files = { "out.txt" = "hello" }          # sandbox after; any other change fails
+sent_contains = ["<EMAIL_1>"]            # reached the remote model (remote cases)
+sent_excludes = ["shrey@example.com"]    # never reached it (remote cases)
 ```
+
+`remote = true` (next to `web`) replaces the model with a recording one on a
+non-local address, so the egress check applies: what it lets through, what
+it asks about (`egress.send` in `asked`) and what it redacts can be graded.
+These checks run with or without a real model, because code decides them.
+Pin `route` in such cases, or `asked` is not graded without a model.
 
 Unknown keys are an error, so a misspelt expectation cannot pass by being
 ignored.

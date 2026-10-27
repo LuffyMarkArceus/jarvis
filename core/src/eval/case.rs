@@ -54,6 +54,10 @@ pub struct Case {
     /// Serve the `search` and `fetch` MCP servers from this case's tape.
     #[serde(default)]
     pub web: bool,
+    /// Send to a recording "remote" model instead of the real one, so the
+    /// case can check what would have left the machine.
+    #[serde(default)]
+    pub remote: bool,
     pub expect: Expect,
 }
 
@@ -92,6 +96,12 @@ pub struct Expect {
     /// the sandbox fails the case.
     #[serde(default)]
     pub files: BTreeMap<String, String>,
+    /// Text that must reach the remote model (remote cases only).
+    #[serde(default)]
+    pub sent_contains: Vec<String>,
+    /// Text that must not reach the remote model (remote cases only).
+    #[serde(default)]
+    pub sent_excludes: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -113,6 +123,8 @@ impl Case {
         e.contains = subs(&e.contains);
         e.contains_any = subs(&e.contains_any);
         e.excludes = subs(&e.excludes);
+        e.sent_contains = subs(&e.sent_contains);
+        e.sent_excludes = subs(&e.sent_excludes);
         for table in e.args.values_mut() {
             for (_, value) in table.iter_mut() {
                 substitute_value(value, sandbox);
@@ -139,6 +151,16 @@ impl Case {
                     self.id, route
                 ));
             }
+        }
+        let checks_sent =
+            !self.expect.sent_contains.is_empty() || !self.expect.sent_excludes.is_empty();
+        if checks_sent && !self.remote {
+            // Without a recording model nothing is captured, and an empty
+            // capture would pass every sent_excludes.
+            return Err(format!(
+                "{}: sent_contains/sent_excludes need remote = true",
+                self.id
+            ));
         }
         for path in self.files.keys().chain(self.expect.files.keys()) {
             if Path::new(path).is_absolute() || path.split('/').any(|part| part == "..") {
@@ -226,6 +248,15 @@ mod tests {
         assert_eq!(cases.len(), 1);
         assert!(!cases[0].approve);
         assert!(cases[0].expect.tools.is_none());
+    }
+
+    #[test]
+    fn checking_what_was_sent_needs_a_remote_case() {
+        let text = "[[case]]\nid = \"e\"\ninput = \"x\"\n[case.expect]\nsent_excludes = [\"k\"]";
+        let error = parse(text, "test").expect_err("rejected").to_string();
+        assert!(error.contains("remote = true"), "{}", error);
+        let remote = text.replace("input = \"x\"", "input = \"x\"\nremote = true");
+        assert!(parse(&remote, "test").is_ok());
     }
 
     #[test]

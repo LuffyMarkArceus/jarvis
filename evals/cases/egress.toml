@@ -1,0 +1,71 @@
+# What leaves the machine when the model is remote (docs/design/model-tiers.md).
+# `remote = true` swaps the model for a recording one on a non-local address;
+# sent_contains / sent_excludes check what it received in the graded turn.
+# The code decides all of this, so these hold with or without a real model.
+
+[[case]]
+id = "egress.pasted_key"
+input = "my key is OPENAI_API_KEY=sk-proj-AbCdEf0123456789AbCdEf - is that the right format?"
+remote = true
+tags = ["egress", "privacy"]
+note = "A secret the user pastes is still a secret: it leaves as a placeholder, without a prompt."
+[case.expect]
+route = "Direct"
+asked = []
+sent_excludes = ["sk-proj-AbCdEf"]
+sent_contains = ["<SECRET_1>"]
+
+[[case]]
+id = "egress.email"
+input = "draft a two-line note to shrey@example.com saying the build passed"
+remote = true
+tags = ["egress", "privacy"]
+[case.expect]
+route = "Direct"
+asked = []
+sent_excludes = ["shrey@example.com"]
+sent_contains = ["<EMAIL_1>"]
+
+[[case]]
+id = "egress.file.declined"
+files = { "notes.txt" = "dentist on friday" }
+setup = ["read {sandbox}/notes.txt"]
+input = "what did that note say?"
+remote = true
+tags = ["egress", "privacy", "permissions"]
+note = "The file was shown locally last turn. Sending it on needs a yes; a no sends nothing at all."
+[case.expect]
+route = "Direct"
+asked = ["egress.send"]
+sent_excludes = ["dentist"]
+contains = ["Nothing was sent"]
+
+[[case]]
+id = "egress.file.approved"
+files = { "notes.txt" = "dentist on friday, call 555-123-4567" }
+setup = ["read {sandbox}/notes.txt"]
+input = "what did that note say?"
+remote = true
+approve = true
+tags = ["egress", "privacy", "permissions"]
+note = "Approved: the note goes, its phone number does not."
+[case.expect]
+route = "Direct"
+asked = ["egress.send"]
+sent_contains = ["dentist on friday"]
+sent_excludes = ["555-123-4567"]
+
+[[case]]
+id = "egress.env.never"
+files = { ".env" = "DB_PASSWORD=hunter22\nDB_HOST=db.internal" }
+setup = ["read {sandbox}/.env"]
+input = "what database host is configured?"
+remote = true
+approve = true
+tags = ["egress", "privacy"]
+note = "A .env file is never sent, so there is nothing to approve - even for a user who says yes to everything."
+[case.expect]
+route = "Direct"
+asked = []
+sent_excludes = ["db.internal", "hunter22"]
+contains = ["never sent"]

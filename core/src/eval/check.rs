@@ -40,6 +40,8 @@ pub struct Observed<'a> {
     pub asked: &'a [String],
     pub before: &'a Snapshot,
     pub after: &'a Snapshot,
+    /// Requests the recording remote model received in the graded turn.
+    pub sent: &'a [String],
 }
 
 /// Grade `observed` against an already-resolved `case`.
@@ -136,6 +138,28 @@ pub fn grade(case: &Case, observed: &Observed, grading: Grading) -> Vec<Check> {
         }
     }
 
+    // What reached the remote model is decided by code, so it is graded
+    // with or without a real model.
+    let sent = observed.sent.join("\n");
+    for needle in &expect.sent_contains {
+        add(
+            format!("sent_contains {:?}", needle),
+            sent.contains(needle.as_str()),
+            format!("{} request(s) sent", observed.sent.len()),
+        );
+    }
+    for needle in &expect.sent_excludes {
+        let at = sent.find(needle.as_str());
+        add(
+            format!("sent_excludes {:?}", needle),
+            at.is_none(),
+            match at {
+                Some(i) => format!("sent: ...{}...", around(&sent, i, 40)),
+                None => format!("{} request(s) sent", observed.sent.len()),
+            },
+        );
+    }
+
     // Always graded: an unexpected write is wrong whoever chose it. When the
     // writes were the model's to make and no model ran, the right sandbox is
     // an untouched one.
@@ -201,6 +225,20 @@ fn diff_paths(wanted: &Snapshot, actual: &Snapshot) -> Vec<String> {
     paths
 }
 
+/// Up to `radius` characters either side of byte `at`, on char boundaries.
+fn around(text: &str, at: usize, radius: usize) -> String {
+    let start = text[..at]
+        .char_indices()
+        .rev()
+        .nth(radius)
+        .map_or(0, |(i, _)| i);
+    let end = text[at..]
+        .char_indices()
+        .nth(radius)
+        .map_or(text.len(), |(i, _)| at + i);
+    text[start..end].replace('\n', " ")
+}
+
 /// Enough of the answer to see why a check failed.
 fn excerpt(answer: &str) -> String {
     let flat = answer.replace('\n', " ");
@@ -249,6 +287,7 @@ mod tests {
             asked: &[],
             before: &empty,
             after: &empty,
+            sent: &[],
         };
         grade(case, &observed, grading)
             .into_iter()
@@ -298,6 +337,7 @@ mod tests {
                 asked: &[],
                 before: &empty,
                 after: &empty,
+                sent: &[],
             },
             Grading::Full,
         );
@@ -318,6 +358,7 @@ mod tests {
                 asked: &[],
                 before: &before,
                 after: &after,
+                sent: &[],
             },
             Grading::Structural,
         );
