@@ -305,6 +305,7 @@ async fn handle_request(
                     "provider": provider,
                     "model": model,
                     "base_url": base_url,
+                    "privacy": daemon_lock.privacy().await,
                     "tools": daemon_lock.list_tools().await,
                     "session_id": sid,
                 }),

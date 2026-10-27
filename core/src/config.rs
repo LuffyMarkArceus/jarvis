@@ -15,6 +15,18 @@ pub struct Config {
     pub context: ContextConfig,
     #[serde(default)]
     pub mcp: Option<McpConfig>,
+    #[serde(default)]
+    pub egress: EgressConfig,
+}
+
+/// What may be sent to a remote model provider. Local providers are not
+/// affected. See docs/design/model-tiers.md.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EgressConfig {
+    /// Directories whose files may be sent, e.g. `["~/projects/jarvis"]`.
+    /// Files elsewhere are asked about; `~/.ssh` and the like never go.
+    pub file_allow: Vec<String>,
 }
 
 /// Default data directory, shared by the config sections that need it.
@@ -74,6 +86,13 @@ pub struct ModelConfig {
     /// The key is never stored in the config file: that file is plain text and
     /// often copied around. Ollama needs no key, so this is unset by default.
     pub api_key_env: Option<String>,
+    /// "local" or "remote". Unset: a loopback `base_url` is local, anything
+    /// else - including a machine on the home network - is remote. Set
+    /// "local" for your own server elsewhere.
+    pub locality: Option<String>,
+    /// What a remote provider may do with what it is sent: "no_training",
+    /// "may_train" or "unknown" (the default, treated as "may_train").
+    pub data_policy: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -91,6 +110,8 @@ impl Default for ModelConfig {
             native_tool_calling: true,
             temperature: 0.0,
             api_key_env: None,
+            locality: None,
+            data_policy: None,
         }
     }
 }

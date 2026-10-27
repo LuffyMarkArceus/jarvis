@@ -22,6 +22,25 @@ const MAX_ACTION_CHARS: usize = 120;
 /// A one-line statement of what the call will do.
 pub fn describe_action(tool: &str, args: &Value) -> String {
     match tool {
+        // Not a tool: the orchestrator asking before content leaves the machine.
+        "egress.send" => {
+            let items: Vec<&str> = args["would_send"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str())
+                .collect();
+            format!(
+                "Send {} to {} ({}), outside this machine",
+                if items.is_empty() {
+                    "this request".to_string()
+                } else {
+                    items.join(", ")
+                },
+                str_arg(args, "provider").unwrap_or("a remote model"),
+                str_arg(args, "url").unwrap_or("unknown address"),
+            )
+        }
         "shell.run" => match str_arg(args, "command") {
             Some(command) => format!("Run shell command: {}", shorten(command)),
             None => "Run a shell command".to_string(),
@@ -104,6 +123,18 @@ fn compact_args(args: &Value) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn sending_to_a_remote_model_says_what_and_where() {
+        let args = serde_json::json!({
+            "provider": "openai", "url": "https://api.example/v1",
+            "would_send": ["the contents of /home/u/notes.txt"]
+        });
+        assert_eq!(
+            describe_action("egress.send", &args),
+            "Send the contents of /home/u/notes.txt to openai (https://api.example/v1), outside this machine"
+        );
+    }
 
     #[test]
     fn shell_command_is_shown_verbatim() {

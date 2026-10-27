@@ -7,6 +7,8 @@
 
 pub mod redact;
 
+use crate::config::ModelConfig;
+use crate::error::{JarvisError, Result};
 use crate::model::ChatMessage;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -260,6 +262,93 @@ pub fn check(labels: &[Label], policy: &Policy) -> Verdict {
     }
 }
 
+/// Whether a request leaves the machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Locality {
+    Local,
+    Remote,
+}
+
+/// What a remote provider says it does with requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataPolicy {
+    NoTraining,
+    MayTrain,
+    /// Not declared. Treated as `MayTrain` wherever it matters.
+    Unknown,
+}
+
+/// Where a turn's requests go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Destination {
+    pub locality: Locality,
+    pub data_policy: DataPolicy,
+}
+
+impl Destination {
+    pub fn is_remote(&self) -> bool {
+        self.locality == Locality::Remote
+    }
+
+    /// The notice shown in `jarvis status` and when the provider is chosen.
+    /// Not repeated per turn, where it would stop being read.
+    pub fn notice(&self) -> &'static str {
+        match (self.locality, self.data_policy) {
+            (Locality::Local, _) => "local: nothing leaves this machine",
+            (Locality::Remote, DataPolicy::NoTraining) => {
+                "remote: requests leave this machine; the provider declares it does not train on them"
+            }
+            (Locality::Remote, _) => {
+                "remote: requests leave this machine, and this provider may log or train on what you send"
+            }
+        }
+    }
+}
+
+/// Read and check the provider's locality and data policy. A misspelt value
+/// is an error: guessing would decide where prompts go.
+pub fn destination(model: &ModelConfig) -> Result<Destination> {
+    let locality = match model.locality.as_deref() {
+        Some("local") => Locality::Local,
+        Some("remote") => Locality::Remote,
+        Some(other) => {
+            return Err(JarvisError::Config(format!(
+                "model.locality '{other}' - expected 'local' or 'remote'"
+            )))
+        }
+        None if is_loopback(&model.base_url) => Locality::Local,
+        None => Locality::Remote,
+    };
+    let data_policy = match model.data_policy.as_deref() {
+        Some("no_training") => DataPolicy::NoTraining,
+        Some("may_train") => DataPolicy::MayTrain,
+        Some("unknown") | None => DataPolicy::Unknown,
+        Some(other) => {
+            return Err(JarvisError::Config(format!(
+                "model.data_policy '{other}' - expected 'no_training', 'may_train' or 'unknown'"
+            )))
+        }
+    };
+    Ok(Destination {
+        locality,
+        data_policy,
+    })
+}
+
+/// Is the URL's host this machine? An unparsable URL is not.
+fn is_loopback(base_url: &str) -> bool {
+    let Some(host) = reqwest::Url::parse(base_url).ok().and_then(|u| {
+        u.host_str()
+            .map(|h| h.trim_matches(['[', ']']).to_lowercase())
+    }) else {
+        return false;
+    };
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip.is_loopback(),
+        Err(_) => host == "localhost" || host.ends_with(".localhost"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -431,6 +520,60 @@ mod tests {
         let json = serde_json::to_string(&l).unwrap();
         assert_eq!(json, r#"{"origins":["file"],"paths":["/a"]}"#);
         assert_eq!(serde_json::from_str::<Label>(&json).unwrap(), l);
+    }
+
+    fn model(base_url: &str, locality: Option<&str>, policy: Option<&str>) -> ModelConfig {
+        ModelConfig {
+            base_url: base_url.into(),
+            locality: locality.map(String::from),
+            data_policy: policy.map(String::from),
+            ..ModelConfig::default()
+        }
+    }
+
+    #[test]
+    fn only_this_machine_is_local_unless_declared() {
+        for url in [
+            "http://127.0.0.1:11434",
+            "http://localhost:8080/v1",
+            "http://[::1]:11434",
+        ] {
+            assert_eq!(
+                destination(&model(url, None, None)).unwrap().locality,
+                Locality::Local,
+                "{}",
+                url
+            );
+        }
+        for url in [
+            "https://openrouter.ai/api/v1",
+            "http://192.168.1.5:11434",
+            "not a url",
+        ] {
+            assert!(
+                destination(&model(url, None, None)).unwrap().is_remote(),
+                "{}",
+                url
+            );
+        }
+        // Your own server on the home network, declared.
+        let own = destination(&model("http://192.168.1.5:11434", Some("local"), None)).unwrap();
+        assert_eq!(own.locality, Locality::Local);
+    }
+
+    #[test]
+    fn an_undeclared_data_policy_reads_as_may_train() {
+        let d = destination(&model("https://x.ai/v1", None, None)).unwrap();
+        assert_eq!(d.data_policy, DataPolicy::Unknown);
+        assert!(d.notice().contains("may log or train"));
+        let d = destination(&model("https://x.ai/v1", None, Some("no_training"))).unwrap();
+        assert!(!d.notice().contains("may log"));
+    }
+
+    #[test]
+    fn a_misspelt_locality_or_policy_is_an_error() {
+        assert!(destination(&model("http://127.0.0.1", Some("lcoal"), None)).is_err());
+        assert!(destination(&model("http://127.0.0.1", None, Some("never"))).is_err());
     }
 
     #[test]

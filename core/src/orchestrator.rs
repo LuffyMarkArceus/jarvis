@@ -48,7 +48,10 @@
 use crate::cancel::Cancellation;
 use crate::config::Config;
 use crate::context::{self, ContextPlan};
-use crate::egress::{self, Label, Origin};
+use crate::egress::redact::Redactor;
+use crate::egress::{
+    self, Concern, DataPolicy, Destination, Label, Locality, Origin, Policy, Verdict,
+};
 use crate::error::{JarvisError, Result};
 use crate::mcp::client::McpClient;
 use crate::memory::{self, MemoryManager, Message};
@@ -81,6 +84,28 @@ use uuid::Uuid;
 pub trait ConfirmationHandler: Send + Sync {
     /// `true` if the user approved running `tool` with `args`.
     async fn confirm(&self, tool: &str, args: &Value) -> bool;
+}
+
+/// The name under which sending to a remote provider is confirmed. Not a
+/// real tool: it reuses the confirmation path every client already has.
+pub const EGRESS_TOOL: &str = "egress.send";
+
+/// What came back from [`Orchestrator::ask_model`].
+enum ModelReply {
+    Turn(ChatTurn),
+    /// The request was not sent; this explains why, as the answer.
+    Withheld(String),
+}
+
+fn describe_concern(concern: &Concern) -> String {
+    match (concern.origin, &concern.path) {
+        (Origin::File, Some(path)) => format!("the contents of {}", path),
+        (Origin::File, None) => "file contents".into(),
+        (Origin::Shell, _) => "command output".into(),
+        (Origin::System, _) => "information about this machine".into(),
+        (Origin::Other, _) => "earlier or unrecognised content of unknown origin".into(),
+        (origin, _) => format!("{:?} content", origin).to_lowercase(),
+    }
 }
 
 /// Maximum number of model round-trips inside a single user turn.
@@ -165,6 +190,10 @@ pub struct TurnReport {
     /// Summed over model calls. `None` if the provider reported no counts.
     pub prompt_tokens: Option<u64>,
     pub completion_tokens: Option<u64>,
+    /// Whether a request of this turn went to a remote provider.
+    pub remote: bool,
+    /// Distinct values replaced by placeholders before sending.
+    pub redacted: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -188,6 +217,13 @@ struct TurnRecorder {
     /// Everything this turn's answer may contain: the tools it ran and the
     /// context the model was given. Stored with the answer.
     label: std::sync::Mutex<Label>,
+    /// One redactor per turn, so a placeholder means the same value in every
+    /// request of the turn.
+    redactor: std::sync::Mutex<Redactor>,
+    /// What the user agreed to send this turn; a new concern asks again.
+    approved: std::sync::Mutex<Vec<Concern>>,
+    /// Whether any request of this turn went to a remote provider.
+    remote: std::sync::atomic::AtomicBool,
 }
 
 impl TurnRecorder {
@@ -232,7 +268,10 @@ impl TurnRecorder {
 
     fn finish(self, answer: String, plan: &TurnPlan) -> TurnReport {
         let (model_calls, prompt_tokens, completion_tokens) = *self.model.lock().unwrap();
+        let redacted = self.redactor.lock().unwrap().count();
         TurnReport {
+            remote: self.remote.load(std::sync::atomic::Ordering::Relaxed),
+            redacted,
             answer,
             route: route_label(&plan.route),
             offered: plan.names().into_iter().map(String::from).collect(),
@@ -353,6 +392,153 @@ impl Orchestrator {
         )
     }
 
+    /// Where this orchestrator's requests go. A config that cannot be read
+    /// was already rejected at startup (`provider::from_config`); if one gets
+    /// here anyway, it is treated as remote with an undeclared policy, which
+    /// asks rather than sends.
+    pub fn destination(&self) -> Destination {
+        egress::destination(&self.config.model).unwrap_or(Destination {
+            locality: Locality::Remote,
+            data_policy: DataPolicy::Unknown,
+        })
+    }
+
+    /// The owner's policy for remote requests, with their allow-list.
+    fn egress_policy(&self) -> Policy {
+        let home = dirs::home_dir().unwrap_or_default();
+        let mut policy = Policy::defaults(&home);
+        policy.file_allow = self
+            .config
+            .egress
+            .file_allow
+            .iter()
+            .map(|d| std::path::PathBuf::from(crate::router::expand_tilde(d)))
+            .collect();
+        policy
+    }
+
+    /// Every model request goes through here: the egress check, redaction,
+    /// the call, and putting personal data back into what comes back.
+    ///
+    /// A local provider gets the request unchanged. A remote one gets it only
+    /// if the policy allows everything in it or the user approves, and always
+    /// with secrets and personal data replaced by placeholders.
+    #[allow(clippy::too_many_arguments)]
+    async fn ask_model(
+        &self,
+        system: &str,
+        system_label: &Label,
+        messages: &[ChatMessage],
+        tools: Option<&[Value]>,
+        confirm: Option<&dyn ConfirmationHandler>,
+        cancel: Option<&Cancellation>,
+        sink: Option<&UnboundedSender<String>>,
+        rec: &TurnRecorder,
+    ) -> Result<ModelReply> {
+        rec.saw_request(system_label, messages);
+        let destination = self.destination();
+        let redacted = if destination.is_remote() {
+            let mut labels = vec![system_label.clone()];
+            labels.extend(egress::label(messages));
+            match egress::check(&labels, &self.egress_policy()) {
+                Verdict::Send => {}
+                Verdict::Never(concerns) => {
+                    return Ok(ModelReply::Withheld(self.withheld(&concerns, true)));
+                }
+                Verdict::Ask(concerns) => {
+                    let new: Vec<Concern> = {
+                        let approved = rec.approved.lock().unwrap();
+                        concerns
+                            .into_iter()
+                            .filter(|c| !approved.contains(c))
+                            .collect()
+                    };
+                    if !new.is_empty() {
+                        let args = json!({
+                            "provider": self.client.name(),
+                            "url": self.config.model.base_url,
+                            "would_send": new.iter().map(describe_concern).collect::<Vec<_>>(),
+                        });
+                        // Nobody to ask (headless, scheduled) means no.
+                        let approved = match confirm {
+                            Some(c) => c.confirm(EGRESS_TOOL, &args).await,
+                            None => false,
+                        };
+                        if !approved {
+                            return Ok(ModelReply::Withheld(self.withheld(&new, false)));
+                        }
+                        rec.approved.lock().unwrap().extend(new);
+                    }
+                }
+            }
+            rec.remote.store(true, std::sync::atomic::Ordering::Relaxed);
+            let mut redactor = rec.redactor.lock().unwrap();
+            let system = redactor.redact(system);
+            let messages: Vec<ChatMessage> = messages
+                .iter()
+                .map(|m| {
+                    let mut m = m.clone();
+                    m.content = redactor.redact(&m.content);
+                    m
+                })
+                .collect();
+            Some((system, messages, redactor.count() > 0))
+        } else {
+            None
+        };
+
+        let (system, messages) = match &redacted {
+            Some((s, m, _)) => (s.as_str(), m.as_slice()),
+            None => (system, messages),
+        };
+        let request = ChatRequest {
+            model: &self.config.model.default_model,
+            system: Some(system),
+            messages,
+            tools,
+            options: Some(self.model_options()),
+        };
+        // A placeholder can be split across streamed chunks and shown before
+        // it is restored; a redacted remote answer is shown whole instead.
+        let stream_to = sink.filter(|_| !redacted.as_ref().is_some_and(|r| r.2));
+        let mut turn = match stream_to {
+            Some(sink) => {
+                self.client
+                    .chat_turn_streaming(request, cancel, sink)
+                    .await?
+            }
+            None => self.client.chat_turn(request, cancel).await?,
+        };
+        if redacted.is_some() {
+            let redactor = rec.redactor.lock().unwrap();
+            turn.message.content = redactor.restore(&turn.message.content);
+            for call in turn.message.tool_calls.iter_mut().flatten() {
+                let args = redactor.restore(&call.function.arguments.to_string());
+                if let Ok(restored) = serde_json::from_str(&args) {
+                    call.function.arguments = restored;
+                }
+            }
+        }
+        Ok(ModelReply::Turn(turn))
+    }
+
+    /// The answer for a request that was not sent.
+    fn withheld(&self, concerns: &[Concern], never: bool) -> String {
+        let items: Vec<String> = concerns.iter().map(describe_concern).collect();
+        let why = if never {
+            "which is never sent to a remote provider"
+        } else {
+            "which was not approved for sending"
+        };
+        format!(
+            "Nothing was sent to {} ({}). This request would have included {}, {}.\n\n             Ask without that content, or allow the folder in `[egress] file_allow`.",
+            self.client.name(),
+            self.config.model.base_url,
+            items.join(", "),
+            why
+        )
+    }
+
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
@@ -445,7 +631,10 @@ impl Orchestrator {
 
         let answer = match &plan.route {
             // Pure conversation: no tools involved at all.
-            Route::Direct => self.converse(input, &history, cancel, sink, &rec).await?,
+            Route::Direct => {
+                self.converse(input, &history, confirm, cancel, sink, &rec)
+                    .await?
+            }
 
             // A confidently identified tool call: run it and report the facts.
             Route::Tool { name, args } => {
@@ -500,6 +689,7 @@ impl Orchestrator {
         &self,
         input: &str,
         history: &[Message],
+        confirm: Option<&dyn ConfirmationHandler>,
         cancel: Option<&Cancellation>,
         sink: Option<&UnboundedSender<String>>,
         rec: &TurnRecorder,
@@ -510,40 +700,21 @@ impl Orchestrator {
         self.log_plan(&plan);
         let mut system_label = plan.system_label.clone();
         system_label.absorb(&recall_label);
-        rec.saw_request(&system_label, &plan.messages);
-        let result = match sink {
-            Some(sink) => {
-                self.client
-                    .chat_turn_streaming(
-                        ChatRequest {
-                            model: &self.config.model.default_model,
-                            system: Some(&plan.system),
-                            messages: &plan.messages,
-                            tools: None,
-                            options: Some(self.model_options()),
-                        },
-                        cancel,
-                        sink,
-                    )
-                    .await
-            }
-            None => {
-                self.client
-                    .chat_turn(
-                        ChatRequest {
-                            model: &self.config.model.default_model,
-                            system: Some(&plan.system),
-                            messages: &plan.messages,
-                            tools: None,
-                            options: Some(self.model_options()),
-                        },
-                        cancel,
-                    )
-                    .await
-            }
-        };
-        let turn = match result {
-            Ok(turn) => turn,
+        let reply = self
+            .ask_model(
+                &plan.system,
+                &system_label,
+                &plan.messages,
+                None,
+                confirm,
+                cancel,
+                sink,
+                rec,
+            )
+            .await;
+        let turn = match reply {
+            Ok(ModelReply::Turn(turn)) => turn,
+            Ok(ModelReply::Withheld(answer)) => return Ok(answer),
             // A provider failure has a deterministic fallback; a user
             // cancelling the turn must not turn into one.
             Err(JarvisError::Cancelled) => return Err(JarvisError::Cancelled),
@@ -634,23 +805,22 @@ impl Orchestrator {
             // Tool results grow the prompt. Shed the oldest history until it
             // fits again rather than letting the provider truncate the front.
             self.fit_prompt(&system, &mut messages, &mut history_len, reserved);
-            rec.saw_request(&system_label, &messages);
 
-            let result = self
-                .client
-                .chat_turn(
-                    ChatRequest {
-                        model: &self.config.model.default_model,
-                        system: Some(&system),
-                        messages: &messages,
-                        tools: Some(&tools),
-                        options: Some(self.model_options()),
-                    },
+            let reply = self
+                .ask_model(
+                    &system,
+                    &system_label,
+                    &messages,
+                    Some(&tools),
+                    confirm,
                     cancel,
+                    None,
+                    rec,
                 )
                 .await;
-            let turn = match result {
-                Ok(t) => t,
+            let turn = match reply {
+                Ok(ModelReply::Turn(t)) => t,
+                Ok(ModelReply::Withheld(answer)) => return Ok(answer),
                 Err(JarvisError::Cancelled) => return self.cancelled_result(&trace),
                 Err(e) => {
                     info!("Model unavailable: {}, using fallback", e);

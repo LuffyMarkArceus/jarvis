@@ -120,6 +120,9 @@ impl Provider for OllamaProvider {
 /// An unknown name is a configuration error, not a reason to guess: silently
 /// falling back would send prompts to a server the user did not choose.
 pub fn from_config(config: &Config) -> Result<Arc<dyn Provider>> {
+    // Locality and data policy decide what may be sent; a typo there must
+    // stop startup like a typo in the provider name.
+    crate::egress::destination(&config.model)?;
     match config.model.provider.as_str() {
         "ollama" => Ok(Arc::new(OllamaProvider::new(&config.model.base_url))),
         "openai" => Ok(Arc::new(crate::openai::OpenAiProvider::from_config(

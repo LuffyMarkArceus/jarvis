@@ -643,6 +643,7 @@ async fn main() -> anyhow::Result<()> {
                             println!("Daemon:   running");
                             println!("Provider: {} ({})", field("provider"), field("base_url"));
                             println!("Model:    {}", field("model"));
+                            println!("Privacy:  {}", field("privacy"));
                             println!("Session:  {}", field("session_id"));
                             if let Some(tools) = result.get("tools").and_then(|t| t.as_array()) {
                                 println!();
@@ -663,6 +664,9 @@ async fn main() -> anyhow::Result<()> {
                         Err(e) => println!("Provider: error - {}", e),
                     }
                     println!("Model:    {}", config.model.default_model);
+                    if let Ok(destination) = jarvis_core::egress::destination(&config.model) {
+                        println!("Privacy:  {}", destination.notice());
+                    }
                 }
             }
         }

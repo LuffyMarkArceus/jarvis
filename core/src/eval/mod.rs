@@ -421,6 +421,65 @@ impl Provider for ScriptedProvider {
     }
 }
 
+/// A stand-in model that keeps every request it is sent, as the provider
+/// would see it: system prompt and messages, after any redaction. Used to
+/// check what would have left the machine.
+#[derive(Default)]
+pub struct RecordingProvider {
+    /// Each request, flattened to text.
+    pub sent: std::sync::Mutex<Vec<String>>,
+    /// What it answers.
+    pub reply: String,
+}
+
+impl RecordingProvider {
+    pub fn replying(reply: &str) -> Self {
+        RecordingProvider {
+            sent: Default::default(),
+            reply: reply.to_string(),
+        }
+    }
+
+    pub fn requests(&self) -> Vec<String> {
+        self.sent.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for RecordingProvider {
+    fn name(&self) -> &'static str {
+        "recording"
+    }
+
+    async fn chat_turn(
+        &self,
+        request: ChatRequest<'_>,
+        _cancel: Option<&crate::cancel::Cancellation>,
+    ) -> Result<ChatTurn> {
+        let mut text = request.system.unwrap_or_default().to_string();
+        for m in request.messages {
+            text.push_str(&format!("\n[{}] {}", m.role, m.content));
+        }
+        self.sent.lock().unwrap().push(text);
+        Ok(ChatTurn {
+            message: ChatMessage::text("assistant", &self.reply),
+            prompt_tokens: Some(100),
+            completion_tokens: Some(10),
+        })
+    }
+
+    async fn chat_turn_streaming(
+        &self,
+        request: ChatRequest<'_>,
+        cancel: Option<&crate::cancel::Cancellation>,
+        sink: &UnboundedSender<String>,
+    ) -> Result<ChatTurn> {
+        let turn = self.chat_turn(request, cancel).await?;
+        let _ = sink.send(turn.message.content.clone());
+        Ok(turn)
+    }
+}
+
 /// Pass rate per case, in suite order.
 pub fn pass_rates(attempts: &[Attempt]) -> Vec<(String, usize, usize)> {
     let mut rates: Vec<(String, usize, usize)> = Vec::new();

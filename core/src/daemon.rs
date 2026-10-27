@@ -214,6 +214,12 @@ impl Daemon {
         (provider.to_string(), model.to_string(), url.to_string())
     }
 
+    /// The privacy notice for the configured provider.
+    pub async fn privacy(&self) -> String {
+        let orch = self.orchestrator.lock().await;
+        orch.destination().notice().to_string()
+    }
+
     pub async fn session_id(&self) -> String {
         let orch = self.orchestrator.lock().await;
         orch.session_id().to_string()
