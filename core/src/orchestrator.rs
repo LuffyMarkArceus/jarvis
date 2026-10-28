@@ -106,6 +106,9 @@ pub const EGRESS_TOOL: &str = "egress.send";
 /// Asked when a remote request was not sent: answer with the local model?
 pub const EGRESS_LOCAL_TOOL: &str = "egress.local";
 
+/// Asked before a web call carries something this turn may not send.
+pub const EGRESS_WEB_TOOL: &str = "egress.web";
+
 /// `https://openrouter.ai/api/v1` -> `openrouter.ai`.
 fn host_of(base_url: &str) -> String {
     reqwest::Url::parse(base_url)
@@ -158,8 +161,26 @@ fn describe_concern(concern: &Concern) -> String {
     }
 }
 
-/// Maximum number of model round-trips inside a single user turn.
-const MAX_ITERATIONS: usize = 4;
+/// Model round-trips in one request when `max_rounds` is not set.
+///
+/// It was 4, tuned on llama3.2:1b, whose long turns were loops: the same
+/// broken call again and again. A capable model's long turns are research:
+/// nemotron-3-ultra used all 4 rounds searching with better queries after
+/// the first page was the wrong one, and was cut off mid-answer. Loops are
+/// now stopped by noticing the repeat (see `call_key`), so this limit only
+/// has to stop a turn that never settles.
+const DEFAULT_MAX_ROUNDS: usize = 8;
+
+/// The identity of a call within a turn: the same tool with the same
+/// arguments. Running it again cannot produce anything new, and for a write
+/// it would do the same thing twice.
+fn call_key(name: &str, args: &Value) -> String {
+    format!("{}\u{0}{}", name, args)
+}
+
+/// What the model is told instead of a result when it repeats a call.
+const REPEATED_CALL: &str =
+    "Not run again: this exact call was already made in this request, and its result is above. Answer from it, or try something different.";
 
 /// Maximum number of directory entries shown in a reply.
 const MAX_LIST_ENTRIES: usize = 200;
@@ -178,13 +199,20 @@ enum OutcomeStatus {
     Declined,
     /// Requires confirmation; auto-denied because the agent runs headless.
     NeedsConfirmation,
+    /// Not run because of what it would send off this machine; `output`
+    /// says what. Permissions allowed the tool: loosening them would not
+    /// help, and the report must not suggest it.
+    Withheld,
 }
 
 impl OutcomeStatus {
     fn is_blocked(&self) -> bool {
         matches!(
             self,
-            OutcomeStatus::Denied | OutcomeStatus::Declined | OutcomeStatus::NeedsConfirmation
+            OutcomeStatus::Denied
+                | OutcomeStatus::Declined
+                | OutcomeStatus::NeedsConfirmation
+                | OutcomeStatus::Withheld
         )
     }
 
@@ -197,6 +225,7 @@ impl OutcomeStatus {
             OutcomeStatus::NeedsConfirmation => {
                 "requires confirmation (auto-denied in non-interactive mode)"
             }
+            OutcomeStatus::Withheld => "not sent",
         }
     }
 }
@@ -258,7 +287,8 @@ pub struct TurnReport {
 pub struct ToolCallRecord {
     pub name: String,
     pub args: Value,
-    /// `executed`, `failed`, `denied`, `declined`, `needs_confirmation`, or
+    /// `executed`, `failed`, `denied`, `declined`, `needs_confirmation`,
+    /// `withheld` (not sent, for what it would send off this machine), or
     /// `not_offered` for a call outside the turn's plan.
     pub status: &'static str,
 }
@@ -280,6 +310,9 @@ struct TurnRecorder {
     redactor: std::sync::Mutex<Redactor>,
     /// What the user agreed to send this turn; a new concern asks again.
     approved: std::sync::Mutex<Vec<Concern>>,
+    /// The same for web calls, which go to a different party: agreeing to
+    /// send a file to the model is not agreeing to search for it.
+    web_approved: std::sync::Mutex<Vec<Concern>>,
     /// Whether any request of this turn went to a remote provider.
     remote: std::sync::atomic::AtomicBool,
     /// The model and provider that answered, for the footer: with a local
@@ -425,6 +458,7 @@ fn status_label(status: &OutcomeStatus) -> &'static str {
         OutcomeStatus::Denied => "denied",
         OutcomeStatus::Declined => "declined",
         OutcomeStatus::NeedsConfirmation => "needs_confirmation",
+        OutcomeStatus::Withheld => "withheld",
     }
 }
 
@@ -1072,7 +1106,15 @@ impl Orchestrator {
             }
         }
 
-        for _ in 0..MAX_ITERATIONS {
+        let max_rounds = self
+            .tier()
+            .0
+            .max_rounds
+            .unwrap_or(DEFAULT_MAX_ROUNDS)
+            .max(1);
+        let mut seen: std::collections::HashSet<String> =
+            trace.iter().map(|o| call_key(&o.name, &o.args)).collect();
+        for _ in 0..max_rounds {
             if cancel.is_some_and(Cancellation::is_cancelled) {
                 return self.cancelled_result(&trace);
             }
@@ -1118,7 +1160,18 @@ impl Orchestrator {
                     &turn.message.content,
                     calls.clone(),
                 ));
+                let mut progressed = false;
                 for call in calls {
+                    let args = normalize_arguments(call.function.arguments.clone());
+                    if !seen.insert(call_key(&call.function.name, &args)) {
+                        // Every call needs its result; this one is ours.
+                        messages.push(
+                            ChatMessage::tool_result(&call.function.name, REPEATED_CALL)
+                                .with_label(Label::default()),
+                        );
+                        continue;
+                    }
+                    progressed = true;
                     let outcome = self.execute_native_call(call, plan, confirm, rec).await;
                     messages.push(
                         ChatMessage::tool_result(
@@ -1138,14 +1191,30 @@ impl Orchestrator {
                 if let Some(report) = blocked_report(&trace) {
                     return Ok(report);
                 }
+                // A round of nothing but repeats is a model going in circles.
+                if !progressed {
+                    break;
+                }
                 continue;
             }
 
             // Tool calls embedded in the reply text.
             let text_calls = parser::parse_tool_calls(&turn.message.content);
             if !text_calls.is_empty() {
+                // Text calls have no per-call result slot: a round of only
+                // repeats ends the turn, and a repeat among new calls is
+                // dropped.
+                let fresh: Vec<&parser::ToolCall> = text_calls
+                    .iter()
+                    .filter(|c| {
+                        seen.insert(call_key(&c.name, &normalize_arguments(c.args.clone())))
+                    })
+                    .collect();
+                if fresh.is_empty() {
+                    break;
+                }
                 messages.push(ChatMessage::text("assistant", &turn.message.content));
-                for call in &text_calls {
+                for call in fresh {
                     let outcome = self.execute_text_call(call, plan, confirm, rec).await;
                     // Sent with the user role, but it is the tool's output:
                     // labelled as such, so egress does not take it for the
@@ -1224,7 +1293,7 @@ impl Orchestrator {
         };
 
         let outcome = self
-            .execute_offered(search, json!({ "query": input }), plan, confirm, rec)
+            .execute_offered(search, json!({ "query": input }), false, plan, confirm, rec)
             .await;
         let succeeded = outcome.status == OutcomeStatus::Succeeded;
         let seen = self.prompt_tool_output(&outcome.output);
@@ -1250,7 +1319,7 @@ impl Orchestrator {
         };
 
         let outcome = self
-            .execute_offered(fetch, json!({ "url": url }), plan, confirm, rec)
+            .execute_offered(fetch, json!({ "url": url }), false, plan, confirm, rec)
             .await;
         let seen = self.prompt_tool_output(&outcome.output);
         push_synthetic_exchange(messages, &outcome, &seen);
@@ -1564,7 +1633,8 @@ impl Orchestrator {
     ) -> ToolOutcome {
         let name = call.function.name.clone();
         let args = normalize_arguments(call.function.arguments.clone());
-        self.execute_offered(name, args, plan, confirm, rec).await
+        self.execute_offered(name, args, true, plan, confirm, rec)
+            .await
     }
 
     /// Execute a tool call parsed out of the model's text.
@@ -1576,7 +1646,7 @@ impl Orchestrator {
         rec: &TurnRecorder,
     ) -> ToolOutcome {
         let args = normalize_arguments(call.args.clone());
-        self.execute_offered(call.name.clone(), args, plan, confirm, rec)
+        self.execute_offered(call.name.clone(), args, true, plan, confirm, rec)
             .await
     }
 
@@ -1585,10 +1655,14 @@ impl Orchestrator {
     /// A hallucinated tool name must not become an execution path around the
     /// planner. This is a correctness guard, not a permission check: the
     /// permission system still runs for every call that gets this far.
+    ///
+    /// `by_model` says who wrote the arguments, which matters for what a
+    /// web call may carry (see [`Self::check_web_call`]).
     async fn execute_offered(
         &self,
         name: String,
         args: Value,
+        by_model: bool,
         plan: &TurnPlan,
         confirm: Option<&dyn ConfirmationHandler>,
         rec: &TurnRecorder,
@@ -1613,7 +1687,116 @@ impl Orchestrator {
             rec.tool(&outcome, "not_offered");
             return outcome;
         }
+        let args = match self
+            .check_web_call(&name, args, by_model, confirm, rec)
+            .await
+        {
+            Ok(args) => args,
+            Err((args, why)) => {
+                let outcome = ToolOutcome {
+                    name,
+                    args,
+                    status: OutcomeStatus::Withheld,
+                    output: why,
+                    result: None,
+                    pattern: None,
+                };
+                rec.tool(&outcome, "withheld");
+                return outcome;
+            }
+        };
         self.execute_call(name, args, confirm, rec).await
+    }
+
+    /// A web call sends its arguments off this machine on any tier: the
+    /// query to the search service, the URL to its site. This is the one
+    /// place they are checked, because it is the one place they leave.
+    ///
+    /// * A search query is redacted, like anything of the user's that
+    ///   leaves: it still works with `<EMAIL_1>` in it. A remote model's
+    ///   calls had their placeholders restored on the way back, so without
+    ///   this the real value would go to the search service.
+    /// * An address cannot be redacted and still work, so one carrying a
+    ///   secret or personal data is asked about instead.
+    /// * Arguments the model wrote can carry what it read this turn - a
+    ///   file, command output - so they are judged by the turn's labels,
+    ///   like a model request. The user's own words sent as the first
+    ///   search are not: they were the query by definition.
+    ///
+    /// Returns the arguments to send, or why nothing was sent.
+    async fn check_web_call(
+        &self,
+        name: &str,
+        mut args: Value,
+        by_model: bool,
+        confirm: Option<&dyn ConfirmationHandler>,
+        rec: &TurnRecorder,
+    ) -> std::result::Result<Value, (Value, String)> {
+        if egress::tool_origin(name) != Origin::Web {
+            return Ok(args);
+        }
+        if let Some(query) = args.get("query").and_then(Value::as_str) {
+            let redacted = rec.redactor.lock().unwrap().redact(query);
+            args["query"] = Value::String(redacted);
+        }
+        let url = args.get("url").and_then(Value::as_str).map(String::from);
+        let service = match &url {
+            Some(url) => host_of(url),
+            None => "the web search service".to_string(),
+        };
+
+        let mut reasons: Vec<String> = Vec::new();
+        if url
+            .as_deref()
+            .is_some_and(|u| Redactor::new().redact(u) != u)
+        {
+            reasons.push("a secret or personal data in the address".into());
+        }
+        let mut new: Vec<Concern> = Vec::new();
+        if by_model {
+            match egress::check(&[rec.label()], &self.egress_policy()) {
+                Verdict::Send => {}
+                Verdict::Never(concerns) => {
+                    let items: Vec<String> = concerns.iter().map(describe_concern).collect();
+                    return Err((
+                        args,
+                        format!(
+                            "the model wrote this after reading {}, which never leaves this machine",
+                            items.join(", ")
+                        ),
+                    ));
+                }
+                Verdict::Ask(concerns) => {
+                    let approved = rec.web_approved.lock().unwrap();
+                    new = concerns
+                        .into_iter()
+                        .filter(|c| !approved.contains(c))
+                        .collect();
+                }
+            }
+        }
+        if !new.is_empty() {
+            let items: Vec<String> = new.iter().map(describe_concern).collect();
+            reasons.push(format!(
+                "the model wrote it after reading {}",
+                items.join(", ")
+            ));
+        }
+        if reasons.is_empty() {
+            return Ok(args);
+        }
+
+        let sending = url.unwrap_or_else(|| args["query"].as_str().unwrap_or_default().to_string());
+        let ask = json!({ "service": service, "sending": sending, "because": reasons });
+        let Some(confirm) = confirm else {
+            return Err((args, format!("{}; nobody was asked", reasons.join("; "))));
+        };
+        if confirm.confirm(EGRESS_WEB_TOOL, &ask).await {
+            rec.web_approved.lock().unwrap().extend(new);
+            Ok(args)
+        } else {
+            Err((args, format!("{}; not approved", reasons.join("; "))))
+        }
     }
 
     /// Run a single tool call and record it in the turn report.
@@ -2327,8 +2510,11 @@ fn render_blocked_report(trace: &[ToolOutcome]) -> String {
         // Say *why* nothing ran. "Blocked by policy" is wrong when the user
         // themselves clicked no.
         let only_declined = blocked.iter().all(|t| t.status == OutcomeStatus::Declined);
+        let only_withheld = blocked.iter().all(|t| t.status == OutcomeStatus::Withheld);
         if only_declined {
             out.push_str("I did not run that - you declined the confirmation prompt.\n\n");
+        } else if only_withheld {
+            out.push_str("I did not run that - it would have sent something off this machine that may not leave it.\n\n");
         } else {
             out.push_str("I did not run that - it was blocked by the permission policy.\n\n");
         }
@@ -2343,6 +2529,9 @@ fn render_blocked_report(trace: &[ToolOutcome]) -> String {
         }
         out.push_str(&format!("    args:   {}\n", compact_args(&t.args)));
         out.push_str(&format!("    status: {}\n", t.status.label()));
+        if t.status == OutcomeStatus::Withheld {
+            out.push_str(&format!("    why:    {}\n", t.output));
+        }
     }
 
     if !done.is_empty() {
@@ -2362,7 +2551,10 @@ fn render_blocked_report(trace: &[ToolOutcome]) -> String {
     let tool_level: Vec<&ToolOutcome> = blocked
         .iter()
         .copied()
-        .filter(|t| t.pattern.is_none() && t.status != OutcomeStatus::Declined)
+        .filter(|t| {
+            t.pattern.is_none()
+                && !matches!(t.status, OutcomeStatus::Declined | OutcomeStatus::Withheld)
+        })
         .collect();
     if !tool_level.is_empty() {
         let mut names: Vec<&str> = tool_level.iter().map(|t| t.name.as_str()).collect();
@@ -2597,5 +2789,191 @@ mod tests {
         assert!(input_names_url("what does https://example.com say"));
         assert!(input_names_url("read HTTP://EXAMPLE.COM"));
         assert!(!input_names_url("what is the latest version of rust"));
+    }
+
+    // ------------------------------------------------- what web calls send
+
+    struct Answer {
+        yes: bool,
+        asked: std::sync::Mutex<Vec<Value>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ConfirmationHandler for Answer {
+        async fn confirm(&self, tool: &str, args: &Value) -> bool {
+            assert_eq!(tool, EGRESS_WEB_TOOL);
+            self.asked.lock().unwrap().push(args.clone());
+            self.yes
+        }
+    }
+
+    fn answer(yes: bool) -> Answer {
+        Answer {
+            yes,
+            asked: Default::default(),
+        }
+    }
+
+    fn web_jarvis() -> (Orchestrator, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("jarvis-web-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut config = Config::default();
+        config.general.data_dir = dir.clone();
+        config.memory.db_path = dir.join("memory.db");
+        let permissions =
+            PermissionManager::with_paths(dir.join("permissions.toml"), dir.join("audit.db"))
+                .unwrap();
+        let jarvis =
+            Orchestrator::with_parts(config, Arc::new(crate::eval::ScriptedProvider), permissions);
+        (jarvis, dir)
+    }
+
+    const SEARCH: &str = "mcp.search.search";
+    const FETCH: &str = "mcp.fetch.fetch";
+
+    #[tokio::test]
+    async fn the_users_own_query_leaves_redacted_without_asking() {
+        let (jarvis, dir) = web_jarvis();
+        let rec = TurnRecorder::default();
+        let user = answer(true);
+        let args = json!({ "query": "rust jobs, reply to ada@example.com" });
+        let sent = jarvis
+            .check_web_call(SEARCH, args, false, Some(&user), &rec)
+            .await
+            .unwrap();
+        assert_eq!(sent["query"], "rust jobs, reply to <EMAIL_1>");
+        assert!(user.asked.lock().unwrap().is_empty());
+        // Counted, so the footer says so: redaction is never silent.
+        assert_eq!(rec.redactor.lock().unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_model_query_after_reading_a_file_is_asked_about_once() {
+        let (jarvis, dir) = web_jarvis();
+        let rec = TurnRecorder::default();
+        rec.saw(&Label::of_tool(
+            "filesystem.read",
+            &json!({ "path": "/srv/notes/todo.txt" }),
+        ));
+        let query = json!({ "query": "todo app ideas" });
+
+        // Nobody to ask: not sent.
+        let why = jarvis
+            .check_web_call(SEARCH, query.clone(), true, None, &rec)
+            .await
+            .unwrap_err()
+            .1;
+        assert!(why.contains("/srv/notes/todo.txt"), "{}", why);
+
+        let user = answer(true);
+        for _ in 0..2 {
+            jarvis
+                .check_web_call(SEARCH, query.clone(), true, Some(&user), &rec)
+                .await
+                .unwrap();
+        }
+        let asked = user.asked.lock().unwrap().clone();
+        assert_eq!(asked.len(), 1, "approved for the rest of the turn");
+        assert_eq!(asked[0]["sending"], "todo app ideas");
+        assert_eq!(asked[0]["service"], "the web search service");
+
+        // The user's own words are the query by definition: not asked.
+        let rec = TurnRecorder::default();
+        rec.saw(&Label::of_tool(
+            "filesystem.read",
+            &json!({ "path": "/srv/notes/todo.txt" }),
+        ));
+        let user = answer(false);
+        jarvis
+            .check_web_call(SEARCH, query, false, Some(&user), &rec)
+            .await
+            .unwrap();
+        assert!(user.asked.lock().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn after_reading_a_never_file_the_model_cannot_search_and_nobody_is_asked() {
+        let (jarvis, dir) = web_jarvis();
+        let key = dirs::home_dir().unwrap().join(".ssh/id_ed25519");
+        let rec = TurnRecorder::default();
+        rec.saw(&Label::of_tool(
+            "filesystem.read",
+            &json!({ "path": key.display().to_string() }),
+        ));
+        let user = answer(true);
+        let (_, why) = jarvis
+            .check_web_call(SEARCH, json!({ "query": "x" }), true, Some(&user), &rec)
+            .await
+            .unwrap_err();
+        assert!(why.contains("never leaves this machine"), "{}", why);
+        assert!(user.asked.lock().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_model_query_after_only_web_content_goes() {
+        let (jarvis, dir) = web_jarvis();
+        let rec = TurnRecorder::default();
+        rec.saw(&Label::of(Origin::User));
+        rec.saw(&Label::of_tool(SEARCH, &json!({ "query": "rust" })));
+        let user = answer(false);
+        jarvis
+            .check_web_call(
+                SEARCH,
+                json!({ "query": "rust 1.80 release" }),
+                true,
+                Some(&user),
+                &rec,
+            )
+            .await
+            .unwrap();
+        assert!(user.asked.lock().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn an_address_carrying_a_secret_is_asked_about_and_ordinary_ones_are_not() {
+        let (jarvis, dir) = web_jarvis();
+        let rec = TurnRecorder::default();
+        for url in [
+            "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+            "https://arxiv.org/abs/2401.12345",
+            "https://www.theverge.com/2024/10/8/24265069/nobel-prize-physics",
+            "https://github.com/rust-lang/rust/releases/tag/1.80.0",
+            "https://docs.rs/serde/1.0.210/serde/",
+        ] {
+            let user = answer(false);
+            jarvis
+                .check_web_call(FETCH, json!({ "url": url }), false, Some(&user), &rec)
+                .await
+                .unwrap_or_else(|e| panic!("{} was not sent: {}", url, e.1));
+            assert!(user.asked.lock().unwrap().is_empty(), "{}", url);
+        }
+
+        let url = "https://api.example.com/v1/data?api_key=abcd1234efgh5678";
+        let user = answer(false);
+        let (args, why) = jarvis
+            .check_web_call(FETCH, json!({ "url": url }), false, Some(&user), &rec)
+            .await
+            .unwrap_err();
+        assert_eq!(args["url"], url, "an address is never rewritten");
+        assert!(why.contains("not approved"), "{}", why);
+        assert_eq!(user.asked.lock().unwrap()[0]["service"], "api.example.com");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn other_tools_are_not_web_calls() {
+        let (jarvis, dir) = web_jarvis();
+        let rec = TurnRecorder::default();
+        let args = json!({ "path": "/tmp/x", "content": "mail ada@example.com" });
+        let sent = jarvis
+            .check_web_call("filesystem.write", args.clone(), true, None, &rec)
+            .await
+            .unwrap();
+        assert_eq!(sent, args);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

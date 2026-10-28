@@ -181,6 +181,10 @@ otherwise. Requests to a remote provider pass through one check
 * Command output and machine information are asked about.
 * Each message's origin is stored with it, so a file shown last week does
   not leave as "memory".
+* Web searches and fetches leave the machine on **every** tier, so they are
+  checked too: a query is redacted, an address carrying a secret or personal
+  data is asked about, and a search the model wrote after reading a file is
+  asked about (or, after a `~/.ssh`-type file, not sent).
 
 ```toml
 [model]
@@ -202,6 +206,7 @@ base_url = "https://openrouter.ai/api/v1"
 api_key_env = "OPENROUTER_API_KEY"
 default_model = "google/gemma-4-31b-it:free"
 data_policy = "may_train"
+max_rounds = 8                # model round-trips per request (default 8)
 default = false               # sessions start local
 ```
 

@@ -1,6 +1,6 @@
 # Design: local and hosted model tiers (Phase 5b)
 
-Status: **built** (2026-10-27): steps 1-5. Open items under "Known gaps".
+Status: **built** (2026-10-27): steps 1-6. Open items under "Known gaps".
 Decisions are the owner's; the rules and mechanisms are how they are kept.
 
 ## Problem
@@ -192,13 +192,23 @@ from tagged eval runs about which requests the local model fails.
 5. **Done.** `remote = true` eval cases with `sent_contains` /
    `sent_excludes` (`evals/cases/egress.toml`), graded with or without a
    model.
+6. **Done.** Web calls. A search query and a fetched address leave the
+   machine on *any* tier, so they are checked where they leave
+   (`Orchestrator::check_web_call`), not where the model is called:
+   * a query is redacted, whoever wrote it; the footer counts it;
+   * an address cannot be redacted and still work, so one carrying a secret
+     or personal data is asked about (`egress.web`);
+   * arguments the *model* wrote are judged by the turn's labels like a
+     model request - after reading an unallowed file it asks, after a
+     `never` file it is not sent and nobody is asked. The user's own words
+     sent as the first search are only redacted: they are the query.
+   A remote model's calls come back with placeholders restored, so without
+   this the real value would have gone on to the search service. A call not
+   sent is reported as `withheld`, never as a permission denial: the advice
+   for that ("jarvis permissions allow") would be wrong.
 
 ## Known gaps
 
-* **Web search queries leave the machine on any tier.** The search sidecar
-  sends the query to its backend, and this check covers model requests
-  only, so a query is neither checked nor redacted. It needs its own rule
-  (at least the redactor) at the MCP call.
 * **Names and free-text personal details** are not redacted (see
   Redaction).
 * **A redacted remote answer is not streamed**: a placeholder split across

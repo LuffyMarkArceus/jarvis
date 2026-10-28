@@ -107,6 +107,11 @@ pub struct ModelConfig {
     /// What a remote provider may do with what it is sent: "no_training",
     /// "may_train" or "unknown" (the default, treated as "may_train").
     pub data_policy: Option<String>,
+    /// Most model round-trips in one request (default 8). Each round may
+    /// run tools; the limit stops a turn that never settles. A model stuck
+    /// repeating itself is stopped sooner, by the orchestrator noticing the
+    /// repeat, so this need not be set low for small models.
+    pub max_rounds: Option<usize>,
 }
 
 fn default_true() -> bool {
@@ -126,6 +131,7 @@ impl Default for ModelConfig {
             api_key_env: None,
             locality: None,
             data_policy: None,
+            max_rounds: None,
         }
     }
 }

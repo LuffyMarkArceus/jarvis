@@ -46,6 +46,21 @@ pub fn describe_action(tool: &str, args: &Value) -> String {
                 str_arg(args, "url").unwrap_or("unknown address"),
             )
         }
+        // Not a tool: a web call carrying something this turn may not send.
+        "egress.web" => {
+            let because: Vec<&str> = args["because"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str())
+                .collect();
+            format!(
+                "Send \"{}\" to {}, outside this machine ({})",
+                shorten(str_arg(args, "sending").unwrap_or("")),
+                str_arg(args, "service").unwrap_or("a web service"),
+                because.join("; ")
+            )
+        }
         "shell.run" => match str_arg(args, "command") {
             Some(command) => format!("Run shell command: {}", shorten(command)),
             None => "Run a shell command".to_string(),
