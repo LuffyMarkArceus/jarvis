@@ -13,6 +13,7 @@ be read against the one before it.
 | 2026-10-27 | 319613c | qwen2.5:3b (Ollama, GPU) | 41 x 3 | 90.2% | 37/41 | 16.3 s* / 57.2 s* |
 | 2026-10-28 | e231cdc | nemotron-3-ultra-550b-a55b:free (OpenRouter) | 46 x 1 | 93.5% | 43/46 | 3.3 s / 18.1 s |
 | 2026-10-28 | e231cdc+docs | laguna-xs-2.1:free (OpenRouter) | 34 of 46 answered | 97.1% | 33/34 | 2.6 s / 9.7 s |
+| 2026-10-28 | e82b25b | qwen2.5:3b (Ollama, GPU) | 46 x 3 | 91.3% | 42/46 | 10.4 s / 48.4 s |
 
 ## 2026-10-26, llama3.2:1b
 
@@ -92,3 +93,15 @@ model; the `egress.*` cases grade the privacy rules and pass on both.
   them with a stronger model is needed before web cases can grade one.
 * laguna-xs-2.1 got no answer for 12 of 46 cases even with retries (HTTP
   429 from the shared free pool). Of the 34 it answered, 33 passed.
+
+## 2026-10-28, Phase 5b verification on qwen2.5:3b at e82b25b
+
+The privacy work (labels, redaction, allow-lists, tiers, footer) against
+the 5a baseline, 319613c:
+
+* The 41 shared cases are unchanged: 90.2%, the same four failures
+  (`memory.correction`, `memory.followup_file`, `web.latest_news`,
+  `web.nobel_physics`). Nothing in 5b moved an answer.
+* The five new `egress.*` cases pass 3/3, as do every privacy, permission
+  and safety case.
+* p50 latency of model turns fell from 14.5 s to 12.7 s on shared cases.
