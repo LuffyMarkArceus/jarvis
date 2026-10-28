@@ -54,6 +54,38 @@ class TapeTest(unittest.TestCase):
         self.assertTrue(reply["result"]["isError"])
         self.assertIn("not on tape", reply["result"]["content"][0]["text"])
 
+    def test_recording_again_adds_calls_and_keeps_recorded_answers(self):
+        session(["--tape", self.tape, "--record", "--", sys.executable, ECHO], LIST, call(2, "hi"))
+        with open(self.tape, encoding="utf-8") as f:
+            tape = json.load(f)
+        tape["calls"][0]["result"]["content"][0]["text"] = "as recorded last month"
+        with open(self.tape, "w", encoding="utf-8") as f:
+            json.dump(tape, f)
+
+        session(
+            ["--tape", self.tape, "--record", "--", sys.executable, ECHO],
+            LIST,
+            call(2, "hi"),
+            call(3, "new"),
+        )
+        replayed = session(["--tape", self.tape], call(2, "hi"), call(3, "new"))
+        texts = [r["result"]["content"][0]["text"] for r in replayed]
+        self.assertEqual(texts, ["as recorded last month", "echo: new"])
+
+    def test_a_tool_error_is_passed_on_but_not_recorded(self):
+        failing = {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "boom", "arguments": {}},
+        }
+        recorded = session(
+            ["--tape", self.tape, "--record", "--", sys.executable, ECHO], LIST, failing
+        )
+        self.assertTrue(recorded[1]["result"]["isError"])
+        replayed = session(["--tape", self.tape], failing)[0]
+        self.assertIn("not on tape", replayed["result"]["content"][0]["text"])
+
     def test_a_missing_tape_cannot_list_tools(self):
         reply = session(["--tape", self.tape], LIST)[0]
         self.assertIn("error", reply)

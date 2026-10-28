@@ -9,7 +9,7 @@ jarvis eval                      # every case, 3 attempts each, configured model
 jarvis eval --model qwen2.5:3b   # same suite, another model
 jarvis eval --filter web         # cases whose id contains "web" or tagged "web"
 jarvis eval --offline            # scripted model: grade only what code decides
-jarvis eval --record             # re-record web tapes from the real servers
+jarvis eval --record             # add missing calls to web tapes from the real servers
 jarvis eval diff                 # what changed since the previous run of this model
 jarvis eval --remote             # the [remote] model; sandbox fixtures are allowed to go
 ```
@@ -116,3 +116,11 @@ jarvis eval --record --filter web.my_case
 
 Read the recorded tape before committing it. It is the ground truth the case
 is graded against.
+
+Recording only adds. A call already on the tape is answered from it, so
+recording another model's path (`jarvis eval --remote --record`) extends a
+tape without changing the pages other models are graded on. Tool errors are
+passed to the model but never kept: a site that was down for a minute would
+otherwise be down on every replay. To refresh a stale answer, delete it or
+the tape first, then record; that changes what the case means, so review
+the diff.

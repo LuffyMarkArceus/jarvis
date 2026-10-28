@@ -7,12 +7,20 @@ against a tape: the exact `tools/list` and `tools/call` replies a real server
 gave when the tape was recorded.
 
     tape_mcp.py --tape FILE                    replay FILE
-    tape_mcp.py --tape FILE --record -- CMD..  run CMD, answer from it, and
-                                               add every reply to FILE
+    tape_mcp.py --tape FILE --record -- CMD..  answer from FILE where it can;
+                                               run CMD for the rest and add
+                                               its replies to FILE
 
 A call that is not on the tape is answered with a tool error naming the
 arguments, never forwarded to the network. A case that drifts from its tape
 then fails visibly instead of quietly becoming a live test.
+
+Recording only adds. A call already on the tape is answered from it, so
+recording a second model's path (a capable one searches again with better
+queries) does not change the pages every other model is graded on. To
+refresh an answer that went stale, delete it - or the tape - first: that
+changes what a case means, and should be a decision rather than a side
+effect of recording. Tool errors are not recorded (see `record_reply`).
 
 Only the standard library is used, so this runs anywhere the sidecars do.
 """
@@ -138,19 +146,29 @@ def replay_reply(tape, request):
 
 
 def record_reply(tape, path, upstream, request):
+    method = request.get("method")
+    if method == "tools/list" and tape["tools"] is not None:
+        return replay_reply(tape, request)
+    if method == "tools/call":
+        params = request.get("params") or {}
+        wanted = key(params.get("name"), params.get("arguments"))
+        if any(key(c["tool"], c["args"]) == wanted for c in tape["calls"]):
+            return replay_reply(tape, request)
     reply = upstream.forward(request)
     if reply is None or "result" not in reply:
         return reply
-    method = request.get("method")
+    # A tool error is passed on but not kept. It may be the site being down
+    # for a minute (Wikipedia answered 503 during one recording), and a tape
+    # would replay that outage forever. On replay the call is simply not on
+    # the tape, which also fails as a tool error.
+    if reply["result"].get("isError"):
+        return reply
     if method == "tools/list":
         tape["tools"] = reply["result"]
         save(path, tape)
     elif method == "tools/call":
         params = request.get("params") or {}
         tool, args = params.get("name"), params.get("arguments") or {}
-        wanted = key(tool, args)
-        # Re-recording replaces a stale answer rather than keeping both.
-        tape["calls"] = [c for c in tape["calls"] if key(c["tool"], c["args"]) != wanted]
         tape["calls"].append({"tool": tool, "args": args, "result": reply["result"]})
         save(path, tape)
     return reply

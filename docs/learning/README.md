@@ -339,6 +339,47 @@ let a client drift from the spec. We test the adapter's output against the
 spec's rules, and the first strict server found a bug a lenient one had
 masked."
 
+## 20. When one number does two jobs, the weak case sets it for everyone
+
+**Lesson.** A limit tuned on one population can quietly encode that
+population's failure mode. Before raising or lowering it, find out what it
+is actually protecting against - then protect against *that* directly, and
+let the limit go back to its real job.
+
+**In this repo.** `MAX_ITERATIONS = 4` was tuned on llama3.2:1b. The eval
+records showed what it really did: every 1B attempt that reached 4 rounds
+was a loop (the same broken `filesystem.write` again), while every
+nemotron attempt that reached 4 was research - six *distinct* searches and
+fetches, cut off mid-answer. So the limit was a loop detector for one model
+and a research budget for the other. Loops are now caught as loops (an
+identical call is never run twice, `call_key` in
+`core/src/orchestrator.rs`), and the limit is `max_rounds` per tier,
+default 8. Mutation check: without the guard, the approved write ran 8
+times.
+
+**Say it in an interview.** "Before changing a threshold I look at what
+hits it. Here the same cap was catching two different behaviours; we
+replaced the proxy with a direct check for the bad one, so the cap no
+longer has to be set by the weakest client."
+
+## 21. A recording captures the moment, outages included
+
+**Lesson.** Record-replay tests freeze whatever the dependency said while
+recording - including that it was down. Decide what a recording is allowed
+to keep, and make refreshing it a deliberate act, not a side effect.
+
+**In this repo.** Recording nemotron's web path saved Wikipedia's `503`
+answers for every follow-up search, which would have replayed as "search
+failed" forever. Recording also *replaced* existing answers, silently
+changing the pages the 1B's cases were graded on. `evals/tape_mcp.py` now
+only adds calls that are missing, never keeps a tool error, and leaves
+refreshing a stale page to whoever deletes it.
+
+**Say it in an interview.** "Our fixtures are append-only and only store
+successful responses. A transient error in a fixture turns a flaky
+dependency into a permanent test failure, and an overwrite turns
+re-recording into an unreviewed change to every expectation."
+
 ---
 
 ## Self-test
@@ -371,13 +412,21 @@ Answer out loud, without opening the code:
 13. A text-embedded tool call's result is sent back with the `user` role.
     Why did that break role-based labelling, and where is the label set now?
 14. Your search questions leave the machine even with a local model. Why
-    does the egress check not see them?
+    did the egress check not see them at first, and where are they checked
+    now?
 15. Why is "always allow" offered for a file but never for command output?
 16. Why must the first choice in a prompt be the narrowest yes?
 17. A cloud model scored 56.5% with no wrong answers. How, and what did the
     first fix for it get wrong?
 18. Why are tool calls mapped back to our names by lookup, not by turning
     `__` back into `.`?
+19. The 1B and nemotron both hit the 4-round limit. What was different
+    about *why*, and why does that make a repeat check better than a lower
+    limit?
+20. A model wrote a search query after reading a file. Why is that query
+    checked by the turn's labels, when the user's own first search is only
+    redacted?
+21. Why does the tape recorder refuse to keep a tool error, even a 404?
 
 ## Skills map: SDE2 -> senior
 
