@@ -73,6 +73,10 @@ pub struct Attempt {
     pub latency: Duration,
     /// Set when the turn did not finish: an error or a timeout.
     pub error: Option<String>,
+    /// The model never answered (rate limited, unreachable). Such an attempt
+    /// measures the provider's availability, not the model, so it is
+    /// reported apart and left out of pass rates.
+    pub unavailable: bool,
 }
 
 impl Attempt {
@@ -86,6 +90,8 @@ impl Attempt {
             "case": self.case,
             "attempt": self.attempt,
             "passed": self.passed,
+            "unavailable": self.unavailable,
+            "model_error": self.report.model_error,
             "error": self.error,
             "failed": self.failed_checks().collect::<Vec<_>>(),
             "route": self.report.route,
@@ -136,6 +142,7 @@ pub async fn run_case(case: &Case, attempt: usize, options: &RunOptions) -> Atte
                 asked: Vec::new(),
                 latency: Duration::ZERO,
                 error: Some(e.to_string()),
+                unavailable: false,
             }
         }
     };
@@ -150,10 +157,12 @@ pub async fn run_case(case: &Case, attempt: usize, options: &RunOptions) -> Atte
         },
         options.grading,
     );
+    let unavailable = run.report.model_error.is_some();
     Attempt {
+        unavailable,
         case: case.id.clone(),
         attempt,
-        passed: run.error.is_none() && checks.iter().all(|c| c.passed),
+        passed: !unavailable && run.error.is_none() && checks.iter().all(|c| c.passed),
         checks,
         report: run.report,
         asked: run.asked,
@@ -518,9 +527,17 @@ impl Provider for RecordingProvider {
 }
 
 /// Pass rate per case, in suite order.
+/// Attempts where the model never answered are not counted, so a case can
+/// have a total of 0.
 pub fn pass_rates(attempts: &[Attempt]) -> Vec<(String, usize, usize)> {
     let mut rates: Vec<(String, usize, usize)> = Vec::new();
     for attempt in attempts {
+        if attempt.unavailable {
+            if !rates.iter().any(|(id, _, _)| *id == attempt.case) {
+                rates.push((attempt.case.clone(), 0, 0));
+            }
+            continue;
+        }
         match rates.iter_mut().find(|(id, _, _)| *id == attempt.case) {
             Some(rate) => {
                 rate.1 += attempt.passed as usize;
@@ -530,4 +547,36 @@ pub fn pass_rates(attempts: &[Attempt]) -> Vec<(String, usize, usize)> {
         }
     }
     rates
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn attempt(case: &str, passed: bool, unavailable: bool) -> Attempt {
+        Attempt {
+            case: case.into(),
+            attempt: 1,
+            passed,
+            checks: Vec::new(),
+            report: TurnReport::default(),
+            asked: Vec::new(),
+            latency: Duration::ZERO,
+            error: None,
+            unavailable,
+        }
+    }
+
+    #[test]
+    fn an_attempt_the_model_never_answered_is_not_scored() {
+        let attempts = [
+            attempt("a", true, false),
+            attempt("a", false, true),
+            attempt("b", false, true),
+        ];
+        assert_eq!(
+            pass_rates(&attempts),
+            vec![("a".to_string(), 1, 1), ("b".to_string(), 0, 0)]
+        );
+    }
 }

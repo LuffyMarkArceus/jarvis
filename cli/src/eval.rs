@@ -125,6 +125,19 @@ pub async fn run(args: EvalArgs) -> anyhow::Result<()> {
 }
 
 fn print_attempt(attempt: &Attempt) {
+    if attempt.unavailable {
+        println!(
+            "SKIP {} #{} - the model did not answer: {}",
+            attempt.case,
+            attempt.attempt,
+            attempt
+                .report
+                .model_error
+                .as_deref()
+                .unwrap_or("unknown error")
+        );
+        return;
+    }
     let mark = if attempt.passed { "PASS" } else { "FAIL" };
     println!(
         "{} {} #{} ({} ms, route {})",
@@ -150,8 +163,16 @@ fn print_summary(cases: &[case::Case], attempts: &[Attempt]) {
     let rates = eval::pass_rates(attempts);
     println!("\nPer case:");
     for (id, passed, total) in &rates {
-        println!("  {}/{}  {}", passed, total, id);
+        if *total == 0 {
+            println!("  -/-  {}  (no answer from the model)", id);
+        } else {
+            println!("  {}/{}  {}", passed, total, id);
+        }
     }
+    // A case the model never answered says nothing about the model.
+    let rates: Vec<_> = rates.into_iter().filter(|(_, _, t)| *t > 0).collect();
+    let unavailable = attempts.iter().filter(|a| a.unavailable).count();
+    let attempts: Vec<&Attempt> = attempts.iter().filter(|a| !a.unavailable).collect();
 
     // The mean per-case rate weighs every case equally however many times
     // it ran; "fully passing" is the stricter number to track over time.
@@ -159,7 +180,7 @@ fn print_summary(cases: &[case::Case], attempts: &[Attempt]) {
         .iter()
         .map(|(_, p, t)| *p as f64 / *t as f64)
         .sum::<f64>()
-        / rates.len() as f64;
+        / rates.len().max(1) as f64;
     let full = rates.iter().filter(|(_, p, t)| p == t).count();
     println!(
         "\nScore: {:.1}% mean pass rate | {}/{} cases pass every attempt",
@@ -167,6 +188,12 @@ fn print_summary(cases: &[case::Case], attempts: &[Attempt]) {
         full,
         rates.len()
     );
+    if unavailable > 0 {
+        println!(
+            "  {} attempt(s) got no answer from the model (rate limited or unreachable) and are not scored",
+            unavailable
+        );
+    }
 
     let mut tags: Vec<&str> = cases
         .iter()

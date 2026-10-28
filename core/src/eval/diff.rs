@@ -59,6 +59,10 @@ impl Run {
                 run.sha = field("sha");
                 run.grading = field("grading");
             }
+            // The model never answered: availability, not quality.
+            if record.get("unavailable").and_then(Value::as_bool) == Some(true) {
+                continue;
+            }
             let case = run.cases.entry(field("case")).or_default();
             case.total += 1;
             if record.get("passed").and_then(Value::as_bool) == Some(true) {

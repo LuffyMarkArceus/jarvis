@@ -39,7 +39,13 @@ pub struct OpenAiProvider {
     base_url: String,
     api_key: Option<String>,
     client: reqwest::Client,
+    /// Pauses before each retry of a busy server. See [`OpenAiProvider::post`].
+    retry_delays: Vec<std::time::Duration>,
 }
+
+/// A server's own `Retry-After` is honoured up to this, so a misbehaving
+/// one cannot stall a turn for minutes.
+const MAX_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl OpenAiProvider {
     pub fn new(base_url: &str, api_key: Option<String>) -> Self {
@@ -47,6 +53,40 @@ impl OpenAiProvider {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key,
             client: reqwest::Client::new(),
+            retry_delays: vec![
+                std::time::Duration::from_secs(2),
+                std::time::Duration::from_secs(5),
+            ],
+        }
+    }
+
+    /// POST a request, retrying while the server says it is busy.
+    ///
+    /// Shared free endpoints answer 429 when their pool is full, and 502 or
+    /// 503 when the model behind them is overloaded; both usually clear in
+    /// seconds. Measured on OpenRouter's free models: without a retry, 6 to
+    /// 20 of 46 eval cases got no answer at all. Other errors are returned
+    /// at once - retrying a bad request only repeats it. Nothing has been
+    /// streamed before a retry, so the streaming path can use this too.
+    async fn post(
+        &self,
+        url: &str,
+        body: &Value,
+        cancel: Option<&Cancellation>,
+    ) -> Result<reqwest::Response> {
+        let mut delays = self.retry_delays.iter();
+        loop {
+            let response =
+                crate::model::cancellable(self.request(url.to_string()).json(body).send(), cancel)
+                    .await??;
+            let status = response.status().as_u16();
+            let busy = matches!(status, 429 | 502 | 503);
+            let Some(delay) = delays.next().filter(|_| busy) else {
+                return Ok(response);
+            };
+            let wait = retry_after(&response).map_or(*delay, |s| s.min(MAX_RETRY_AFTER));
+            tracing::info!("HTTP {} from {}, retrying in {:?}", status, url, wait);
+            crate::model::cancellable(tokio::time::sleep(wait), cancel).await?;
         }
     }
 
@@ -350,8 +390,7 @@ impl Provider for OpenAiProvider {
         let url = format!("{}/chat/completions", self.base_url);
         tracing::debug!("openai request: POST {}", url);
         let body = build_body(&request, false);
-        let response =
-            crate::model::cancellable(self.request(url).json(&body).send(), cancel).await??;
+        let response = self.post(&url, &body, cancel).await?;
         let status = response.status();
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
@@ -376,8 +415,7 @@ impl Provider for OpenAiProvider {
         let url = format!("{}/chat/completions", self.base_url);
         let body = build_body(&request, true);
         tracing::debug!("openai request: POST {} (stream)", url);
-        let mut response =
-            crate::model::cancellable(self.request(url).json(&body).send(), cancel).await??;
+        let mut response = self.post(&url, &body, cancel).await?;
         let status = response.status();
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
@@ -447,6 +485,19 @@ fn sse_data(line: &str) -> Result<Option<&str>> {
         return Ok(None);
     }
     Ok(Some(data))
+}
+
+/// `Retry-After` in seconds, when the server sent one.
+fn retry_after(response: &reqwest::Response) -> Option<std::time::Duration> {
+    response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(std::time::Duration::from_secs)
 }
 
 fn first_line(text: &str) -> String {
@@ -774,6 +825,99 @@ mod tests {
         let calls = turn.message.tool_calls.expect("a call");
         assert_eq!(calls[0].function.arguments["path"], "/tmp/x");
         assert_eq!(turn.prompt_tokens, Some(7));
+    }
+
+    /// A one-endpoint HTTP server that answers each connection with the
+    /// next status in `statuses`, and a completion once they run out.
+    async fn stub_server(
+        statuses: Vec<u16>,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let n = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut buf = vec![0u8; 65536];
+                let _ = socket.read(&mut buf).await;
+                let (status, body) = match statuses.get(n) {
+                    Some(code) => (*code, r#"{"error":{"message":"busy"}}"#.to_string()),
+                    None => (
+                        200,
+                        r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#
+                            .to_string(),
+                    ),
+                };
+                let reply = format!(
+                    "HTTP/1.1 {} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    status,
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(reply.as_bytes()).await;
+            }
+        });
+        (url, hits)
+    }
+
+    fn quick(url: &str) -> OpenAiProvider {
+        let mut provider = OpenAiProvider::new(url, None);
+        provider.retry_delays = vec![std::time::Duration::from_millis(5); 2];
+        provider
+    }
+
+    fn hello() -> Vec<ChatMessage> {
+        vec![message("user", "hi")]
+    }
+
+    fn request(messages: &[ChatMessage]) -> ChatRequest<'_> {
+        ChatRequest {
+            model: "m",
+            system: None,
+            messages,
+            tools: None,
+            options: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_busy_server_is_retried_until_it_answers() {
+        let (url, hits) = stub_server(vec![429, 503]).await;
+        let messages = hello();
+        let turn = quick(&url)
+            .chat_turn(request(&messages), None)
+            .await
+            .unwrap();
+        assert_eq!(turn.message.content, "ok");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn retries_stop_after_the_last_delay() {
+        let (url, hits) = stub_server(vec![429, 429, 429, 429]).await;
+        let messages = hello();
+        let error = quick(&url)
+            .chat_turn(request(&messages), None)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("429"), "{}", error);
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn a_bad_request_is_not_retried() {
+        let (url, hits) = stub_server(vec![400]).await;
+        let messages = hello();
+        assert!(quick(&url)
+            .chat_turn(request(&messages), None)
+            .await
+            .is_err());
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     /// End-to-end against a real OpenAI-compatible server.

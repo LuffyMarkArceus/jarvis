@@ -244,6 +244,9 @@ pub struct TurnReport {
     pub remote: bool,
     /// A request was not sent to the remote model and nothing answered.
     pub withheld: bool,
+    /// The model did not respond (unreachable, rate limited); the answer is
+    /// a fallback, not the model's.
+    pub model_error: Option<String>,
     /// The model and provider that answered; empty when no model was used.
     pub model: String,
     pub provider: String,
@@ -284,6 +287,8 @@ struct TurnRecorder {
     used: std::sync::Mutex<Option<(String, String)>>,
     /// A request of this turn was not sent.
     withheld: std::sync::atomic::AtomicBool,
+    /// Why the model gave no answer, when it did not.
+    model_error: std::sync::Mutex<Option<String>>,
 }
 
 impl TurnRecorder {
@@ -293,6 +298,10 @@ impl TurnRecorder {
             self.remote
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
+    }
+
+    fn model_failed(&self, error: &JarvisError) {
+        *self.model_error.lock().unwrap() = Some(error.to_string());
     }
 
     fn saw(&self, label: &Label) {
@@ -339,6 +348,7 @@ impl TurnRecorder {
         let redacted = self.redactor.lock().unwrap().count();
         let (model, provider) = self.used.lock().unwrap().clone().unwrap_or_default();
         TurnReport {
+            model_error: self.model_error.lock().unwrap().take(),
             withheld: self.withheld.load(std::sync::atomic::Ordering::Relaxed),
             model,
             provider,
@@ -363,6 +373,9 @@ pub fn footer(report: &TurnReport) -> String {
     let (model, provider) = (report.model.as_str(), report.provider.as_str());
     if report.model_calls == 0 && report.withheld {
         return "not sent · no model".to_string();
+    }
+    if report.model_calls == 0 && report.model_error.is_some() {
+        return "no answer from the model".to_string();
     }
     if report.model_calls == 0 {
         // A deterministic answer: say which tool, and that no model was used.
@@ -981,7 +994,8 @@ impl Orchestrator {
             Err(JarvisError::Cancelled) => return Err(JarvisError::Cancelled),
             Err(e) => {
                 info!("Model unavailable: {}, using fallback", e);
-                return Ok(self.fallback_answer(input));
+                rec.model_failed(&e);
+                return Ok(self.fallback_answer(&e));
             }
         };
         rec.model_turn(&turn);
@@ -1085,7 +1099,8 @@ impl Orchestrator {
                 Err(JarvisError::Cancelled) => return self.cancelled_result(&trace),
                 Err(e) => {
                     info!("Model unavailable: {}, using fallback", e);
-                    return Ok(self.fallback_answer(input));
+                    rec.model_failed(&e);
+                    return Ok(self.fallback_answer(&e));
                 }
             };
             rec.model_turn(&turn);
@@ -1511,13 +1526,15 @@ impl Orchestrator {
             .unwrap_or_default()
     }
 
-    fn fallback_answer(&self, input: &str) -> String {
+    /// The answer when the model did not respond. Names the model and where
+    /// it is: "the local model" was wrong once a remote tier existed.
+    fn fallback_answer(&self, error: &JarvisError) -> String {
+        let (cfg, _) = self.tier();
         format!(
-            "I could not reach the local model, so I cannot answer that yet.\n\n\
-             You asked: {}\n\n\
-             Tools available: {}",
-            input,
-            self.tools.list().join(", ")
+            "I could not reach {} ({}), so I cannot answer that yet.\n\nReason: {}",
+            cfg.default_model,
+            host_of(&cfg.base_url),
+            error
         )
     }
 
