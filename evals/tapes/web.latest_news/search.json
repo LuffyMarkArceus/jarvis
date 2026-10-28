@@ -13,6 +13,76 @@
         ]
       },
       "tool": "search"
+    },
+    {
+      "args": {
+        "query": "Rust programming language latest news 2024 2025"
+      },
+      "result": {
+        "content": [
+          {
+            "text": "Backend: wikipedia\nQuery: Rust programming language latest news 2024 2025\n\n1. Rust (programming language)\n   https://en.wikipedia.org/wiki/Rust_(programming_language)\n   Rust is a general-purpose programming language that emphasizes performance, type safety, concurrency, and memory safety. Rust supports multiple programming\n2. Python (programming language)\n   https://en.wikipedia.org/wiki/Python_(programming_language)\n   collection. Python supports multiple programming paradigms but with an emphasis on object-oriented programming and dynamic typing. Guido van Rossum began\n3. C++\n   https://en.wikipedia.org/wiki/C%2B%2B\n   latest standard version ratified and published by ISO in October 2024 as ISO/IEC 14882:2024 (informally known as C++23). The C++ programming language\n4. Swift (programming language)\n   https://en.wikipedia.org/wiki/Swift_(programming_language)\n   Swift is a high-level general-purpose, multi-paradigm, compiled programming language created by Chris Lattner in 2010 for Apple Inc. and maintained by\n5. Julia (programming language)\n   https://en.wikipedia.org/wiki/Julia_(programming_language)\n   compiler. Julia programs can reuse libraries from other languages, and vice versa. Julia has interoperability with C, C++, Fortran, Rust, Python, and R",
+            "type": "text"
+          }
+        ]
+      },
+      "tool": "search"
+    },
+    {
+      "args": {
+        "query": "Rust programming language 2024 release news blog"
+      },
+      "result": {
+        "content": [
+          {
+            "text": "Backend: wikipedia\nQuery: Rust programming language 2024 release news blog\n\n1. Rust (programming language)\n   https://en.wikipedia.org/wiki/Rust_(programming_language)\n   Rust is a general-purpose programming language that emphasizes performance, type safety, concurrency, and memory safety. Rust supports multiple programming\n2. Rust for Linux\n   https://en.wikipedia.org/wiki/Rust_for_Linux\n   Rust for Linux is an ongoing project started in 2020 to add Rust as a programming language that can be used within the Linux kernel software, which has\n3. Mojo (programming language)\n   https://en.wikipedia.org/wiki/Mojo_(programming_language)\n   Mojo is a programming language for Linux and macOS. It is a system programming language with semantics inspired by Rust such as static typing and a borrow\n4. Zig (programming language)\n   https://en.wikipedia.org/wiki/Zig_(programming_language)\n   system programming language that emphasizes performance, simplicity and metaprogramming. The compiler is free and open-source software, released under\n5. Python (programming language)\n   https://en.wikipedia.org/wiki/Python_(programming_language)\n   collection. Python supports multiple programming paradigms but with an emphasis on object-oriented programming and dynamic typing. Guido van Rossum began",
+            "type": "text"
+          }
+        ]
+      },
+      "tool": "search"
+    },
+    {
+      "args": {
+        "query": "Rust 1.80 1.81 1.82 release 2024 blog.rust-lang.org"
+      },
+      "result": {
+        "content": [
+          {
+            "text": "Backend: wikipedia\nQuery: Rust 1.80 1.81 1.82 release 2024 blog.rust-lang.org\n\n1. List of common misconceptions about science, technology, and mathematics\n   https://en.wikipedia.org/wiki/List_of_common_misconceptions_about_science,_technology,_and_mathematics\n   Science Blog. NPR. Retrieved January 13, 2011. d. \"Probing Question: What is umami? | Penn State University\". www.psu.edu. 31 March 2015. Retrieved 2024-07-23\n2. Charlotte, North Carolina\n   https://en.wikipedia.org/wiki/Charlotte,_North_Carolina\n   101. ISBN 978-0-8078-7782-1. Retrieved September 25, 2023. \"About BOOM Charlotte\". boomcharlotte.org. Retrieved June 29, 2024. \"About The Charlotte International\n3. 2016 United States presidential election\n   https://en.wikipedia.org/wiki/2016_United_States_presidential_election\n   to Trump's pivotal upset victory were his wins in the Democratic-leaning Rust Belt states of Michigan, Pennsylvania, and Wisconsin, which he carried by\n4. Ida B. Wells\n   https://en.wikipedia.org/wiki/Ida_B._Wells\n   'Long Overdue'\". Good Black News. News aggregator and blog of Facebook. (www.goodblacknews.org). Archived from the original on July 13, 2018. Retrieved\n5. Shenyang\n   https://en.wikipedia.org/wiki/Shenyang\n   New District, northeast of Shenyang. Strange Slope (怪坡): an 80 m (87 yd)-long, 25 m (82 ft)-wide slope on the western side of Mao Mountain in Shenbei",
+            "type": "text"
+          }
+        ]
+      },
+      "tool": "search"
+    },
+    {
+      "args": {
+        "query": "blog.rust-lang.org 2024 release"
+      },
+      "result": {
+        "content": [
+          {
+            "text": "Backend: wikipedia\nQuery: blog.rust-lang.org 2024 release\n\n1. Rust (programming language)\n   https://en.wikipedia.org/wiki/Rust_(programming_language)\n   1 first supported public release Milestone · rust-lang/rust\". GitHub. Retrieved 2024-10-29. Nelson, Jynn (2022-08-05). RustConf 2022 - Bootstrapping:\n2. Rust compiler\n   https://en.wikipedia.org/wiki/Rust_compiler\n   2026. \"The Rust Reference\". doc.rust-lang.org. Rust Project. Retrieved 5 June 2026. \"Announcing Rust 1.31 and Rust 2018 Preview\". Rust Blog. 12 October\n3. Rust syntax\n   https://en.wikipedia.org/wiki/Rust_syntax\n   rust-lang.org. Retrieved 7 September 2025. \"Glossary of Unicode Terms\". Unicode Consortium. Archived from the original on 2018-09-24. Retrieved 2024-07-30\n4. Firefox\n   https://en.wikipedia.org/wiki/Firefox\n   Concurrency in Firefox Quantum | Rust Blog\". blog.rust-lang.org. Archived from the original on June 7, 2024. Retrieved June 7, 2024. \"Entering the Quantum Era—How\n5. Reflection (C++)\n   https://en.wikipedia.org/wiki/Reflection_(C%2B%2B)\n   Rust Reference\". doc.rust-lang.org. The Rust Team. The Rust Team (16 April 2026). \"Attributes - The Rust Reference\". doc.rust-lang.org. The Rust Team.",
+            "type": "text"
+          }
+        ]
+      },
+      "tool": "search"
+    },
+    {
+      "args": {
+        "query": "Announcing Rust 1.80 1.81 1.82 1.83 1.84 1.85 2024 site:blog.rust-lang.org"
+      },
+      "result": {
+        "content": [
+          {
+            "text": "Backend: wikipedia\nQuery: Announcing Rust 1.80 1.81 1.82 1.83 1.84 1.85 2024 site:blog.rust-lang.org\n\n1. 2016 United States presidential election\n   https://en.wikipedia.org/wiki/2016_United_States_presidential_election\n   to Trump's pivotal upset victory were his wins in the Democratic-leaning Rust Belt states of Michigan, Pennsylvania, and Wisconsin, which he carried by\n2. Charlotte, North Carolina\n   https://en.wikipedia.org/wiki/Charlotte,_North_Carolina\n   interstate highways, I-85 and I-77, intersecting near the city's center. The latter highway also connects to the population centers of the Rust Belt. Charlotte's\n3. Budapest\n   https://en.wikipedia.org/wiki/Budapest\n   Aquatics. 11 November 2024. Retrieved 22 December 2024. \"Study in Hungary – a guide for international students in Budapest\". Blog for expats & International\n4. Ida B. Wells\n   https://en.wikipedia.org/wiki/Ida_B._Wells\n   'Long Overdue'\". Good Black News. News aggregator and blog of Facebook. (www.goodblacknews.org). Archived from the original on July 13, 2018. Retrieved\n5. Shenyang\n   https://en.wikipedia.org/wiki/Shenyang\n   Heritage Site. Qipan Mountain (棋盘山): a recreation resort in Shenbei New District, northeast of Shenyang. Strange Slope (怪坡): an 80 m (87 yd)-long, 25 m (82 ft)-wide",
+            "type": "text"
+          }
+        ]
+      },
+      "tool": "search"
     }
   ],
   "tools": {
