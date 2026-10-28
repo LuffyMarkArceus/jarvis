@@ -380,6 +380,26 @@ successful responses. A transient error in a fixture turns a flaky
 dependency into a permanent test failure, and an overwrite turns
 re-recording into an unreviewed change to every expectation."
 
+## 22. Freeze the data, not the conversation
+
+**Lesson.** A record-replay fixture that matches requests exactly also
+freezes *how the client asked*. That grades a client by whether it repeats
+the recorded one, not by whether it got the right answer. Freeze what the
+dependency knows, and let the client ask in its own words.
+
+**In this repo.** Re-recording the web tapes with nemotron and replaying
+them three times failed both times on the same cases: it reworded its
+searches on every run (7 of 10 calls missed the tape) even at temperature
+0. More recording could never fix that. `evals/tape_mcp.py` now answers a
+search that is not on the tape by ranking the case's recorded pages, and
+matches a fetch on its address alone. `web.current_version` went from 0/3
+to 3/3 on replay; llama3.2:1b, whose searches are on the tape, did not move.
+
+**Say it in an interview.** "Our first fixtures were request-keyed, which
+over-fitted the tests to the client that recorded them. We moved to a
+frozen corpus with a small search over it: deterministic content,
+non-deterministic queries, and only recorded pages can ever be returned."
+
 ---
 
 ## Self-test
@@ -427,6 +447,8 @@ Answer out loud, without opening the code:
     checked by the turn's labels, when the user's own first search is only
     redacted?
 21. Why does the tape recorder refuse to keep a tool error, even a 404?
+22. Why could recording nemotron's searches never make its web cases
+    replayable, and what does a frozen corpus give up in exchange?
 
 ## Skills map: SDE2 -> senior
 

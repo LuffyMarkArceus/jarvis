@@ -91,5 +91,85 @@ class TapeTest(unittest.TestCase):
         self.assertIn("error", reply)
 
 
+
+def page(url, title, body):
+    return {
+        "tool": "fetch",
+        "args": {"url": url},
+        "result": {"content": [{"type": "text", "text": f"Title: {title}\nURL: {url}\n\n{body}"}]},
+    }
+
+
+def search(request_id, query, **extra):
+    return {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "tools/call",
+        "params": {"name": "search", "arguments": {"query": query, **extra}},
+    }
+
+
+class FrozenPagesTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.search = os.path.join(self.dir.name, "search.json")
+        self.fetch = os.path.join(self.dir.name, "fetch.json")
+        recorded = {"content": [{"type": "text", "text": "as recorded"}]}
+        with open(self.search, "w", encoding="utf-8") as f:
+            json.dump({"tools": [], "calls": [{"tool": "search", "args": {"query": "rust"}, "result": recorded}]}, f)
+        with open(self.fetch, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "tools": [],
+                    "calls": [
+                        page("https://en.wikipedia.org/wiki/Rust_shooting_incident", "Rust shooting incident - Wikipedia",
+                             "On the set of the film Rust a prop gun was discharged."),
+                        page("https://blog.rust-lang.org/", "The Rust Programming Language Blog",
+                             "Announcing Rust 1.82.0. The Rust team is happy to announce a new version of the programming language."),
+                    ],
+                },
+                f,
+            )
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def ask(self, *requests, pages=True):
+        args = ["--tape", self.search] + (["--pages", self.fetch] if pages else [])
+        return [r["result"] for r in session(args, *requests)]
+
+    def text(self, result):
+        return result["content"][0]["text"]
+
+    def test_a_search_on_the_tape_is_replayed_exactly(self):
+        self.assertEqual(self.text(self.ask(search(1, "rust"))[0]), "as recorded")
+
+    def test_a_reworded_search_is_answered_from_the_recorded_pages(self):
+        result = self.ask(search(1, "Rust programming language news 2024", backend="brave"))[0]
+        text = self.text(result)
+        self.assertNotIn("isError", result)
+        self.assertTrue(text.startswith("Backend: recorded pages"), text)
+        # The title match ranks the language's blog above the film.
+        self.assertLess(text.index("blog.rust-lang.org"), text.index("Rust_shooting_incident"))
+
+    def test_a_search_matching_no_page_has_no_results(self):
+        result = self.ask(search(1, "postgres release"))[0]
+        self.assertTrue(result["isError"])
+        self.assertIn("no results from recorded pages", self.text(result))
+
+    def test_without_pages_a_miss_is_still_not_on_tape(self):
+        result = self.ask(search(1, "Rust programming language"), pages=False)[0]
+        self.assertIn("not on tape", self.text(result))
+
+    def test_a_page_is_found_by_its_address_whatever_else_was_asked(self):
+        fetch = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "fetch", "arguments": {"url": "https://blog.rust-lang.org", "max_length": 8000}},
+        }
+        result = session(["--tape", self.fetch], fetch)[0]["result"]
+        self.assertIn("Announcing Rust 1.82.0", self.text(result))
+
 if __name__ == "__main__":
     unittest.main()

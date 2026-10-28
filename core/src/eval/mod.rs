@@ -326,6 +326,12 @@ fn tape_server(name: &str, case: &Case, options: &RunOptions) -> Result<McpServe
         args.push("--".to_string());
         args.push(real.command.clone());
         args.extend(real.args.iter().cloned());
+    } else if name == "search" {
+        // A reworded search is answered from the case's recorded pages, so a
+        // model that phrases its queries differently is still graded on the
+        // same frozen web (see evals/tape_mcp.py).
+        args.push("--pages".to_string());
+        args.push(tape_path(case, "fetch", options).display().to_string());
     }
     Ok(McpServerConfig {
         name: name.to_string(),

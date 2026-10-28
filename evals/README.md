@@ -124,3 +124,11 @@ passed to the model but never kept: a site that was down for a minute would
 otherwise be down on every replay. To refresh a stale answer, delete it or
 the tape first, then record; that changes what the case means, so review
 the diff.
+
+On replay a search that is not on the tape is answered from the pages the
+case has recorded (its `fetch.json`), ranked by the query's words, and a
+fetch matches on its address alone. Exact replay only grades a model that
+asks exactly what was recorded; a capable one rewords its searches on every
+run. So the content is frozen and the queries are free. A case's frozen web
+grows when a model reads new pages while recording; a page that was never
+recorded cannot be found, and a query that matches nothing gets no results.
