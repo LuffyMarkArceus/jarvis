@@ -157,7 +157,11 @@ pub async fn run_case(case: &Case, attempt: usize, options: &RunOptions) -> Atte
         },
         options.grading,
     );
-    let unavailable = run.report.model_error.is_some();
+    let unavailable = run
+        .report
+        .model_error
+        .as_deref()
+        .is_some_and(is_unavailable);
     Attempt {
         unavailable,
         case: case.id.clone(),
@@ -527,6 +531,27 @@ impl Provider for RecordingProvider {
 }
 
 /// Pass rate per case, in suite order.
+/// Does this model error mean the provider did not answer, rather than that
+/// our request was wrong? Only the first is availability. A 400 is a bug on
+/// our side and must count as a failure: the first version of this check
+/// excluded every error and hid one (tool names a strict server rejected).
+pub fn is_unavailable(error: &str) -> bool {
+    let busy_status = error
+        .split("HTTP ")
+        .skip(1)
+        .filter_map(|rest| rest.get(..3)?.parse::<u16>().ok())
+        .any(|code| code == 429 || (500..600).contains(&code));
+    busy_status
+        || [
+            "error sending request",
+            "timed out",
+            "connection",
+            "provider returned no choices",
+        ]
+        .iter()
+        .any(|marker| error.contains(marker))
+}
+
 /// Attempts where the model never answered are not counted, so a case can
 /// have a total of 0.
 pub fn pass_rates(attempts: &[Attempt]) -> Vec<(String, usize, usize)> {
@@ -565,6 +590,22 @@ mod tests {
             error: None,
             unavailable,
         }
+    }
+
+    #[test]
+    fn only_a_provider_that_did_not_answer_is_unavailable() {
+        assert!(is_unavailable(
+            "Model error: HTTP 429 Too Many Requests: busy"
+        ));
+        assert!(is_unavailable(
+            "Model error: HTTP 529 <unknown status code>: overloaded"
+        ));
+        assert!(is_unavailable("Model error: error sending request for url"));
+        // Our request was wrong: a failure, not bad luck.
+        assert!(!is_unavailable(
+            "Model error: HTTP 400 Bad Request: Function at index 0 has an invalid name"
+        ));
+        assert!(!is_unavailable("Model error: HTTP 401 Unauthorized"));
     }
 
     #[test]

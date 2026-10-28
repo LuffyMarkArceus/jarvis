@@ -156,7 +156,7 @@ pub fn to_openai_messages(messages: &[ChatMessage]) -> Vec<Value> {
                                 "id": id,
                                 "type": "function",
                                 "function": {
-                                    "name": call.function.name,
+                                    "name": wire_name(&call.function.name),
                                     "arguments": arguments_string(&call.function.arguments),
                                 }
                             })
@@ -197,6 +197,42 @@ pub fn to_openai_options(options: Option<&Value>) -> Value {
     Value::Object(out)
 }
 
+/// A tool name the OpenAI format accepts.
+///
+/// Function names must match `[a-zA-Z0-9_-]{1,64}`. Ours are dotted
+/// (`filesystem.edit`, `mcp.search.search`); Ollama accepts that, but strict
+/// servers reject the whole request (Nvidia on OpenRouter: HTTP 400 "invalid
+/// name"). Dots become `__`, anything else invalid `_`.
+pub fn wire_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 4);
+    for c in name.chars() {
+        match c {
+            '.' => out.push_str("__"),
+            c if c.is_ascii_alphanumeric() || c == '_' || c == '-' => out.push(c),
+            _ => out.push('_'),
+        }
+    }
+    out.chars().take(64).collect()
+}
+
+/// Put our names back on the tool calls a turn returned. A call is matched
+/// against the tools this request offered, by their wire names, rather than
+/// by reversing the encoding: a lookup cannot invent a tool that was not
+/// offered. An unmatched name is left as it came, and the orchestrator
+/// refuses it as not offered.
+fn restore_tool_names(turn: &mut ChatTurn, tools: Option<&[Value]>) {
+    let offered: Vec<&str> = tools
+        .into_iter()
+        .flatten()
+        .filter_map(|t| t["function"]["name"].as_str())
+        .collect();
+    for call in turn.message.tool_calls.iter_mut().flatten() {
+        if let Some(name) = offered.iter().find(|n| wire_name(n) == call.function.name) {
+            call.function.name = name.to_string();
+        }
+    }
+}
+
 /// The request body for one turn.
 pub fn build_body(request: &ChatRequest<'_>, stream: bool) -> Value {
     let mut messages: Vec<Value> = Vec::new();
@@ -221,7 +257,17 @@ pub fn build_body(request: &ChatRequest<'_>, stream: bool) -> Value {
     }
     if let Some(tools) = request.tools {
         if !tools.is_empty() {
-            body["tools"] = Value::Array(tools.to_vec());
+            let tools = tools
+                .iter()
+                .map(|tool| {
+                    let mut tool = tool.clone();
+                    if let Some(name) = tool["function"]["name"].as_str() {
+                        tool["function"]["name"] = Value::String(wire_name(name));
+                    }
+                    tool
+                })
+                .collect();
+            body["tools"] = Value::Array(tools);
         }
     }
     if stream {
@@ -403,7 +449,9 @@ impl Provider for OpenAiProvider {
             .json()
             .await
             .map_err(|e| JarvisError::Model(format!("Parse error: {e}")))?;
-        parse_completion(&json)
+        let mut turn = parse_completion(&json)?;
+        restore_tool_names(&mut turn, request.tools);
+        Ok(turn)
     }
 
     async fn chat_turn_streaming(
@@ -444,7 +492,9 @@ impl Provider for OpenAiProvider {
                 "the model stream ended before the turn finished".to_string(),
             ));
         }
-        Ok(state.into_turn())
+        let mut turn = state.into_turn();
+        restore_tool_names(&mut turn, request.tools);
+        Ok(turn)
     }
 }
 
@@ -825,6 +875,64 @@ mod tests {
         let calls = turn.message.tool_calls.expect("a call");
         assert_eq!(calls[0].function.arguments["path"], "/tmp/x");
         assert_eq!(turn.prompt_tokens, Some(7));
+    }
+
+    #[test]
+    fn tool_names_are_valid_on_the_wire_and_ours_again_in_the_reply() {
+        assert_eq!(wire_name("filesystem.edit"), "filesystem__edit");
+        assert_eq!(wire_name("mcp.search.search"), "mcp__search__search");
+        assert_eq!(wire_name("ok_name-1"), "ok_name-1");
+
+        let tools = vec![json!({"type": "function", "function": {"name": "mcp.fetch.fetch"}})];
+        let messages = vec![ChatMessage::assistant_with_tool_calls(
+            "",
+            vec![ModelToolCall {
+                id: Some("c1".into()),
+                function: ModelFunction {
+                    index: None,
+                    name: "filesystem.read".into(),
+                    arguments: json!({}),
+                },
+            }],
+        )];
+        let body = build_body(
+            &ChatRequest {
+                model: "m",
+                system: None,
+                messages: &messages,
+                tools: Some(&tools),
+                options: None,
+            },
+            false,
+        );
+        let wire = body.to_string();
+        assert!(
+            !wire.contains("mcp.fetch.fetch") && !wire.contains("filesystem.read"),
+            "{}",
+            wire
+        );
+        assert_eq!(body["tools"][0]["function"]["name"], "mcp__fetch__fetch");
+        assert_eq!(
+            body["messages"][0]["tool_calls"][0]["function"]["name"],
+            "filesystem__read"
+        );
+
+        let reply = json!({"choices": [{"message": {"role": "assistant", "content": "",
+        "tool_calls": [
+            {"id": "a", "type": "function", "function": {"name": "mcp__fetch__fetch", "arguments": "{}"}},
+            {"id": "b", "type": "function", "function": {"name": "shell__run", "arguments": "{}"}}
+        ]}}]});
+        let mut turn = parse_completion(&reply).unwrap();
+        restore_tool_names(&mut turn, Some(&tools));
+        let names: Vec<_> = turn
+            .message
+            .tool_calls
+            .unwrap()
+            .into_iter()
+            .map(|c| c.function.name)
+            .collect();
+        // Offered: ours again. Not offered: left as sent, so it is refused.
+        assert_eq!(names, vec!["mcp.fetch.fetch", "shell__run"]);
     }
 
     /// A one-endpoint HTTP server that answers each connection with the
