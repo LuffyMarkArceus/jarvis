@@ -301,6 +301,44 @@ pin down the default meaning of an absent field. The design rule that fell
 out was that the default yes must be the least permissive option, because
 that is what every client that predates the change will send."
 
+## 18. Measure availability apart from quality - and keep the bucket narrow
+
+**Lesson.** An eval that counts "the server did not answer" as a wrong
+answer measures the infrastructure, not the model. Separate the two. But an
+"excluded" bucket is dangerous: anything put in it disappears from the
+score, so define it as narrowly as possible, or it will hide real bugs.
+
+**In this repo.** Two free OpenRouter models first scored 87% and 56.5%.
+Not one answer was wrong: every failure was a fallback after the provider
+did not respond. Attempts without an answer are now `unavailable`, shown as
+SKIP and left out of pass rates. Its first version excluded *every* model
+error, and on the next run it hid nine HTTP 400s - a real bug (tool names
+with dots, #19). `is_unavailable` in `core/src/eval/mod.rs` now
+accepts only 429, 5xx, network errors and timeouts; a 400 is our failure.
+
+**Say it in an interview.** "We report quality and availability as separate
+numbers. The trap is the exclusion rule: we first excluded all provider
+errors and that silently dropped a request-format bug, so exclusion is an
+allow-list of error kinds that mean the provider did not answer."
+
+## 19. An adapter is only as strict as the strictest server behind it
+
+**Lesson.** A protocol implemented against one lenient server can be wrong
+in ways that only a strict one reveals. Validate against the specification,
+not against the server you happen to test with.
+
+**In this repo.** Our tool names are dotted (`filesystem.edit`). Ollama's
+OpenAI-compatible endpoint accepted them for weeks; OpenAI's format allows
+only `[a-zA-Z0-9_-]`, and Nvidia's server rejected every request that
+offered tools. The fix lives entirely in `core/src/openai.rs` (learning
+#6): names are encoded on the way out and mapped back by lookup in the
+tools that were offered, never by reversing the encoding.
+
+**Say it in an interview.** "Postel's law cuts both ways: lenient servers
+let a client drift from the spec. We test the adapter's output against the
+spec's rules, and the first strict server found a bug a lenient one had
+masked."
+
 ---
 
 ## Self-test
@@ -336,6 +374,10 @@ Answer out loud, without opening the code:
     does the egress check not see them?
 15. Why is "always allow" offered for a file but never for command output?
 16. Why must the first choice in a prompt be the narrowest yes?
+17. A cloud model scored 56.5% with no wrong answers. How, and what did the
+    first fix for it get wrong?
+18. Why are tool calls mapped back to our names by lookup, not by turning
+    `__` back into `.`?
 
 ## Skills map: SDE2 -> senior
 

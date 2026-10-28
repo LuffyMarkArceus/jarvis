@@ -11,6 +11,8 @@ be read against the one before it.
 | 2026-10-27 | ddffd5e | qwen2.5:3b (Ollama, GPU) | 20 x 3 | 95.0% | 19/20 | 6.9 s / 62.8 s |
 | 2026-10-27 | 4c69a2b | llama3.2:1b (Ollama, GPU) | 41 x 3 | 74.0% | 30/41 | 4.1 s / 51.4 s |
 | 2026-10-27 | 319613c | qwen2.5:3b (Ollama, GPU) | 41 x 3 | 90.2% | 37/41 | 16.3 s* / 57.2 s* |
+| 2026-10-28 | e231cdc | nemotron-3-ultra-550b-a55b:free (OpenRouter) | 46 x 1 | 93.5% | 43/46 | 3.3 s / 18.1 s |
+| 2026-10-28 | e231cdc+docs | laguna-xs-2.1:free (OpenRouter) | 34 of 46 answered | 97.1% | 33/34 | 2.6 s / 9.7 s |
 
 ## 2026-10-26, llama3.2:1b
 
@@ -71,3 +73,22 @@ and process case. It fails four, none of them code:
 llama3.2:1b at 4c69a2b additionally fails translation, unit conversion, the
 two approved edits/writes (path handling) and Postgres grounding; the
 `system.ram` failure in that run was fixed in 319613c.
+
+## 2026-10-28, free OpenRouter models (`jarvis eval --remote`)
+
+One attempt per case (free models are rate-limited per day); $0 spent.
+The sandbox is allowed to go remote for ordinary cases, so these grade the
+model; the `egress.*` cases grade the privacy rules and pass on both.
+
+* Before e231cdc the scores were 87% and 56.5% with **no wrong answer**:
+  every failure was the provider not answering, and nine were HTTP 400s from
+  our dotted tool names (fixed in e231cdc). Read "unavailable" counts before
+  comparing scores.
+* nemotron-3-ultra (served by Nvidia, not the shared free pool) answered
+  every request. It fails only the three web cases, and not for the reason
+  small models do: it searched again with better queries, which are not on
+  the tapes (recorded with llama3.2:1b), so they failed, and four
+  iterations ran out. The tapes encode the small model's path; re-recording
+  them with a stronger model is needed before web cases can grade one.
+* laguna-xs-2.1 got no answer for 12 of 46 cases even with retries (HTTP
+  429 from the shared free pool). Of the 34 it answered, 33 passed.
