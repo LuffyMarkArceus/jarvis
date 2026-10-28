@@ -178,6 +178,9 @@ fn call_key(name: &str, args: &Value) -> String {
     format!("{}\u{0}{}", name, args)
 }
 
+/// The last request of a turn that ran out of rounds.
+const CLOSING_REQUEST: &str = "No more tools can be used for this request. Answer the question above now, using only the tool results in this conversation. If they do not fully answer it, say what you found and what is still unknown. Do not call a tool.";
+
 /// What the model is told instead of a result when it repeats a call.
 const REPEATED_CALL: &str =
     "Not run again: this exact call was already made in this request, and its result is above. Answer from it, or try something different.";
@@ -1263,6 +1266,44 @@ impl Orchestrator {
             return Ok(self.grounded_answer(answer, input, &trace, plan.web));
         }
 
+        // Out of rounds, or going in circles. If a tool found anything, ask
+        // once more for an answer from it: a log of tool calls is not an
+        // answer, and nemotron-3-ultra had what it needed several rounds
+        // before the limit. The tools stay offered (a strict server can
+        // reject a conversation of tool calls sent without them); a reply
+        // that calls one anyway gets the report.
+        let found = trace.iter().any(|o| o.status == OutcomeStatus::Succeeded);
+        if found && !cancel.is_some_and(Cancellation::is_cancelled) {
+            messages.push(ChatMessage::text("user", CLOSING_REQUEST).with_label(Label::default()));
+            self.fit_prompt(&system, &mut messages, &mut history_len, reserved);
+            let reply = self
+                .ask_model(
+                    &system,
+                    &system_label,
+                    &messages,
+                    Some(&tools),
+                    confirm,
+                    cancel,
+                    None,
+                    rec,
+                )
+                .await;
+            if let Ok(ModelReply::Turn(turn)) = reply {
+                rec.model_turn(&turn);
+                let content = &turn.message.content;
+                let calls_tool = turn
+                    .message
+                    .tool_calls
+                    .as_ref()
+                    .is_some_and(|c| !c.is_empty())
+                    || !parser::parse_tool_calls(content).is_empty()
+                    || parser::looks_like_tool_call(content);
+                let answer = final_answer(content);
+                if !calls_tool && !answer.is_empty() {
+                    return Ok(self.grounded_answer(answer, input, &trace, plan.web));
+                }
+            }
+        }
         Ok(render_execution_report(&trace))
     }
 

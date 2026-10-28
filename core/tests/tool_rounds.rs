@@ -165,8 +165,14 @@ async fn a_repeated_call_is_not_run_again_and_ends_the_turn() {
 
     assert_eq!(writes(&report), 1, "{:?}", report.calls);
     assert_eq!(*user.0.lock().unwrap(), 1, "asked once, for the one write");
-    // The second round was only a repeat: there is no third.
-    assert_eq!(report.model_calls, 2);
+    // The second round was only a repeat, so the loop ends; the closing
+    // request is answered with the same call, which is not run either.
+    assert_eq!(report.model_calls, 3);
+    assert!(
+        report.answer.starts_with("Here is what actually happened"),
+        "{}",
+        report.answer
+    );
 }
 
 #[tokio::test]
@@ -194,5 +200,50 @@ async fn max_rounds_is_set_per_tier() {
     let report = s.ask(&Yes(Mutex::new(0))).await;
 
     assert_eq!(writes(&report), 2, "{:?}", report.calls);
+    // Two rounds, then the closing request, which answered with a third
+    // write: not run, and the report is the answer.
+    assert_eq!(report.model_calls, 3);
+    assert!(
+        report.answer.starts_with("Here is what actually happened"),
+        "{}",
+        report.answer
+    );
+}
+
+#[tokio::test]
+async fn out_of_rounds_the_model_is_asked_once_to_answer_from_what_it_found() {
+    let dir = sandbox();
+    let script = vec![
+        write(&dir, 1),
+        write(&dir, 2),
+        answer("Wrote notes1.md and notes2.md."),
+    ];
+    let s = setup(dir, script, Some(2));
+    let report = s.ask(&Yes(Mutex::new(0))).await;
+
+    assert_eq!(writes(&report), 2, "{:?}", report.calls);
+    assert_eq!(report.model_calls, 3);
+    assert!(
+        report.answer.contains("Wrote notes1.md and notes2.md"),
+        "{}",
+        report.answer
+    );
+}
+
+#[tokio::test]
+async fn with_nothing_found_there_is_no_closing_request() {
+    let dir = sandbox();
+    // A tool this request was not offered: each call fails without running.
+    let script = (1..=3)
+        .map(|n| call("shell.run", json!({ "command": format!("echo {}", n) })))
+        .collect();
+    let s = setup(dir, script, Some(2));
+    let report = s.ask(&Yes(Mutex::new(0))).await;
+
+    assert!(
+        report.calls.iter().all(|c| c.status == "not_offered"),
+        "{:?}",
+        report.calls
+    );
     assert_eq!(report.model_calls, 2);
 }
