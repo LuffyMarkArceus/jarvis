@@ -106,6 +106,22 @@ pub const EGRESS_TOOL: &str = "egress.send";
 /// Asked when a remote request was not sent: answer with the local model?
 pub const EGRESS_LOCAL_TOOL: &str = "egress.local";
 
+/// `https://openrouter.ai/api/v1` -> `openrouter.ai`.
+fn host_of(base_url: &str) -> String {
+    reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|u| u.host_str().map(String::from))
+        .unwrap_or_else(|| base_url.to_string())
+}
+
+/// A recalled message's stored label, or the label for not knowing.
+fn recalled_label(result: &memory::RecallResult) -> Label {
+    result
+        .label
+        .clone()
+        .unwrap_or_else(|| Label::unknown(&result.role))
+}
+
 /// The parts of a model request that do not depend on the tier.
 struct Request<'a> {
     system: &'a str,
@@ -226,6 +242,8 @@ pub struct TurnReport {
     pub completion_tokens: Option<u64>,
     /// Whether a request of this turn went to a remote provider.
     pub remote: bool,
+    /// A request was not sent to the remote model and nothing answered.
+    pub withheld: bool,
     /// The model and provider that answered; empty when no model was used.
     pub model: String,
     pub provider: String,
@@ -264,6 +282,8 @@ struct TurnRecorder {
     /// The model and provider that answered, for the footer: with a local
     /// fallback it is not the configured one.
     used: std::sync::Mutex<Option<(String, String)>>,
+    /// A request of this turn was not sent.
+    withheld: std::sync::atomic::AtomicBool,
 }
 
 impl TurnRecorder {
@@ -319,6 +339,7 @@ impl TurnRecorder {
         let redacted = self.redactor.lock().unwrap().count();
         let (model, provider) = self.used.lock().unwrap().clone().unwrap_or_default();
         TurnReport {
+            withheld: self.withheld.load(std::sync::atomic::Ordering::Relaxed),
             model,
             provider,
             remote: self.remote.load(std::sync::atomic::Ordering::Relaxed),
@@ -340,6 +361,9 @@ impl TurnRecorder {
 /// back to the model as content and imitated in later replies.
 pub fn footer(report: &TurnReport) -> String {
     let (model, provider) = (report.model.as_str(), report.provider.as_str());
+    if report.model_calls == 0 && report.withheld {
+        return "not sent · no model".to_string();
+    }
     if report.model_calls == 0 {
         // A deterministic answer: say which tool, and that no model was used.
         return match report.calls.first() {
@@ -627,6 +651,8 @@ impl Orchestrator {
                     .await;
             }
         }
+        rec.withheld
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(ModelReply::Withheld(why))
     }
 
@@ -716,7 +742,14 @@ impl Orchestrator {
             Some(sink) => client.chat_turn_streaming(chat, cancel, sink).await?,
             None => client.chat_turn(chat, cancel).await?,
         };
-        rec.used(cfg, client.name(), remote);
+        // For a remote turn the footer names where the data went (the host),
+        // not the wire format: "openai" for an OpenRouter model misleads.
+        let provider = if remote {
+            host_of(&cfg.base_url)
+        } else {
+            client.name().to_string()
+        };
+        rec.used(cfg, &provider, remote);
         if redacted.is_some() {
             let redactor = rec.redactor.lock().unwrap();
             turn.message.content = redactor.restore(&turn.message.content);
@@ -1430,18 +1463,39 @@ impl Orchestrator {
             .into_iter()
             .filter(|result| !memory::is_echo(result, input))
             .collect();
+        // Recall is optional context. On a remote tier, a recalled message
+        // the policy would not send is left out rather than asked about: a
+        // prompt on every question (every message stored before labels is
+        // unknown) would be answered by reflex. Required content - what the
+        // user asked about - is still asked about in ask_model.
+        let results: Vec<_> = if self.destination().is_remote() {
+            let policy = self.egress_policy();
+            let before = results.len();
+            let kept: Vec<_> = results
+                .into_iter()
+                .filter(|r| {
+                    let mut label = recalled_label(r);
+                    label.absorb(&Label::of(Origin::Memory));
+                    egress::check(&[label], &policy) == Verdict::Send
+                })
+                .collect();
+            if kept.len() < before {
+                info!(
+                    "recall: {} message(s) left out of a remote request by policy",
+                    before - kept.len()
+                );
+            }
+            kept
+        } else {
+            results
+        };
         let block = memory::render_recall(&results, self.config.memory.recall_max_chars);
         let mut label = Label::default();
         if block.is_some() {
             info!("recall: {} earlier message(s) added", results.len());
             label.absorb(&Label::of(Origin::Memory));
             for result in &results {
-                label.absorb(
-                    &result
-                        .label
-                        .clone()
-                        .unwrap_or_else(|| Label::unknown(&result.role)),
-                );
+                label.absorb(&recalled_label(result));
             }
         }
         Some((block, label))

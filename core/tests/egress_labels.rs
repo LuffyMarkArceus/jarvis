@@ -371,7 +371,7 @@ async fn a_remote_session_sends_to_the_remote_model_and_says_so() {
     assert!(t.local.requests().is_empty());
     assert_eq!(report.answer, "remote answer");
     assert!(
-        footer(&report).starts_with("cloud-model · remote: recording"),
+        footer(&report).starts_with("cloud-model · remote: models.example"),
         "{}",
         footer(&report)
     );
@@ -458,4 +458,78 @@ async fn a_session_switches_tiers_and_cannot_switch_to_a_missing_one() {
 
     let s = setup("local", "ok", &[]);
     assert!(s.jarvis.set_remote(true).is_err());
+}
+
+#[tokio::test]
+async fn recalled_memory_the_policy_would_not_send_is_left_out_not_asked_about() {
+    // Recall is optional context: a remote turn drops what may not go,
+    // instead of asking on every question. Found live: every message stored
+    // before labels existed is unknown, so every remote question asked.
+    let dir = std::env::temp_dir().join(format!("jarvis-recall-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut config = Config::default();
+    config.general.data_dir = dir.clone();
+    config.memory.db_path = dir.join("memory.db");
+    config.remote = Some(RemoteConfig {
+        model: ModelConfig {
+            base_url: "https://models.example/v1".into(),
+            ..ModelConfig::default()
+        },
+        default: true,
+    });
+    let memory = MemoryManager::new(config.clone()).unwrap();
+    // An old, unlabelled answer and a labelled user message, in another session.
+    memory
+        .add_message(
+            "old",
+            "assistant",
+            "the capital of France is Paris, per notes.txt",
+        )
+        .unwrap();
+    memory
+        .add_labeled_message(
+            "old",
+            "user",
+            "I love the capital of France",
+            Some(&jarvis_core::egress::Label::of(Origin::User)),
+        )
+        .unwrap();
+
+    let permissions =
+        PermissionManager::with_paths(dir.join("permissions.toml"), dir.join("audit.db")).unwrap();
+    let local = Arc::new(RecordingProvider::replying("local"));
+    let remote = Arc::new(RecordingProvider::replying("Paris"));
+    let jarvis =
+        Orchestrator::with_parts(config, local, permissions).with_remote(Some(remote.clone()));
+    let who = owner(None, false);
+    let report = jarvis
+        .run_turn("what is the capital of France?", Some(&who), None, None)
+        .await
+        .unwrap();
+    assert!(
+        who.asked.lock().unwrap().is_empty(),
+        "{:?}",
+        who.asked.lock().unwrap()
+    );
+    let sent = remote.requests().join("\n");
+    assert!(
+        !sent.contains("per notes.txt"),
+        "unlabelled memory was sent: {}",
+        sent
+    );
+    assert!(
+        sent.contains("I love the capital of France"),
+        "allowed memory was dropped: {}",
+        sent
+    );
+    assert_eq!(report.answer, "Paris");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn a_withheld_turn_says_nothing_was_sent() {
+    let t = tiers();
+    t.read_note("todo.txt", "dentist").await;
+    let report = t.ask("what was in that note?", &owner(None, false)).await;
+    assert_eq!(footer(&report), "not sent · no model");
 }
