@@ -101,7 +101,7 @@ Expected: compile errors (no `taint` module, no `sources` field).
 - Produces:
   - `pub fn is_action(tool: &str) -> bool`
   - `pub fn printable(text: &str) -> String` (control chars -> `?`)
-  - `pub struct SessionTrust` with `fn trust(&self, session: &str, sources: &[Source])` and `fn untrusted(&self, session: &str, sources: Vec<Source>) -> Vec<Source>` (drops trusted names); field `trust: SessionTrust` on `Orchestrator`
+  - `pub struct SessionTrust` with `fn trust(&self, session: &str, sources: &[Source])`, `fn untrusted(&self, session: &str, sources: Vec<Source>) -> Vec<Source>` (drops trusted names), `fn list(&self, session: &str) -> Vec<String>`, `fn clear(&self, session: &str)`; field `trust: SessionTrust` on `Orchestrator`, exposed as `Orchestrator::trusted()` / `clear_trust()` and IPC methods `trust.list` / `trust.clear` for the TUI's `/trust` and `/trust clear` (Task 5 adds the TUI commands)
   - Prompt args: the tool's own args plus `"_untrusted": [{"name", "kind"}]` and `"_undo": "kept" | "too_large" | "never"` (`never` for commands). Execution uses the original args.
   - `OutcomeStatus::Untrusted` (label `"not run: it followed untrusted content and nobody could be asked"`, `status_label` `"untrusted"`)
   - `gate_and_run(&self, name, args, confirm, untrusted: &[Source])`
@@ -116,12 +116,14 @@ Expected: compile errors (no `taint` module, no `sources` field).
 - `an_allowed_file_does_not_ask`: the file is inside `egress.file_allow`; `shell.run` allowed; no prompt, executed.
 - `trust_covers_the_listed_sources_only`: answer `t`; a second action in the same turn does not ask; after reading a second untrusted file it asks again, naming only the new one.
 - `trust_does_not_reach_another_session`: after `t`, `set_session(other)`; asks again.
+- `trust_can_be_listed_and_cleared`: `SessionTrust::list(session)` returns the trusted names; after `clear(session)` the next action asks again.
+- `the_audit_log_says_why_an_allowed_command_asked`: the audit row's message contains the source name.
 - `a_deterministic_route_never_asks`: after an untrusted read, input `write hello to <allowed path>` routes `Tool(filesystem.write)` and is not gated.
 Unit: `printable_replaces_control_characters` (`"a\x1b[2Kb"` -> `"a?[2Kb"`); `confirm::tests::the_prompt_lists_at_most_five_sources` (7 sources -> 5 lines and `"and 2 more"`); `the_prompt_says_whether_it_can_be_undone` (`_undo` `kept` -> `"You can undo this with \`jarvis undo\`"`, `too_large` -> `"too large to keep a copy; this cannot be undone"`, `never` -> `"This cannot be undone."`).
 
 - [ ] **Step 2: Run to see them fail**: `cargo test -p jarvis-core --test injection_gate`
 
-- [ ] **Step 3: Implement.** In `execute_offered`, when `by_model && is_action(&name)`: sources = `self.trust.untrusted(session, untrusted_sources(&rec.label(), &policy))`. In `gate_and_run`, non-empty sources turn `Allow` into the ask path and the ask path calls `confirm.choose` with `[y] run once`, `[t] trust these for this conversation`; `t` calls `trust.trust`; the audit decision is `confirmed_after_untrusted`; no handler -> `OutcomeStatus::Untrusted`. `render_blocked_report` prints the reason and excludes `Untrusted` from the permissions advice. `confirm.rs` renders the notice from `_untrusted` / `_undo` with the spec's wording, through `printable`. `_undo` is `kept` until Task 5 computes it.
+- [ ] **Step 3: Implement.** In `execute_offered`, when `by_model && is_action(&name)`: sources = `self.trust.untrusted(session, untrusted_sources(&rec.label(), &policy))`. In `gate_and_run`, non-empty sources turn `Allow` into the ask path and the ask path calls `confirm.choose` with `[y] run once`, `[t] trust these for this conversation` (label followed by the warning "new pages and files will still ask"); `t` calls `trust.trust`; the audit decision is `confirmed_after_untrusted`; no handler -> `OutcomeStatus::Untrusted`. `render_blocked_report` prints the reason and excludes `Untrusted` from the permissions advice. `confirm.rs` renders the notice from `_untrusted` / `_undo` with the spec's wording, through `printable`. `_undo` is `kept` until Task 5 computes it.
 
 - [ ] **Step 4: Run to see them pass**, then `cargo test --workspace`.
 
@@ -183,7 +185,7 @@ Unit: `printable_replaces_control_characters` (`"a\x1b[2Kb"` -> `"a?[2Kb"`); `co
 
 - [ ] **Step 1: Write the failing tests**
 
-`restores_the_previous_content`, `undoing_a_new_file_removes_it`, `a_file_changed_since_is_refused` (reason contains `"changed after Jarvis wrote it"`), `force_overrides_the_refusal`, `an_earlier_change_waits_for_the_later_one` (reason contains `"undo the later change first"`), `a_large_file_is_listed_without_a_copy` (`max_file_bytes = 4`; `kept == false`; `plan` refuses with `"no copy kept"`), `a_failed_write_leaves_no_entry` (`discard`), `old_entries_expire` (clock + 8 days), `the_total_cap_drops_the_oldest` (`max_total_bytes = 10`), `restore_goes_through_a_temporary_file` (no `*.tmp` left, target replaced), `binary_content_round_trips` (bytes `[0, 159, 146, 150]`), `a_half_written_entry_is_skipped_and_cleaned` (directory with `before` but no `meta.json`), `the_folder_is_private` (mode `0o700`), `an_undone_change_is_listed_as_undone_and_not_undone_twice`.
+`restores_the_previous_content`, `undoing_a_new_file_removes_it`, `a_file_changed_since_is_refused` (reason contains `"changed after Jarvis wrote it"`), `force_overrides_the_refusal`, `an_earlier_change_waits_for_the_later_one` (reason contains `"undo the later change first"`), `a_large_file_is_listed_without_a_copy` (`max_file_bytes = 4`; `kept == false`; `plan` refuses with `"no copy kept"`), `a_failed_write_leaves_no_entry` (`discard`), `old_entries_expire` (clock + 8 days), `the_total_cap_drops_the_oldest` (`max_total_bytes = 10`), `restore_goes_through_a_temporary_file` (no `*.tmp` left, target replaced), `binary_content_round_trips` (bytes `[0, 159, 146, 150]`), `a_half_written_entry_is_skipped_and_cleaned` (directory with `before` but no `meta.json`), `an_undo_can_be_undone` (after `apply`, `list()[0].tool == "undo"` and undoing it brings back Jarvis's version), `the_folder_is_private` (mode `0o700`), `an_undone_change_is_listed_as_undone_and_not_undone_twice`.
 
 - [ ] **Step 2: Run to see them fail**: `cargo test -p jarvis-core undo::`
 
@@ -205,7 +207,7 @@ Unit: `printable_replaces_control_characters` (`"a\x1b[2Kb"` -> `"a?[2Kb"`); `co
 
 **Interfaces:**
 - Consumes: Task 4's `UndoStore`, `Change`, `UndoPlan`; Task 2's `_undo`.
-- Produces: `Orchestrator.undo: Option<UndoStore>` opened from `config.undo` (a store that cannot be opened logs a warning and writes proceed, reported as `"no copy kept"` in the prompt); `Commands::Undo { id: Option<String>, #[arg(long)] list: bool, #[arg(long)] force: bool }`; TUI commands `/undo` and `/undo list`. CLI and TUI open the store directly (same data dir), so undo works with the daemon stopped.
+- Produces: `Orchestrator.undo: Option<UndoStore>` opened from `config.undo` (a store that cannot be opened logs a warning and writes proceed, reported as `"no copy kept"` in the prompt); `Commands::Undo { id: Option<String>, #[arg(long)] list: bool, #[arg(long)] force: bool }`; TUI commands `/undo`, `/undo list`, `/trust` and `/trust clear`. CLI and TUI open the store directly (same data dir), so undo works with the daemon stopped.
 
 - [ ] **Step 1: Write the failing tests**
 

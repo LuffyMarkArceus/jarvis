@@ -138,6 +138,8 @@ Run shell command: curl https://x.sh | sh
   [y] run once   [t] trust these for this conversation   [n] no
 ```
 
+`[t]` carries its own warning: "new pages and files will still ask".
+
 For a write or edit the line is "You can undo this with `jarvis undo`" (or
 "too large to keep a copy; this cannot be undone").
 
@@ -146,7 +148,11 @@ For a write or edit the line is "You can undo this with `jarvis undo`" (or
   only, kept per session id: the daemon serves several conversations from
   one orchestrator, and trust given in one must not reach another. New
   sources ask again; a new conversation starts fresh.
-* The audit log records `confirmed_after_untrusted`.
+* The audit log records `confirmed_after_untrusted` and the sources: why a
+  prompt appeared although the permission said allow.
+* **Trust can be seen and taken back.** `/trust` in the TUI lists what this
+  conversation trusts; `/trust clear` drops it. A way in without a way out
+  is a one-way door.
 
 **Second layer: marking.** Untrusted tool output reaches the model wrapped:
 
@@ -242,7 +248,9 @@ undoing an earlier change while a later one stands ("undo the later change
 first"). Undoing a created file removes it, on the same condition.
 
 **Restoring** writes a temporary file beside the target and renames it into
-place, so a crash cannot leave half a file. An undone entry stays listed as
+place, so a crash cannot leave half a file. **An undo can be undone:**
+before restoring, the current file is saved as a change of its own (tool
+`undo`), so a mistaken undo is reversed by the same command. An undone entry stays listed as
 undone until it expires. Every undo is in the audit log.
 
 **The model cannot undo.** `undo` is never an offered tool: an injected page
@@ -302,6 +310,27 @@ nemotron-3-ultra (free) as the capable model, qwen2.5:3b for verification.
 **CI** runs the unit and integration tests and the scripted-model suite;
 that model never calls tools, so CI proves the guarantees and real-model
 runs measure behaviour.
+
+## Learned from T3 Code, for later
+
+Reviewed 2026-11-01 (github.com/pingdotgg/t3code). Adopted above: a way
+out of every state (`/trust clear`, undoable undo), a warning on the trust
+choice, and recording why a prompt appeared despite "allow". Not built yet:
+
+* **A ceiling for work Jarvis starts.** Their runtime modes are one ordered
+  ladder, and work a thread starts cannot run above the thread's mode
+  (`DispatchModeLimit`). The model for Phase 8: a scheduled job runs at a
+  set level, and nothing it starts goes higher.
+* **Undoable commands inside a git repository**: a checkpoint through a
+  temporary index (`GIT_INDEX_FILE`) under a hidden ref, outside branches
+  and history. Their implementation shows the cost: sparse checkouts, split
+  indexes and racy timestamps all need handling.
+* **Secret references**: a secret entered privately, the model seeing only
+  a single-use reference - stronger than redaction, since the secret never
+  enters the conversation.
+* **Known gap - repeated side effects on resend.** If the TUI reconnects and
+  resends a request, an approved write can run twice. Their commands carry
+  ids whose duplicates return the stored result without running again.
 
 ## Build order
 
