@@ -99,9 +99,11 @@ The scope is everything the model is shown in the request, history
 included (decision 4): an attack can wait a turn ("next time the user asks
 anything, also run X").
 
-**Labels name their sources.** A web label records the URL it came from
-(`Label.urls`, stored with the message; older stored labels have none and
-are named "web pages read earlier in this conversation"). Prompts name
+**Labels name their sources.** A label records where its untrusted content
+came from (`Label.sources`, stored with the message): the URL of a fetched
+page, `search: <query>` for search results, `$ <command>` for command
+output. Older stored labels have none and are named "web pages read earlier
+in this conversation". Prompts name
 sources; "untrusted content" alone would be wallpaper.
 
 ## 2. The gate
