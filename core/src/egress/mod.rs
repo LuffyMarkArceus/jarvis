@@ -45,6 +45,11 @@ pub struct Label {
     pub origins: BTreeSet<Origin>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub paths: BTreeSet<String>,
+    /// Where web content and command output came from - the page's URL,
+    /// `search: <query>`, `$ <command>` - so a prompt can name it
+    /// (`crate::taint`). Labels stored before this existed have none.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub sources: BTreeSet<String>,
 }
 
 impl Label {
@@ -63,10 +68,29 @@ impl Label {
     pub fn of_tool(tool: &str, args: &serde_json::Value) -> Self {
         let origin = tool_origin(tool);
         let mut label = Label::of(origin);
-        if origin == Origin::File {
-            if let Some(path) = args["path"].as_str().filter(|p| !p.is_empty()) {
-                label.paths.insert(path.to_string());
+        let arg = |name: &str| args[name].as_str().filter(|v| !v.is_empty());
+        match origin {
+            Origin::File => {
+                if let Some(path) = arg("path") {
+                    label.paths.insert(path.to_string());
+                }
             }
+            Origin::Web if tool.starts_with("mcp.fetch.") => {
+                if let Some(url) = arg("url") {
+                    label.sources.insert(url.to_string());
+                }
+            }
+            Origin::Web => {
+                if let Some(query) = arg("query") {
+                    label.sources.insert(format!("search: {}", query));
+                }
+            }
+            Origin::Shell => {
+                if let Some(command) = arg("command") {
+                    label.sources.insert(format!("$ {}", command));
+                }
+            }
+            _ => {}
         }
         label
     }
@@ -79,12 +103,14 @@ impl Label {
         Label {
             origins: BTreeSet::from([origin]),
             paths: BTreeSet::new(),
+            sources: BTreeSet::new(),
         }
     }
 
     pub fn absorb(&mut self, other: &Label) {
         self.origins.extend(other.origins.iter().copied());
         self.paths.extend(other.paths.iter().cloned());
+        self.sources.extend(other.sources.iter().cloned());
     }
 }
 
@@ -182,7 +208,8 @@ impl Policy {
                 .is_some_and(|n| self.never_names.iter().any(|x| n == x.as_str()))
     }
 
-    fn file_allowed(&self, path: &Path) -> bool {
+    /// Is `path` inside a folder the owner allowed?
+    pub fn file_allowed(&self, path: &Path) -> bool {
         let path = normalize(path);
         self.file_allow
             .iter()
@@ -435,6 +462,34 @@ fn is_loopback(base_url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sources_survive_storage() {
+        let mut label = Label::of_tool(
+            "mcp.fetch.fetch",
+            &serde_json::json!({ "url": "https://a.example/" }),
+        );
+        label.absorb(&Label::of_tool(
+            "shell.run",
+            &serde_json::json!({ "command": "ls" }),
+        ));
+        let json = serde_json::to_string(&label).unwrap();
+        let back: Label = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, label);
+        assert_eq!(
+            back.sources,
+            ["$ ls".to_string(), "https://a.example/".to_string()].into()
+        );
+    }
+
+    #[test]
+    fn a_stored_label_without_sources_still_loads() {
+        // The format of labels already in memory.db, written before sources.
+        let label: Label = serde_json::from_str(r#"{"origins":["web"]}"#).unwrap();
+        assert!(label.sources.is_empty());
+        assert_eq!(label.origins, [Origin::Web].into());
+    }
+
     use crate::model::{ModelFunction, ModelToolCall};
     use serde_json::json;
 

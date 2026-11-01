@@ -18,6 +18,7 @@ pub mod permissions;
 pub mod planner;
 pub mod provider;
 pub mod router;
+pub mod taint;
 pub mod tools;
 pub mod verify;
 
