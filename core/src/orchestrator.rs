@@ -60,6 +60,7 @@ use crate::permissions::{PermissionAction, PermissionManager};
 use crate::planner::{self, OfferedTool, TurnPlan};
 use crate::provider::{self, ChatRequest, Provider};
 use crate::router::{self, Route};
+use crate::taint::{self, SessionTrust, Source};
 use crate::tools::{
     filesystem::{
         EditFileTool, ListDirTool, ReadFileTool, SearchFilesTool, StatFileTool, WriteFileTool,
@@ -206,6 +207,9 @@ enum OutcomeStatus {
     /// says what. Permissions allowed the tool: loosening them would not
     /// help, and the report must not suggest it.
     Withheld,
+    /// An action the model asked for after reading untrusted content, with
+    /// nobody to ask. `output` names the sources.
+    Untrusted,
 }
 
 impl OutcomeStatus {
@@ -216,6 +220,7 @@ impl OutcomeStatus {
                 | OutcomeStatus::Declined
                 | OutcomeStatus::NeedsConfirmation
                 | OutcomeStatus::Withheld
+                | OutcomeStatus::Untrusted
         )
     }
 
@@ -229,6 +234,9 @@ impl OutcomeStatus {
                 "requires confirmation (auto-denied in non-interactive mode)"
             }
             OutcomeStatus::Withheld => "not sent",
+            OutcomeStatus::Untrusted => {
+                "not run: it followed untrusted content and nobody could be asked"
+            }
         }
     }
 }
@@ -462,6 +470,7 @@ fn status_label(status: &OutcomeStatus) -> &'static str {
         OutcomeStatus::Declined => "declined",
         OutcomeStatus::NeedsConfirmation => "needs_confirmation",
         OutcomeStatus::Withheld => "withheld",
+        OutcomeStatus::Untrusted => "untrusted",
     }
 }
 
@@ -476,6 +485,8 @@ pub struct Orchestrator {
     tools: ToolRegistry,
     memory: Option<MemoryManager>,
     session_id: String,
+    /// Sources the owner trusted with `[t]`, per conversation.
+    trust: SessionTrust,
     permissions: PermissionManager,
     mcp: McpClient,
 }
@@ -544,6 +555,7 @@ impl Orchestrator {
             tools,
             memory,
             session_id,
+            trust: SessionTrust::default(),
             permissions,
             mcp: McpClient::new(),
         }
@@ -837,6 +849,16 @@ impl Orchestrator {
         )
     }
 
+    /// What this conversation trusts (`[t]`), for `/trust`.
+    pub fn trusted(&self) -> Vec<String> {
+        self.trust.list(&self.session_id)
+    }
+
+    /// Forget this conversation's trust, for `/trust clear`.
+    pub fn clear_trust(&self) {
+        self.trust.clear(&self.session_id)
+    }
+
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
@@ -956,7 +978,7 @@ impl Orchestrator {
                 // the answer even if the user has just cancelled. Dropping it
                 // would hide an action that really happened.
                 let outcome = self
-                    .execute_call(name.clone(), args.clone(), confirm, &rec)
+                    .execute_call(name.clone(), args.clone(), confirm, &[], &rec)
                     .await;
                 // A confirmation that was denied *because* the user cancelled
                 // is not a tool result worth persisting: the turn never ran.
@@ -1746,7 +1768,16 @@ impl Orchestrator {
                 return outcome;
             }
         };
-        self.execute_call(name, args, confirm, rec).await
+        // Only a model can be steered by what it read. The owner's own
+        // command, routed without one, never comes through here.
+        let untrusted = if by_model && taint::is_action(&name) {
+            let seen = taint::untrusted_sources(&rec.label(), &self.egress_policy());
+            self.trust.untrusted(&self.session_id, seen)
+        } else {
+            Vec::new()
+        };
+        self.execute_call(name, args, confirm, &untrusted, rec)
+            .await
     }
 
     /// A web call sends its arguments off this machine on any tier: the
@@ -1846,22 +1877,34 @@ impl Orchestrator {
         name: String,
         args: Value,
         confirm: Option<&dyn ConfirmationHandler>,
+        untrusted: &[Source],
         rec: &TurnRecorder,
     ) -> ToolOutcome {
-        let outcome = self.gate_and_run(name, args, confirm).await;
+        let outcome = self.gate_and_run(name, args, confirm, untrusted).await;
         rec.tool(&outcome, status_label(&outcome.status));
         outcome
     }
 
     /// Run a single tool call through the permission gate and the registry.
+    ///
+    /// `untrusted` is what the model read that the owner has not vouched
+    /// for. When it is not empty, an action asks even where the permission
+    /// says allow, and the prompt names it; deny still wins.
     async fn gate_and_run(
         &self,
         name: String,
         args: Value,
         confirm: Option<&dyn ConfirmationHandler>,
+        untrusted: &[Source],
     ) -> ToolOutcome {
         let args = self.sanitize_args(&name, args);
         let verdict = self.permissions.check_permission(&name, &args);
+
+        if !untrusted.is_empty() && verdict.action != PermissionAction::Deny {
+            return self
+                .ask_after_untrusted(name, args, confirm, untrusted, verdict.pattern)
+                .await;
+        }
 
         match verdict.action {
             PermissionAction::Deny => {
@@ -1946,6 +1989,110 @@ impl Orchestrator {
                 }
             },
             PermissionAction::Allow => self.run_tool(name, args, "allowed", verdict.pattern).await,
+        }
+    }
+
+    /// The prompt for an action the model asked for after reading
+    /// untrusted content: what it read, and whether it can be undone.
+    async fn ask_after_untrusted(
+        &self,
+        name: String,
+        args: Value,
+        confirm: Option<&dyn ConfirmationHandler>,
+        untrusted: &[Source],
+        pattern: Option<String>,
+    ) -> ToolOutcome {
+        let names: Vec<&str> = untrusted.iter().map(|s| s.name.as_str()).collect();
+        let why = format!("after reading: {}", names.join(", "));
+        let Some(handler) = confirm else {
+            let msg = format!(
+                "Tool {} was not run: the model asked for it after reading content you have not marked as trusted ({}), and nobody could be asked.",
+                name,
+                names.join(", ")
+            );
+            let _ = self.permissions.log_audit(
+                Some(&self.session_id),
+                &name,
+                &args,
+                "untrusted_not_asked",
+                Some(&why),
+            );
+            return ToolOutcome {
+                name,
+                args,
+                status: OutcomeStatus::Untrusted,
+                output: msg,
+                result: None,
+                pattern,
+            };
+        };
+
+        let mut shown = args.clone();
+        if let Some(map) = shown.as_object_mut() {
+            map.insert(
+                "_untrusted".into(),
+                untrusted
+                    .iter()
+                    .map(|s| json!({ "name": s.name, "kind": s.describe() }))
+                    .collect(),
+            );
+            // Commands cannot be undone; writes can, once undo exists.
+            let undo = if name == "shell.run" || name.starts_with("mcp.") {
+                "never"
+            } else {
+                "kept"
+            };
+            map.insert("_undo".into(), json!(undo));
+        }
+        let choices = [
+            Choice {
+                key: 'y',
+                label: "run once".into(),
+            },
+            Choice {
+                key: 't',
+                label: "trust these for this conversation (new pages and files will still ask)"
+                    .into(),
+            },
+        ];
+        match handler.choose(&name, &shown, &choices).await {
+            Some(key) => {
+                if key == 't' {
+                    self.trust.trust(&self.session_id, untrusted);
+                }
+                let _ = self.permissions.log_audit(
+                    Some(&self.session_id),
+                    &name,
+                    &args,
+                    "confirmed_after_untrusted",
+                    Some(&why),
+                );
+                // The row above says why it asked; this one what it did.
+                self.run_tool(name, args, "confirmed", pattern).await
+            }
+            None => {
+                let msg = format!(
+                    "Tool {} was declined by the user ({}). Args: {}",
+                    name,
+                    why,
+                    compact_args(&args)
+                );
+                let _ = self.permissions.log_audit(
+                    Some(&self.session_id),
+                    &name,
+                    &args,
+                    "declined_after_untrusted",
+                    Some(&why),
+                );
+                ToolOutcome {
+                    name,
+                    args,
+                    status: OutcomeStatus::Declined,
+                    output: msg,
+                    result: None,
+                    pattern,
+                }
+            }
         }
     }
 
@@ -2552,8 +2699,11 @@ fn render_blocked_report(trace: &[ToolOutcome]) -> String {
         // themselves clicked no.
         let only_declined = blocked.iter().all(|t| t.status == OutcomeStatus::Declined);
         let only_withheld = blocked.iter().all(|t| t.status == OutcomeStatus::Withheld);
+        let only_untrusted = blocked.iter().all(|t| t.status == OutcomeStatus::Untrusted);
         if only_declined {
             out.push_str("I did not run that - you declined the confirmation prompt.\n\n");
+        } else if only_untrusted {
+            out.push_str("I did not run that - the model asked for it after reading content you have not marked as trusted, and nobody could be asked.\n\n");
         } else if only_withheld {
             out.push_str("I did not run that - it would have sent something off this machine that may not leave it.\n\n");
         } else {
@@ -2570,7 +2720,7 @@ fn render_blocked_report(trace: &[ToolOutcome]) -> String {
         }
         out.push_str(&format!("    args:   {}\n", compact_args(&t.args)));
         out.push_str(&format!("    status: {}\n", t.status.label()));
-        if t.status == OutcomeStatus::Withheld {
+        if matches!(t.status, OutcomeStatus::Withheld | OutcomeStatus::Untrusted) {
             out.push_str(&format!("    why:    {}\n", t.output));
         }
     }
@@ -2594,7 +2744,10 @@ fn render_blocked_report(trace: &[ToolOutcome]) -> String {
         .copied()
         .filter(|t| {
             t.pattern.is_none()
-                && !matches!(t.status, OutcomeStatus::Declined | OutcomeStatus::Withheld)
+                && !matches!(
+                    t.status,
+                    OutcomeStatus::Declined | OutcomeStatus::Withheld | OutcomeStatus::Untrusted
+                )
         })
         .collect();
     if !tool_level.is_empty() {

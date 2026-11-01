@@ -7,6 +7,7 @@
 //! shown to the owner with its sources first (docs/design/injection-and-undo.md).
 
 use crate::egress::{Label, Origin, Policy};
+use std::collections::BTreeSet;
 use std::path::Path;
 
 /// What kind of thing a source is, for the prompt's wording.
@@ -122,6 +123,71 @@ pub fn is_untrusted(label: &Label, policy: &Policy) -> bool {
     !untrusted_sources(label, policy).is_empty()
 }
 
+/// Does `tool` change things? Writes, edits, commands, and any MCP tool but
+/// search and fetch: a tool Jarvis does not know is assumed able to act.
+pub fn is_action(tool: &str) -> bool {
+    match tool {
+        "filesystem.write" | "filesystem.edit" | "shell.run" => true,
+        t if t.starts_with("mcp.search.") || t.starts_with("mcp.fetch.") => false,
+        t => t.starts_with("mcp."),
+    }
+}
+
+/// `text` with every control character replaced by `?`.
+///
+/// Source names and commands come from text an outsider wrote, and a
+/// terminal obeys escape codes: `\x1b[2K` erases the line it is on, so a
+/// page could hide the warning that names it.
+pub fn printable(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect()
+}
+
+/// Sources the owner trusted with `[t]`, per conversation, in memory only:
+/// trust given today does not carry over to tomorrow, and the daemon serves
+/// several conversations, so trust in one must not reach another.
+#[derive(Default)]
+pub struct SessionTrust {
+    trusted: std::sync::Mutex<std::collections::HashMap<String, BTreeSet<String>>>,
+}
+
+impl SessionTrust {
+    pub fn trust(&self, session: &str, sources: &[Source]) {
+        self.trusted
+            .lock()
+            .unwrap()
+            .entry(session.to_string())
+            .or_default()
+            .extend(sources.iter().map(|s| s.name.clone()));
+    }
+
+    /// `sources` without the ones this conversation trusts.
+    pub fn untrusted(&self, session: &str, sources: Vec<Source>) -> Vec<Source> {
+        let trusted = self.trusted.lock().unwrap();
+        match trusted.get(session) {
+            Some(names) => sources
+                .into_iter()
+                .filter(|s| !names.contains(&s.name))
+                .collect(),
+            None => sources,
+        }
+    }
+
+    pub fn list(&self, session: &str) -> Vec<String> {
+        self.trusted
+            .lock()
+            .unwrap()
+            .get(session)
+            .map(|names| names.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn clear(&self, session: &str) {
+        self.trusted.lock().unwrap().remove(session);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,6 +208,56 @@ mod tests {
 
     fn read(path: &str) -> Label {
         Label::of_tool("filesystem.read", &json!({ "path": path }))
+    }
+
+    #[test]
+    fn printable_replaces_control_characters() {
+        assert_eq!(printable("a\x1b[2Kb"), "a?[2Kb");
+        assert_eq!(printable("line\nbreak\ttab\r"), "line?break?tab?");
+        assert_eq!(
+            printable("plain https://a.example/ é"),
+            "plain https://a.example/ é"
+        );
+    }
+
+    #[test]
+    fn actions_are_what_changes_things() {
+        for tool in [
+            "filesystem.write",
+            "filesystem.edit",
+            "shell.run",
+            "mcp.github.create_issue",
+        ] {
+            assert!(is_action(tool), "{}", tool);
+        }
+        for tool in [
+            "filesystem.read",
+            "filesystem.list_dir",
+            "filesystem.search",
+            "filesystem.stat",
+            "process.list",
+            "system.info",
+            "mcp.search.search",
+            "mcp.fetch.fetch",
+        ] {
+            assert!(!is_action(tool), "{}", tool);
+        }
+    }
+
+    #[test]
+    fn trust_is_per_session_and_by_name() {
+        let trust = SessionTrust::default();
+        let page = Source::new(SourceKind::WebPage, "https://a.example/");
+        let file = Source::new(SourceKind::File, "/tmp/x.md");
+        trust.trust("s1", std::slice::from_ref(&page));
+        assert_eq!(
+            trust.untrusted("s1", vec![page.clone(), file.clone()]),
+            vec![file]
+        );
+        assert_eq!(trust.untrusted("s2", vec![page.clone()]), vec![page]);
+        assert_eq!(trust.list("s1"), ["https://a.example/"]);
+        trust.clear("s1");
+        assert!(trust.list("s1").is_empty());
     }
 
     #[test]
