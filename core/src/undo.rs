@@ -119,10 +119,10 @@ impl UndoStore {
         );
         let dir = self.dir.join(&id);
         std::fs::create_dir(&dir)?;
-        let before_hash = if existed_before {
-            if kept {
-                std::fs::copy(&path, dir.join("before"))?;
-            }
+        // Without a copy there is nothing to restore, so no fingerprint: a
+        // one-line write over a huge log must not read the log.
+        let before_hash = if existed_before && kept {
+            std::fs::copy(&path, dir.join("before"))?;
             Some(fingerprint(&path)?)
         } else {
             None
@@ -310,12 +310,16 @@ fn resolve(path: &Path) -> PathBuf {
     }
 }
 
+/// SHA-256 of the file, read in pieces rather than held in memory.
 fn fingerprint(path: &Path) -> Result<String> {
-    match std::fs::read(path) {
-        Ok(bytes) => Ok(format!("{:x}", Sha256::digest(&bytes))),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ABSENT.to_string()),
-        Err(e) => Err(e.into()),
-    }
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ABSENT.to_string()),
+        Err(e) => return Err(e.into()),
+    };
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 /// `20261101T101530.123456789Z-ab12` -> its time.
@@ -691,6 +695,34 @@ mod tests {
         );
         let plan = s.undo(None, false);
         assert!(refusal(&plan).contains("no copy kept"), "{:?}", plan);
+    }
+
+    #[test]
+    fn a_file_too_large_to_copy_is_not_read_to_fingerprint_it() {
+        // Writing one line over a huge log must not load the log into
+        // memory: without a copy there is nothing to restore, so its
+        // fingerprint is never needed.
+        let s = sandbox_with(UndoConfig {
+            max_file_bytes: 4,
+            ..UndoConfig::default()
+        });
+        let big = s.file("big.log");
+        std::fs::write(&big, "more than four bytes").unwrap();
+        let change = s.change(&big, b"x");
+        assert_eq!(change.before_hash, None);
+        assert!(!change.kept);
+    }
+
+    #[test]
+    fn a_fingerprint_is_the_sha256_of_the_content() {
+        let s = sandbox();
+        let f = s.file("f.txt");
+        std::fs::write(&f, "abc").unwrap();
+        assert_eq!(
+            fingerprint(&f).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(fingerprint(&s.file("missing")).unwrap(), "absent");
     }
 
     #[test]
