@@ -20,6 +20,34 @@ pub struct Config {
     /// An optional second, remote model. `[model]` stays the local one.
     #[serde(default)]
     pub remote: Option<RemoteConfig>,
+    /// Copies kept so Jarvis's file changes can be undone.
+    #[serde(default)]
+    pub undo: UndoConfig,
+}
+
+/// `[undo]`: where copies are kept and for how long.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct UndoConfig {
+    /// Default `<data_dir>/undo`. Copies of edited files can be secrets, so
+    /// keep this on a filesystem that enforces permissions (not NTFS).
+    pub dir: Option<PathBuf>,
+    pub max_age_days: u64,
+    /// Larger files are changed without a copy, and the prompt says so.
+    pub max_file_bytes: u64,
+    /// The whole folder; the oldest copies go first.
+    pub max_total_bytes: u64,
+}
+
+impl Default for UndoConfig {
+    fn default() -> Self {
+        UndoConfig {
+            dir: None,
+            max_age_days: 7,
+            max_file_bytes: 10 * 1024 * 1024,
+            max_total_bytes: 500 * 1024 * 1024,
+        }
+    }
 }
 
 /// The remote tier: the same settings as `[model]`, plus whether new
