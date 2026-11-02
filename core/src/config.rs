@@ -23,6 +23,26 @@ pub struct Config {
     /// Copies kept so Jarvis's file changes can be undone.
     #[serde(default)]
     pub undo: UndoConfig,
+    #[serde(default)]
+    pub security: SecurityConfig,
+}
+
+/// `[security]`: defences against instructions in text Jarvis reads.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct SecurityConfig {
+    /// Wrap untrusted tool output in `<untrusted>` and tell the model it is
+    /// data. Off only to measure what it is worth (`jarvis eval`); the
+    /// confirmation gate works either way.
+    pub mark_untrusted: bool,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        SecurityConfig {
+            mark_untrusted: true,
+        }
+    }
 }
 
 /// `[undo]`: where copies are kept and for how long.

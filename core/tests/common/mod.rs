@@ -12,6 +12,9 @@ use tokio::sync::mpsc::UnboundedSender;
 pub struct Script {
     replies: Vec<ChatTurn>,
     next: Mutex<usize>,
+    /// Each request as the model would see it: system prompt, then every
+    /// message as `[role] content`.
+    pub sent: Mutex<Vec<String>>,
 }
 
 impl Script {
@@ -19,6 +22,7 @@ impl Script {
         Script {
             replies,
             next: Mutex::new(0),
+            sent: Mutex::new(Vec::new()),
         }
     }
 }
@@ -31,9 +35,14 @@ impl Provider for Script {
 
     async fn chat_turn(
         &self,
-        _request: ChatRequest<'_>,
+        request: ChatRequest<'_>,
         _cancel: Option<&Cancellation>,
     ) -> Result<ChatTurn> {
+        let mut text = request.system.unwrap_or_default().to_string();
+        for m in request.messages {
+            text.push_str(&format!("\n[{}] {}", m.role, m.content));
+        }
+        self.sent.lock().unwrap().push(text);
         let mut next = self.next.lock().unwrap();
         let turn = self.replies[(*next).min(self.replies.len() - 1)].clone();
         *next += 1;
