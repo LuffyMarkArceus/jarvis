@@ -230,6 +230,17 @@ enum Commands {
     MemoryStats,
     /// Show or switch the model tier: `local` or `remote`
     Tier { tier: Option<String> },
+    /// Undo Jarvis's last file change, or the one with this id
+    Undo {
+        /// A change id (or its start) from `--list`
+        id: Option<String>,
+        /// List recent changes and what undoing each would do
+        #[arg(long)]
+        list: bool,
+        /// Undo even though the file changed after Jarvis wrote it
+        #[arg(long)]
+        force: bool,
+    },
     /// Folders whose files may be sent to a remote model
     Egress {
         #[command(subcommand)]
@@ -1163,6 +1174,56 @@ async fn main() -> anyhow::Result<()> {
                         .error
                         .unwrap_or_else(|| "could not switch tier".into())
                 ),
+            }
+        }
+        Commands::Undo { id, list, force } => {
+            use jarvis_core::undo::{self, UndoPlan, UndoStore};
+            // Read directly, not through the daemon: undo works with it stopped.
+            let config = jarvis_core::config::Config::load();
+            let store = UndoStore::for_config(&config)?;
+            if list {
+                let changes = store.list()?;
+                if changes.is_empty() {
+                    println!("No changes to undo.");
+                }
+                for change in changes.iter().take(20) {
+                    println!("{}", undo::list_line(change));
+                }
+                return Ok(());
+            }
+            let plan = match store.plan(id.as_deref(), force) {
+                Ok(plan) => plan,
+                Err(jarvis_core::error::JarvisError::Tool(why)) => {
+                    // "no change to undo" / "no change with id ..."
+                    let mut why = why.chars();
+                    let first = why
+                        .next()
+                        .map(|c| c.to_uppercase().to_string())
+                        .unwrap_or_default();
+                    eprintln!("{}{}.", first, why.as_str());
+                    std::process::exit(1);
+                }
+                Err(e) => return Err(e.into()),
+            };
+            if let UndoPlan::Refuse { reason, .. } = &plan {
+                eprintln!("Cannot undo: {}", reason);
+                std::process::exit(1);
+            }
+            if force {
+                eprintln!(
+                    "--force: anything changed in the file after Jarvis wrote it will be lost."
+                );
+            }
+            eprint!("{} [y/N] ", undo::describe(&plan));
+            let _ = std::io::stderr().flush();
+            let mut answer = String::new();
+            std::io::stdin().read_line(&mut answer)?;
+            if answer.trim().eq_ignore_ascii_case("y") {
+                let audit = jarvis_core::permissions::PermissionManager::new(&config)?;
+                undo::apply_recorded(&store, &plan, force, &audit)?;
+                println!("Undone. The undo is itself a change: `jarvis undo --list` shows its id if you need it back.");
+            } else {
+                println!("Nothing changed.");
             }
         }
         Commands::Egress { action } => {

@@ -250,6 +250,13 @@ pub fn route(input: &str) -> Route {
         return Route::Direct;
     }
 
+    // 2b. "Undo that": the owner's command (`jarvis undo`), answered without
+    //     a model - one offered file tools could only rewrite the file from
+    //     what it remembers.
+    if asks_to_undo(&lower) {
+        return Route::Direct;
+    }
+
     // 2b. Fetch/web requests - route to MCP fetch if available
     if let Some(url) = extract_url(raw) {
         if lower.contains("fetch")
@@ -926,6 +933,31 @@ const CHANGE_WORDS: &[&str] = &[
     "chown",
 ];
 
+/// A request for Jarvis to undo its own change: "undo that", "please undo
+/// the last change". Undoing something else ("undo the last git commit") is
+/// an ordinary request.
+pub fn asks_to_undo(input: &str) -> bool {
+    let mut rest = input.trim().to_lowercase();
+    for opener in [
+        "please ",
+        "can you ",
+        "could you ",
+        "would you ",
+        "jarvis, ",
+        "jarvis ",
+    ] {
+        if let Some(r) = rest.strip_prefix(opener) {
+            rest = r.trim_start().to_string();
+        }
+    }
+    let rest = rest.trim_end_matches(['?', '.', '!']).trim();
+    let is_undo = rest == "undo" || rest.starts_with("undo ");
+    let other_tool = ["git", "commit", "merge", "rebase", "vim", "editor"]
+        .iter()
+        .any(|w| rest.split_whitespace().any(|x| x == *w));
+    is_undo && !other_tool
+}
+
 /// "how do I ...", "how to ...", "what would rm -rf /x do": a question about
 /// doing something, not a request to do it. "how big" and "how many" ask
 /// about the machine, and "what does /etc/hostname contain" asks to read a
@@ -1046,6 +1078,28 @@ fn is_directory(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn undo_requests_are_jarviss_own_undo_only() {
+        for yes in [
+            "undo",
+            "undo that",
+            "Please undo the last change.",
+            "can you undo what you just did?",
+            "jarvis, undo it",
+        ] {
+            assert!(asks_to_undo(yes), "{}", yes);
+        }
+        for no in [
+            "undo the last git commit",
+            "how do I undo in vim",
+            "what does undo do",
+            "write undo.md",
+            "the undo button is broken",
+        ] {
+            assert!(!asks_to_undo(no), "{}", no);
+        }
+    }
 
     fn tool_of(r: &Route) -> Option<(&str, Value)> {
         match r {

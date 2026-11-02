@@ -70,6 +70,7 @@ use crate::tools::{
     system::{GetSystemInfoTool, ListProcessesTool},
     ToolRegistry,
 };
+use crate::undo::UndoStore;
 use crate::verify;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -178,6 +179,10 @@ const DEFAULT_MAX_ROUNDS: usize = 8;
 fn call_key(name: &str, args: &Value) -> String {
     format!("{}\u{0}{}", name, args)
 }
+
+/// The answer to "undo that": undo is the owner's command, never the
+/// model's (an injected page could otherwise ask to undo the owner's fix).
+const UNDO_FROM_CHAT: &str = "I can't undo from chat - run `jarvis undo` (or /undo in the TUI) to see and reverse Jarvis's last file change.";
 
 /// The last request of a turn that ran out of rounds.
 const CLOSING_REQUEST: &str = "No more tools can be used for this request. Answer the question above now, using only the tool results in this conversation. If they do not fully answer it, say what you found and what is still unknown. Do not call a tool.";
@@ -499,6 +504,10 @@ pub struct Orchestrator {
     session_id: String,
     /// Sources the owner trusted with `[t]`, per conversation.
     trust: SessionTrust,
+    /// Copies of files before Jarvis changes them. `None` if the folder
+    /// could not be opened: writes still happen, and prompts say there is
+    /// no copy.
+    undo: Option<UndoStore>,
     permissions: PermissionManager,
     mcp: McpClient,
 }
@@ -555,6 +564,13 @@ impl Orchestrator {
         tools.register(Box::new(GetSystemInfoTool));
         tools.register(Box::new(ListProcessesTool));
         let session_id = Uuid::new_v4().to_string();
+        let undo = match UndoStore::for_config(&config) {
+            Ok(store) => Some(store),
+            Err(e) => {
+                warn!("undo is unavailable: {}", e);
+                None
+            }
+        };
         let memory = MemoryManager::new(config.clone()).ok();
         if let Some(ref m) = memory {
             let _ = m.create_session(&session_id);
@@ -568,6 +584,7 @@ impl Orchestrator {
             memory,
             session_id,
             trust: SessionTrust::default(),
+            undo,
             permissions,
             mcp: McpClient::new(),
         }
@@ -976,6 +993,7 @@ impl Orchestrator {
 
         let answer = match &plan.route {
             // Pure conversation: no tools involved at all.
+            Route::Direct if router::asks_to_undo(input) => UNDO_FROM_CHAT.to_string(),
             Route::Direct => {
                 self.converse(input, &history, confirm, cancel, sink, &rec)
                     .await?
@@ -2083,12 +2101,7 @@ impl Orchestrator {
                     .map(|s| json!({ "name": s.name, "kind": s.describe() }))
                     .collect(),
             );
-            // Commands cannot be undone; writes can, once undo exists.
-            let undo = if name == "shell.run" || name.starts_with("mcp.") {
-                "never"
-            } else {
-                "kept"
-            };
+            let undo = self.undo_note(&name, &args);
             map.insert("_undo".into(), json!(undo));
         }
         let choices = [
@@ -2140,6 +2153,23 @@ impl Orchestrator {
                     pattern,
                 }
             }
+        }
+    }
+
+    /// Whether undo will be able to reverse this call: `kept`, `too_large`
+    /// (no copy over the size limit), `unavailable` (no undo folder), or
+    /// `never` (commands and other tools).
+    fn undo_note(&self, name: &str, args: &Value) -> &'static str {
+        if !matches!(name, "filesystem.write" | "filesystem.edit") {
+            return "never";
+        }
+        let Some(store) = &self.undo else {
+            return "unavailable";
+        };
+        match args.get("path").and_then(Value::as_str) {
+            Some(path) if store.would_keep(std::path::Path::new(path)) => "kept",
+            Some(_) => "too_large",
+            None => "kept",
         }
     }
 
@@ -2211,7 +2241,33 @@ impl Orchestrator {
                 }
             }
         } else {
-            match self.tools.execute(&name, args.clone()).await {
+            // A copy before Jarvis changes a file, so `jarvis undo` can put
+            // it back. Every write goes through here, typed or the model's.
+            let pending = match (&self.undo, args.get("path").and_then(Value::as_str)) {
+                (Some(store), Some(path))
+                    if matches!(name.as_str(), "filesystem.write" | "filesystem.edit") =>
+                {
+                    match store.before_change(std::path::Path::new(path), &name, &self.session_id) {
+                        Ok(pending) => Some(pending),
+                        Err(e) => {
+                            warn!("no undo copy of {}: {}", path, e);
+                            None
+                        }
+                    }
+                }
+                _ => None,
+            };
+            let executed = self.tools.execute(&name, args.clone()).await;
+            if let (Some(store), Some(pending)) = (&self.undo, pending) {
+                if executed.is_ok() {
+                    if let Err(e) = store.after_change(pending) {
+                        warn!("undo record failed: {}", e);
+                    }
+                } else {
+                    store.discard(pending);
+                }
+            }
+            match executed {
                 Ok(res) => {
                     let compact = compact_output(&name, &res);
                     let _ = self.permissions.log_audit(
@@ -2271,7 +2327,18 @@ impl Orchestrator {
         } else {
             self.tools.required_args(tool)
         };
-        unwrap_echoed_schema(args, &required)
+        let mut args = unwrap_echoed_schema(args, &required);
+        // `~/notes.md` from a model means the owner's home, as it does on a
+        // deterministic route. Expanded here, once, so the permission check,
+        // the egress label, undo and the tool all see the same file; left
+        // as it was, the tool wrote `./~/notes.md`.
+        if tool.starts_with("filesystem.") {
+            if let Some(path) = args.get("path").and_then(Value::as_str) {
+                let expanded = router::expand_tilde(path);
+                args["path"] = Value::String(expanded);
+            }
+        }
+        args
     }
 }
 

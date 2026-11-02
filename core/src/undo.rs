@@ -355,6 +355,89 @@ fn write_meta(dir: &Path, change: &Change) -> Result<()> {
     Ok(())
 }
 
+impl UndoStore {
+    /// The store `config` names: `[undo] dir`, or `<data_dir>/undo`. The
+    /// daemon, the CLI and the TUI all open the same one, so undo works
+    /// with the daemon stopped.
+    pub fn for_config(config: &crate::config::Config) -> Result<Self> {
+        let dir = config
+            .undo
+            .dir
+            .clone()
+            .unwrap_or_else(|| config.general.data_dir.join("undo"));
+        UndoStore::open(dir, &config.undo)
+    }
+}
+
+/// When a change happened, in the owner's local time.
+fn clock(time: &DateTime<Utc>) -> String {
+    time.with_timezone(&chrono::Local)
+        .format("%H:%M")
+        .to_string()
+}
+
+/// The question asked before an undo, in the spec's words.
+pub fn describe(plan: &UndoPlan) -> String {
+    match plan {
+        UndoPlan::Restore(c) => format!(
+            "Restore {} to its version from {}, before Jarvis wrote it?",
+            c.path.display(),
+            clock(&c.time)
+        ),
+        UndoPlan::Remove(c) => format!(
+            "Remove {}, which Jarvis created at {}?",
+            c.path.display(),
+            clock(&c.time)
+        ),
+        UndoPlan::Refuse { reason, .. } => format!("Cannot undo: {}", reason),
+    }
+}
+
+/// One line of `jarvis undo --list`: id, time, file, tool, and what undo
+/// would do.
+pub fn list_line(change: &Change) -> String {
+    let what = if change.undone {
+        "undone"
+    } else if !change.kept {
+        "no copy kept"
+    } else if change.existed_before {
+        "would restore the earlier version"
+    } else {
+        "would remove the file"
+    };
+    format!(
+        "{}  {}  {}  {}  {}",
+        change.id,
+        change
+            .time
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M"),
+        change.path.display(),
+        change.tool,
+        what
+    )
+}
+
+/// Apply `plan` and write it to the audit log beside the change it reversed.
+pub fn apply_recorded(
+    store: &UndoStore,
+    plan: &UndoPlan,
+    forced: bool,
+    audit: &crate::permissions::PermissionManager,
+) -> Result<()> {
+    store.apply(plan)?;
+    if let UndoPlan::Restore(change) | UndoPlan::Remove(change) = plan {
+        let _ = audit.log_audit(
+            Some(&change.session),
+            "undo",
+            &serde_json::json!({ "id": change.id, "path": change.path }),
+            if forced { "undone_forced" } else { "undone" },
+            Some(&format!("undid {} on {}", change.id, change.path.display())),
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,6 +494,67 @@ mod tests {
             UndoPlan::Refuse { reason, .. } => reason,
             other => panic!("expected a refusal, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn a_plan_is_said_in_plain_words() {
+        let s = sandbox();
+        let notes = s.file("notes.md");
+        std::fs::write(&notes, "mine").unwrap();
+        let change = s.change(&notes, b"jarvis");
+        let when = change
+            .time
+            .with_timezone(&chrono::Local)
+            .format("%H:%M")
+            .to_string();
+
+        let restore = describe(&s.store.plan(None, false).unwrap());
+        assert_eq!(
+            restore,
+            format!(
+                "Restore {} to its version from {}, before Jarvis wrote it?",
+                notes.display(),
+                when
+            )
+        );
+        std::fs::remove_file(&notes).unwrap();
+        let new = s.file("new.md");
+        s.change(&new, b"x");
+        assert!(
+            describe(&s.store.plan(None, false).unwrap()).starts_with(&format!(
+                "Remove {}, which Jarvis created at",
+                new.display()
+            ))
+        );
+    }
+
+    #[test]
+    fn a_list_line_says_what_undo_would_do() {
+        let s = sandbox();
+        let notes = s.file("notes.md");
+        std::fs::write(&notes, "mine").unwrap();
+        let change = s.change(&notes, b"jarvis");
+        let line = list_line(&change);
+        assert!(line.starts_with(&change.id), "{}", line);
+        assert!(line.contains("filesystem.write"), "{}", line);
+        assert!(
+            line.ends_with("would restore the earlier version"),
+            "{}",
+            line
+        );
+        s.undo(None, false);
+        let undone = s
+            .store
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|c| c.id == change.id)
+            .unwrap();
+        assert!(
+            list_line(&undone).ends_with("undone"),
+            "{}",
+            list_line(&undone)
+        );
     }
 
     #[test]

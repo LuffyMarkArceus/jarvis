@@ -222,6 +222,14 @@ fn draw_help(frame: &mut Frame, area: Rect) {
             "/remote, /local",
             "answer with the remote or the local model",
         ),
+        (
+            "/undo, /undo list",
+            "undo Jarvis's last file change (asks first)",
+        ),
+        (
+            "/trust, /trust clear",
+            "what this conversation trusts; forget it",
+        ),
         ("/clear, /quit, /help", "clear, leave, this list"),
     ];
 
