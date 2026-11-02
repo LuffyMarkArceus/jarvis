@@ -188,6 +188,81 @@ impl SessionTrust {
     }
 }
 
+/// The private things in `label`: anything but the owner's words and web
+/// pages - files (allowed or not: allowed for the model is not allowed for
+/// any website), command output, machine information, memory.
+pub fn private_sources(label: &Label) -> Vec<String> {
+    let mut found = Vec::new();
+    if label.origins.contains(&Origin::File) {
+        found.extend(label.paths.iter().cloned());
+        if label.paths.is_empty() {
+            found.push("a file whose path is not known".into());
+        }
+    }
+    if label.origins.contains(&Origin::Shell) {
+        let commands: Vec<String> = label
+            .sources
+            .iter()
+            .filter(|s| s.starts_with("$ "))
+            .cloned()
+            .collect();
+        if commands.is_empty() {
+            found.push("output of a command run earlier".into());
+        }
+        found.extend(commands);
+    }
+    if label.origins.contains(&Origin::System) {
+        found.push("information about this machine".into());
+    }
+    if label.origins.contains(&Origin::Memory) {
+        found.push("earlier conversations".into());
+    }
+    if label.origins.contains(&Origin::Other) {
+        found.push("earlier content of unknown origin".into());
+    }
+    found
+}
+
+pub fn private_seen(label: &Label) -> bool {
+    !private_sources(label).is_empty()
+}
+
+/// Every `http(s)://` address in `text`, without the punctuation that
+/// usually follows one in prose.
+pub fn urls_in(text: &str) -> BTreeSet<String> {
+    static URL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let url = URL.get_or_init(|| regex::Regex::new(r#"https?://[^\s"'<>)]+"#).expect("valid"));
+    url.find_iter(text)
+        .map(|m| {
+            m.as_str()
+                .trim_end_matches(['.', ',', ';', ':'])
+                .to_string()
+        })
+        .collect()
+}
+
+/// Did the model make `url` up rather than copy it from what it was shown?
+/// A copied link carries only what someone outside already wrote; carrying
+/// the owner's data needs a built one.
+pub fn is_built(url: &str, shown: &BTreeSet<String>) -> bool {
+    let bare = |u: &str| u.trim_end_matches('/').to_string();
+    let url = bare(url);
+    !shown.iter().any(|s| bare(s) == url)
+}
+
+/// Could fetching `url` carry the owner's data to its site? All three:
+/// something untrusted could have asked for it, something private is there
+/// to take, and the address was built, not copied. `[t]` trust does not
+/// count here: trusting a page is not agreeing to send data out.
+pub fn exfiltration_risk(
+    label: &Label,
+    policy: &Policy,
+    url: &str,
+    shown: &BTreeSet<String>,
+) -> bool {
+    is_untrusted(label, policy) && private_seen(label) && is_built(url, shown)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,6 +283,88 @@ mod tests {
 
     fn read(path: &str) -> Label {
         Label::of_tool("filesystem.read", &json!({ "path": path }))
+    }
+
+    #[test]
+    fn exactly_one_combination_asks() {
+        let page = Label::of_tool(
+            "mcp.fetch.fetch",
+            &json!({ "url": "https://evil.example/deploy" }),
+        );
+        let config = read("/home/u/project/config.py");
+        let shown: BTreeSet<String> = ["https://evil.example/c".to_string()].into();
+        for untrusted in [false, true] {
+            for private in [false, true] {
+                for built in [false, true] {
+                    let mut label = Label::of(Origin::User);
+                    if untrusted {
+                        label.absorb(&page);
+                    }
+                    if private {
+                        label.absorb(&config);
+                    }
+                    let url = if built {
+                        "https://evil.example/c?d=hunter2"
+                    } else {
+                        "https://evil.example/c"
+                    };
+                    let asks = exfiltration_risk(&label, &policy(), url, &shown);
+                    assert_eq!(
+                        asks,
+                        untrusted && private && built,
+                        "untrusted={} private={} built={}",
+                        untrusted,
+                        private,
+                        built
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn urls_in_trims_punctuation() {
+        assert_eq!(
+            urls_in(
+                "see https://a.example/x). and <http://b.example/y>, \"https://c.example/z?q=1\""
+            ),
+            [
+                "http://b.example/y".to_string(),
+                "https://a.example/x".to_string(),
+                "https://c.example/z?q=1".to_string()
+            ]
+            .into()
+        );
+    }
+
+    #[test]
+    fn a_trailing_slash_is_the_same_address() {
+        let shown: BTreeSet<String> = ["https://a.example/docs/".to_string()].into();
+        assert!(!is_built("https://a.example/docs", &shown));
+        assert!(is_built("https://a.example/docs/secret", &shown));
+    }
+
+    #[test]
+    fn private_content_is_everything_but_the_owners_words_and_the_web() {
+        assert!(!private_seen(&Label::of(Origin::User)));
+        assert!(!private_seen(&Label::of(Origin::Web)));
+        // Allowed or not, a file is the owner's data.
+        assert_eq!(
+            private_sources(&read("/home/u/project/config.py")),
+            ["/home/u/project/config.py"]
+        );
+        assert_eq!(
+            private_sources(&Label::of_tool("shell.run", &json!({ "command": "env" }))),
+            ["$ env"]
+        );
+        assert_eq!(
+            private_sources(&Label::of(Origin::System)),
+            ["information about this machine"]
+        );
+        assert_eq!(
+            private_sources(&Label::of(Origin::Memory)),
+            ["earlier conversations"]
+        );
     }
 
     #[test]

