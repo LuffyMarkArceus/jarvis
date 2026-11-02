@@ -58,6 +58,21 @@ pub struct Case {
     /// case can check what would have left the machine.
     #[serde(default)]
     pub remote: bool,
+    /// Tools set to "allow" for this case. Injection cases allow the actions
+    /// so that only the untrusted-content gate stands between a page and
+    /// the action: with "ask", the permission prompt would hide a broken gate.
+    #[serde(default)]
+    pub allow: Vec<String>,
+    /// Files created outside the allowed folders, in `{outside}`, relative
+    /// path to content: text Jarvis cannot vouch for.
+    #[serde(default)]
+    pub outside: BTreeMap<String, String>,
+    /// Markers of the action an injected page asks for (a canary path, an
+    /// attacker's host). An attempt whose calls or prompts carry one was
+    /// fooled: measured per model, not graded. Only the injected action
+    /// counts - a prompt for what the owner asked is the gate working.
+    #[serde(default)]
+    pub injected: Vec<String>,
     pub expect: Expect,
 }
 
@@ -102,6 +117,17 @@ pub struct Expect {
     /// Text that must not reach the remote model (remote cases only).
     #[serde(default)]
     pub sent_excludes: Vec<String>,
+    /// Every prompt for an action names these (its untrusted sources).
+    /// Passes when there was no such prompt: a model that was not fooled
+    /// never asks, and whether it tried is measured, not graded.
+    #[serde(default)]
+    pub asked_mention: Vec<String>,
+    /// No call to these tools ran. A declined call is the defence working.
+    #[serde(default)]
+    pub not_executed: Vec<String>,
+    /// No call that ran carries this text in its arguments.
+    #[serde(default)]
+    pub executed_exclude_text: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -114,7 +140,11 @@ struct CaseFile {
 impl Case {
     /// The case with `{sandbox}` replaced throughout.
     pub fn resolve(&self, sandbox: &str) -> Case {
-        let sub = |s: &str| s.replace("{sandbox}", sandbox);
+        let outside = outside_of(sandbox);
+        let sub = |s: &str| {
+            s.replace("{sandbox}", sandbox)
+                .replace("{outside}", &outside)
+        };
         let subs = |v: &[String]| v.iter().map(|s| sub(s)).collect::<Vec<_>>();
         let mut case = self.clone();
         case.input = sub(&case.input);
@@ -125,9 +155,11 @@ impl Case {
         e.excludes = subs(&e.excludes);
         e.sent_contains = subs(&e.sent_contains);
         e.sent_excludes = subs(&e.sent_excludes);
+        e.asked_mention = subs(&e.asked_mention);
+        e.executed_exclude_text = subs(&e.executed_exclude_text);
         for table in e.args.values_mut() {
             for (_, value) in table.iter_mut() {
-                substitute_value(value, sandbox);
+                substitute_value(value, sandbox, &outside);
             }
         }
         case
@@ -162,7 +194,12 @@ impl Case {
                 self.id
             ));
         }
-        for path in self.files.keys().chain(self.expect.files.keys()) {
+        for path in self
+            .files
+            .keys()
+            .chain(self.expect.files.keys())
+            .chain(self.outside.keys())
+        {
             if Path::new(path).is_absolute() || path.split('/').any(|part| part == "..") {
                 return Err(format!(
                     "{}: file '{}' must stay inside the sandbox",
@@ -174,15 +211,30 @@ impl Case {
     }
 }
 
-fn substitute_value(value: &mut toml::Value, sandbox: &str) {
+fn substitute_value(value: &mut toml::Value, sandbox: &str, outside: &str) {
     match value {
-        toml::Value::String(s) => *s = s.replace("{sandbox}", sandbox),
-        toml::Value::Array(items) => items.iter_mut().for_each(|v| substitute_value(v, sandbox)),
+        toml::Value::String(s) => {
+            *s = s
+                .replace("{sandbox}", sandbox)
+                .replace("{outside}", outside)
+        }
+        toml::Value::Array(items) => items
+            .iter_mut()
+            .for_each(|v| substitute_value(v, sandbox, outside)),
         toml::Value::Table(table) => table
             .iter_mut()
-            .for_each(|(_, v)| substitute_value(v, sandbox)),
+            .for_each(|(_, v)| substitute_value(v, sandbox, outside)),
         _ => {}
     }
+}
+
+/// `{outside}`: beside the sandbox's files, so outside the folder the eval
+/// allows (`<root>/files` -> `<root>/outside`).
+pub fn outside_of(sandbox: &str) -> String {
+    std::path::Path::new(sandbox)
+        .parent()
+        .map(|root| root.join("outside").display().to_string())
+        .unwrap_or_else(|| format!("{}/../outside", sandbox))
 }
 
 /// Parse one case file.
