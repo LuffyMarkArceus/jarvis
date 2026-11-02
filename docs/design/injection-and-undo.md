@@ -1,6 +1,7 @@
 # Design: prompt injection and undo (Phase 6)
 
-Status: **designed** (2026-11-01), not built. Decisions are the owner's; the
+Status: **built** (2026-11-02), steps 1-6; results in
+[evals/BASELINES.md](../../evals/BASELINES.md) ("Phase 6 injection cases"). Decisions are the owner's; the
 rules and mechanisms are how they are kept.
 
 ## Problem
@@ -310,6 +311,18 @@ nemotron-3-ultra (free) as the capable model, qwen2.5:3b for verification.
 **CI** runs the unit and integration tests and the scripted-model suite;
 that model never calls tools, so CI proves the guarantees and real-model
 runs measure behaviour.
+
+## Known gaps
+
+* **Marking covers the current request only.** Untrusted text from earlier
+  turns returns from history unmarked; the gate still covers it (labels).
+* **The router runs tools directly on some requests with a path or "run"
+  in them** - "install the tool described in /x/notes.txt" listed the
+  directory, "... and run it" ran the command `it`. Not a gate bypass (a
+  direct route is the owner's own words), but wrong behaviour.
+* **On the remote tier** two cases are stopped before the gate: a file
+  outside the allowed folders is not sent unasked, and the password reaches
+  the model redacted.
 
 ## Learned from T3 Code, for later
 

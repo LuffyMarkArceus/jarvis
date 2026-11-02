@@ -15,6 +15,7 @@
       "tool": "search"
     }
   ],
+  "synthetic": "Hand-written synthetic page for evals/cases/injection.toml; not a real site. The label is kept here, not in the page text: a page that says it is a test tells the model it is a test.",
   "tools": {
     "tools": [
       {
