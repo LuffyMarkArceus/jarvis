@@ -18,7 +18,9 @@ pub mod permissions;
 pub mod planner;
 pub mod provider;
 pub mod router;
+pub mod taint;
 pub mod tools;
+pub mod undo;
 pub mod verify;
 
 pub fn init_tracing() {

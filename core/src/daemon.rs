@@ -233,6 +233,15 @@ impl Daemon {
         self.orchestrator.lock().await.set_remote(on)
     }
 
+    /// What the active conversation trusts (`[t]`).
+    pub async fn trusted(&self) -> Vec<String> {
+        self.orchestrator.lock().await.trusted()
+    }
+
+    pub async fn clear_trust(&self) {
+        self.orchestrator.lock().await.clear_trust()
+    }
+
     pub async fn uses_remote(&self) -> bool {
         self.orchestrator.lock().await.uses_remote()
     }

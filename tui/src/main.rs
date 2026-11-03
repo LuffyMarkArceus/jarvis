@@ -73,7 +73,14 @@ async fn main() -> Result<()> {
             }
         }
 
-        perform(actions.drain(..), &mut app, &mut client, &socket, &event_tx);
+        perform(
+            actions.drain(..),
+            &mut app,
+            &mut client,
+            &socket,
+            &event_tx,
+            &config,
+        );
     }
 
     Ok(())
@@ -92,16 +99,68 @@ fn handle_input_event(app: &mut App, event: Event) -> Vec<Action> {
     }
 }
 
+/// `/undo`: read and change the undo folder directly, like `jarvis undo`,
+/// so it works whether or not the daemon is running.
+fn undo(action: Action, app: &mut App, config: &Config) {
+    use jarvis_core::undo::{self, UndoPlan, UndoStore};
+    let store = match UndoStore::for_config(config) {
+        Ok(store) => store,
+        Err(e) => return app.note(Entry::error(format!("Undo is unavailable: {}", e))),
+    };
+    match action {
+        Action::UndoList => match store.list() {
+            Ok(changes) if changes.is_empty() => app.note(Entry::system("No changes to undo.")),
+            Ok(changes) => {
+                let lines: Vec<String> = changes.iter().take(20).map(undo::list_line).collect();
+                app.note(Entry::system(lines.join("\n")));
+            }
+            Err(e) => app.note(Entry::error(e.to_string())),
+        },
+        Action::UndoPreview(id) => match store.plan(id.as_deref(), false) {
+            Ok(UndoPlan::Refuse { reason, .. }) => app.note(Entry::system(format!(
+                "Cannot undo: {} (`jarvis undo --force` in a terminal overrides)",
+                reason
+            ))),
+            Ok(ref plan @ (UndoPlan::Restore(ref change) | UndoPlan::Remove(ref change))) => {
+                app.offer_undo(change.id.clone(), undo::describe(plan))
+            }
+            Err(e) => app.note(Entry::system(format!("Nothing to undo: {}.", e))),
+        },
+        Action::UndoApply(id) => {
+            let applied = store.plan(Some(&id), false).and_then(|plan| match plan {
+                UndoPlan::Refuse { reason, .. } => {
+                    Err(jarvis_core::error::JarvisError::Tool(reason))
+                }
+                plan => {
+                    let audit = jarvis_core::permissions::PermissionManager::new(config)?;
+                    undo::apply_recorded(&store, &plan, false, &audit)
+                }
+            });
+            app.note(match applied {
+                Ok(()) => Entry::system(
+                    "Undone. /undo list shows it; the undo itself can be undone by its id.",
+                ),
+                Err(e) => Entry::error(format!("Not undone: {}", e)),
+            });
+        }
+        _ => {}
+    }
+}
+
 fn perform(
     actions: impl IntoIterator<Item = Action>,
     app: &mut App,
     client: &mut Option<Client>,
     socket: &Path,
     event_tx: &mpsc::UnboundedSender<ClientEvent>,
+    config: &Config,
 ) {
     for action in actions {
         match action {
             Action::Quit => app.should_quit = true,
+            Action::UndoPreview(_) | Action::UndoList | Action::UndoApply(_) => {
+                undo(action, app, config)
+            }
             Action::Reconnect => {
                 // Dropping the old client aborts its socket task.
                 *client = None;

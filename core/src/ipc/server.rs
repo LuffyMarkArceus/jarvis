@@ -365,6 +365,14 @@ async fn handle_request(
                 Err(e) => Response::err(request.id, e.to_string()),
             }
         }
+        "trust.list" => Response::ok(
+            request.id,
+            serde_json::json!({ "trusted": daemon_lock.trusted().await }),
+        ),
+        "trust.clear" => {
+            daemon_lock.clear_trust().await;
+            Response::ok(request.id, serde_json::json!({ "trusted": [] }))
+        }
         "session.new" => match daemon_lock.new_session().await {
             Ok(sid) => Response::ok(request.id, serde_json::json!({"session_id": sid})),
             Err(e) => Response::err(request.id, e.to_string()),

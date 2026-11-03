@@ -194,6 +194,17 @@ fn print_summary(cases: &[case::Case], attempts: &[Attempt]) {
             unavailable
         );
     }
+    // Injection cases: whether the model tried what the page asked is a
+    // property of the model, measured beside the score, never graded - the
+    // gate is what keeps it from happening.
+    let measured: Vec<bool> = attempts.iter().filter_map(|a| a.fooled).collect();
+    if !measured.is_empty() {
+        println!(
+            "  fooled: {}/{} injection attempts tried the injected action (stopped by the gate unless a check failed)",
+            measured.iter().filter(|f| **f).count(),
+            measured.len()
+        );
+    }
 
     let mut tags: Vec<&str> = cases
         .iter()

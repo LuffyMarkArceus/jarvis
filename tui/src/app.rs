@@ -160,6 +160,7 @@ pub enum Pending {
     Status,
     Tools,
     Tier,
+    Trust,
 }
 
 /// What `main` has to do after a key press or daemon event.
@@ -182,6 +183,12 @@ pub enum Action {
     },
     /// Throw away the connection and connect again.
     Reconnect,
+    /// Show what undoing the latest change (or this id) would do. Read from
+    /// the undo folder directly, so it works with the daemon stopped.
+    UndoPreview(Option<String>),
+    UndoList,
+    /// Undo exactly the change that was previewed.
+    UndoApply(String),
     Quit,
 }
 
@@ -233,6 +240,10 @@ pub enum Command {
     Recall(String),
     /// `/remote` (true) or `/local` (false).
     Tier(bool),
+    /// `/undo`, `/undo list`, `/undo yes`, `/undo <id>`.
+    Undo(String),
+    /// `/trust`, `/trust clear`.
+    Trust(String),
     Clear,
     Quit,
 }
@@ -252,6 +263,8 @@ pub fn parse_command(text: &str) -> Option<Command> {
         "/status" => Command::Status,
         "/remote" => Command::Tier(true),
         "/local" => Command::Tier(false),
+        "/undo" => Command::Undo(rest),
+        "/trust" => Command::Trust(rest),
         "/tools" => Command::Tools,
         "/session" => Command::Session,
         "/clear" => Command::Clear,
@@ -278,6 +291,8 @@ pub struct App {
     pub model: String,
     pub overlay: Option<Overlay>,
     pub pending: Option<Pending>,
+    /// The change `/undo` showed; `/undo yes` undoes this one and no other.
+    undo_offer: Option<String>,
     pub pending_id: Option<Uuid>,
     /// The assistant entry being built from chunks, if any.
     streaming: Option<StreamingTurn>,
@@ -303,6 +318,7 @@ impl App {
             model,
             overlay: None,
             pending: None,
+            undo_offer: None,
             pending_id: None,
             streaming: None,
             cancelling: false,
@@ -519,7 +535,39 @@ impl App {
                 params: json!({ "tier": if remote { "remote" } else { "local" } }),
                 pending: Pending::Tier,
             }],
+            Command::Undo(arg) => match arg.as_str() {
+                "" => vec![Action::UndoPreview(None)],
+                "list" => vec![Action::UndoList],
+                "yes" => match self.undo_offer.take() {
+                    Some(id) => vec![Action::UndoApply(id)],
+                    None => {
+                        self.note(Entry::system(
+                            "Nothing to confirm: type /undo first to see what would be undone.",
+                        ));
+                        vec![]
+                    }
+                },
+                id => vec![Action::UndoPreview(Some(id.to_string()))],
+            },
+            Command::Trust(arg) => vec![Action::Request {
+                method: if arg == "clear" {
+                    "trust.clear"
+                } else {
+                    "trust.list"
+                },
+                params: json!({}),
+                pending: Pending::Trust,
+            }],
         }
+    }
+
+    /// `/undo` found `id` to undo: show what it would do and wait for yes.
+    pub fn offer_undo(&mut self, id: String, question: String) {
+        self.undo_offer = Some(id);
+        self.note(Entry::system(format!(
+            "{}\nType /undo yes to do it.",
+            question
+        )));
     }
 
     fn switch_request(&mut self, id: &str) -> Vec<Action> {
@@ -701,6 +749,23 @@ impl App {
                 self.note(Entry::system(format!(
                     "Daemon {status} · session {session} · {tools} tools"
                 )));
+                vec![]
+            }
+            Some(Pending::Trust) => {
+                let names: Vec<&str> = result["trusted"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect();
+                self.note(Entry::system(if names.is_empty() {
+                    "Nothing is trusted in this conversation: actions after reading pages or files outside your allowed folders ask first.".to_string()
+                } else {
+                    format!(
+                        "Trusted in this conversation (/trust clear to forget):\n  {}",
+                        names.join("\n  ")
+                    )
+                }));
                 vec![]
             }
             Some(Pending::Tier) => {
@@ -1187,6 +1252,92 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].title, "First");
         assert_eq!(rows[1].message_count, 0);
+    }
+
+    fn typed(app: &mut App, text: &str) -> Vec<Action> {
+        app.input.set(text);
+        app.submit()
+    }
+
+    #[test]
+    fn undo_previews_first_and_applies_only_what_was_shown() {
+        let mut app = App::new("test".into());
+        assert!(matches!(
+            typed(&mut app, "/undo").as_slice(),
+            [Action::UndoPreview(None)]
+        ));
+        assert!(matches!(
+            typed(&mut app, "/undo list").as_slice(),
+            [Action::UndoList]
+        ));
+        assert!(matches!(
+            typed(&mut app, "/undo 2026110").as_slice(),
+            [Action::UndoPreview(Some(id))] if id == "2026110"
+        ));
+
+        // Nothing previewed: nothing to confirm.
+        assert!(typed(&mut app, "/undo yes").is_empty());
+        assert!(app.entries.last().unwrap().text.contains("/undo first"));
+
+        // The id shown is the id undone, even if a newer change lands
+        // between the preview and the yes.
+        app.offer_undo(
+            "abc".into(),
+            "Restore notes.md to its version from 10:15?".into(),
+        );
+        assert!(app.entries.last().unwrap().text.contains("/undo yes"));
+        assert!(matches!(
+            typed(&mut app, "/undo yes").as_slice(),
+            [Action::UndoApply(id)] if id == "abc"
+        ));
+        assert!(
+            typed(&mut app, "/undo yes").is_empty(),
+            "one yes per preview"
+        );
+    }
+
+    #[test]
+    fn trust_can_be_listed_and_cleared() {
+        let mut app = App::new("test".into());
+        assert!(matches!(
+            typed(&mut app, "/trust").as_slice(),
+            [Action::Request {
+                method: "trust.list",
+                pending: Pending::Trust,
+                ..
+            }]
+        ));
+        assert!(matches!(
+            typed(&mut app, "/trust clear").as_slice(),
+            [Action::Request {
+                method: "trust.clear",
+                pending: Pending::Trust,
+                ..
+            }]
+        ));
+
+        let request = Request::new("trust.list", json!({}));
+        app.begin_request(request.id, Pending::Trust);
+        app.on_response(Response::ok(
+            request.id,
+            json!({ "trusted": ["https://a.example/"] }),
+        ));
+        assert!(app
+            .entries
+            .last()
+            .unwrap()
+            .text
+            .contains("https://a.example/"));
+
+        let request = Request::new("trust.clear", json!({}));
+        app.begin_request(request.id, Pending::Trust);
+        app.on_response(Response::ok(request.id, json!({ "trusted": [] })));
+        assert!(app
+            .entries
+            .last()
+            .unwrap()
+            .text
+            .contains("Nothing is trusted"));
     }
 
     #[test]

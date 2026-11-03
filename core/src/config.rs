@@ -20,6 +20,54 @@ pub struct Config {
     /// An optional second, remote model. `[model]` stays the local one.
     #[serde(default)]
     pub remote: Option<RemoteConfig>,
+    /// Copies kept so Jarvis's file changes can be undone.
+    #[serde(default)]
+    pub undo: UndoConfig,
+    #[serde(default)]
+    pub security: SecurityConfig,
+}
+
+/// `[security]`: defences against instructions in text Jarvis reads.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct SecurityConfig {
+    /// Wrap untrusted tool output in `<untrusted>` and tell the model it is
+    /// data. Off only to measure what it is worth (`jarvis eval`); the
+    /// confirmation gate works either way.
+    pub mark_untrusted: bool,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        SecurityConfig {
+            mark_untrusted: true,
+        }
+    }
+}
+
+/// `[undo]`: where copies are kept and for how long.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct UndoConfig {
+    /// Default `<data_dir>/undo`. Copies of edited files can be secrets, so
+    /// keep this on a filesystem that enforces permissions (not NTFS).
+    pub dir: Option<PathBuf>,
+    pub max_age_days: u64,
+    /// Larger files are changed without a copy, and the prompt says so.
+    pub max_file_bytes: u64,
+    /// The whole folder; the oldest copies go first.
+    pub max_total_bytes: u64,
+}
+
+impl Default for UndoConfig {
+    fn default() -> Self {
+        UndoConfig {
+            dir: None,
+            max_age_days: 7,
+            max_file_bytes: 10 * 1024 * 1024,
+            max_total_bytes: 500 * 1024 * 1024,
+        }
+    }
 }
 
 /// The remote tier: the same settings as `[model]`, plus whether new

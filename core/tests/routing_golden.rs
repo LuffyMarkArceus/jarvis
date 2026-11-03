@@ -108,6 +108,11 @@ const GOLDEN: &[(&str, Expect)] = &[
         "what does /etc/hostname contain",
         Expect::Tool("filesystem.read"),
     ),
+    // Undo is the owner's command (`jarvis undo`), not the model's: a model
+    // asked to undo could only rewrite the file from memory.
+    ("undo that", Expect::Direct),
+    ("please undo the last change", Expect::Direct),
+    ("can you undo what you just did?", Expect::Direct),
     // ---- ambiguous machine actions --------------------------------------
     ("create a file called notes.md", Expect::Model),
     // A path does not make a change into a read. These listed the directory
