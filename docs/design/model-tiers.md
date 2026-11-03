@@ -25,7 +25,7 @@ may leave the machine with it.
 4. Nothing is silent: no quiet fallback, no quiet redaction (learning log #5).
 
 Non-goals for now: automatic per-request routing by difficulty, spending
-caps, remote machines (Phase 10).
+caps, remote machines (Phase 11).
 
 ## Decisions
 
@@ -115,9 +115,9 @@ This turn would send file contents (/home/u/notes/todo.txt) to openrouter.
 ```
 
 * "Always" writes the allow-list, so the next turn does not ask.
-* A turn with nobody to ask (scheduled jobs, Phase 8; the eval harness)
+* A turn with nobody to ask (scheduled jobs, Phase 7; the eval harness)
   answers locally. Choosing that default is the reason this exists before
-  Phase 8.
+  Phase 7.
 * `never_paths` are not offered: there is nothing to approve.
 
 ## Providers and their data policy

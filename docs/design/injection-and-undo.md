@@ -338,7 +338,7 @@ choice, and recording why a prompt appeared despite "allow". Not built yet:
 
 * **A ceiling for work Jarvis starts.** Their runtime modes are one ordered
   ladder, and work a thread starts cannot run above the thread's mode
-  (`DispatchModeLimit`). The model for Phase 8: a scheduled job runs at a
+  (`DispatchModeLimit`). The model for Phase 7 (proactive behaviour): a scheduled job runs at a
   set level, and nothing it starts goes higher.
 * **Undoable commands inside a git repository**: a checkpoint through a
   temporary index (`GIT_INDEX_FILE`) under a hidden ref, outside branches
