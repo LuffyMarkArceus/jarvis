@@ -180,6 +180,15 @@ fn call_key(name: &str, args: &Value) -> String {
     format!("{}\u{0}{}", name, args)
 }
 
+/// How Jarvis's own reports of what ran begin (`render_execution_report`,
+/// `render_blocked_report`). They show tool output as such - not a model's
+/// advice - so answer checks that judge what the model said skip them.
+pub const REPORT_OPENINGS: &[&str] = &[
+    "Here is what actually happened:",
+    "I ran part of your request, but one action was not completed.",
+    "I did not run that - ",
+];
+
 /// The answer to "undo that": undo is the owner's command, never the
 /// model's (an injected page could otherwise ask to undo the owner's fix).
 const UNDO_FROM_CHAT: &str = "I can't undo from chat - run `jarvis undo` (or /undo in the TUI) to see and reverse Jarvis's last file change.";
@@ -2949,7 +2958,8 @@ fn render_execution_report(trace: &[ToolOutcome]) -> String {
         return "I could not complete that request.".to_string();
     }
 
-    let mut out = String::from("Here is what actually happened:\n\n");
+    let mut out = String::from(REPORT_OPENINGS[0]);
+    out.push_str("\n\n");
     for t in trace {
         out.push_str(&format!("  {}\n", t.name));
         out.push_str(&format!("    args:   {}\n", compact_args(&t.args)));
@@ -3450,6 +3460,41 @@ mod tests {
             .unwrap();
         assert!(user.asked.lock().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn every_report_starts_with_a_listed_opening() {
+        let outcome = |status: OutcomeStatus| ToolOutcome {
+            name: "shell.run".into(),
+            args: json!({ "command": "ls" }),
+            status,
+            output: "x".into(),
+            result: None,
+            pattern: None,
+        };
+        let mut reports = vec![render_execution_report(&[outcome(
+            OutcomeStatus::Succeeded,
+        )])];
+        for status in [
+            OutcomeStatus::Declined,
+            OutcomeStatus::Denied,
+            OutcomeStatus::Withheld,
+            OutcomeStatus::Untrusted,
+            OutcomeStatus::NeedsConfirmation,
+        ] {
+            reports.push(render_blocked_report(&[outcome(status.clone())]));
+            reports.push(render_blocked_report(&[
+                outcome(OutcomeStatus::Succeeded),
+                outcome(status),
+            ]));
+        }
+        for report in reports {
+            assert!(
+                REPORT_OPENINGS.iter().any(|o| report.starts_with(o)),
+                "unlisted opening: {}",
+                report.lines().next().unwrap_or("")
+            );
+        }
     }
 
     #[tokio::test]
