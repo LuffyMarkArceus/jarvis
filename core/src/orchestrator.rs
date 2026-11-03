@@ -1536,7 +1536,35 @@ impl Orchestrator {
                 untrusted.push((names(&sources), &message.content));
             }
         }
-        match taint::relay_note(&taint::relayed(&answer, &untrusted, &trusted)) {
+        // Pages read or found are citations, not instructions: fetched
+        // addresses (this turn's calls, and the sources of web labels in
+        // the conversation) and every address a search listed.
+        let mut cited: Vec<String> = Vec::new();
+        for outcome in trace {
+            if let Some(url) = outcome.args.get("url").and_then(Value::as_str) {
+                cited.push(url.to_string());
+            }
+            if outcome.name.starts_with("mcp.search.") {
+                cited.extend(taint::urls_in(&outcome.output));
+            }
+        }
+        for (message, label) in messages.iter().zip(egress::label(messages)) {
+            cited.extend(
+                label
+                    .sources
+                    .iter()
+                    .filter(|s| s.starts_with("http"))
+                    .cloned(),
+            );
+            if message
+                .tool_name
+                .as_deref()
+                .is_some_and(|t| t.starts_with("mcp.search."))
+            {
+                cited.extend(taint::urls_in(&message.content));
+            }
+        }
+        match taint::relay_note(&taint::relayed(&answer, &untrusted, &trusted, &cited)) {
             Some(note) => format!("{}\n\n{}", answer.trim_end(), note),
             None => answer,
         }
