@@ -1308,7 +1308,7 @@ impl Orchestrator {
                     render_execution_report(&trace)
                 });
             }
-            return Ok(self.grounded_answer(answer, input, &trace, plan.web));
+            return Ok(self.grounded_answer(answer, input, &trace, &messages, plan.web));
         }
 
         // Out of rounds, or going in circles. If a tool found anything, ask
@@ -1345,7 +1345,7 @@ impl Orchestrator {
                     || parser::looks_like_tool_call(content);
                 let answer = final_answer(content);
                 if !calls_tool && !answer.is_empty() {
-                    return Ok(self.grounded_answer(answer, input, &trace, plan.web));
+                    return Ok(self.grounded_answer(answer, input, &trace, &messages, plan.web));
                 }
             }
         }
@@ -1456,8 +1456,10 @@ impl Orchestrator {
         answer: String,
         input: &str,
         trace: &[ToolOutcome],
+        messages: &[ChatMessage],
         web: bool,
     ) -> String {
+        let answer = self.relay_checked(answer, input, trace, messages);
         let mut sources: Vec<&str> = trace
             .iter()
             .filter(|o| o.status == OutcomeStatus::Succeeded)
@@ -1479,6 +1481,56 @@ impl Orchestrator {
 
         sources.push(input);
         verify::with_caveat(answer, &sources)
+    }
+
+    /// `answer` with a note when it repeats a command or data-carrying
+    /// address that came from untrusted content - what this request read,
+    /// or untrusted messages earlier in the conversation - and from nothing
+    /// the owner wrote or allowed. The gate guards Jarvis's actions; this
+    /// covers the answer handing the attacker's instruction to the owner.
+    fn relay_checked(
+        &self,
+        answer: String,
+        input: &str,
+        trace: &[ToolOutcome],
+        messages: &[ChatMessage],
+    ) -> String {
+        let policy = self.egress_policy();
+        let names = |sources: &[Source]| -> String {
+            sources
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let mut untrusted: Vec<(String, &str)> = Vec::new();
+        let mut trusted: Vec<&str> = vec![input];
+        for outcome in trace
+            .iter()
+            .filter(|o| o.status == OutcomeStatus::Succeeded)
+        {
+            let sources =
+                taint::untrusted_sources(&Label::of_tool(&outcome.name, &outcome.args), &policy);
+            if sources.is_empty() {
+                trusted.push(&outcome.output);
+            } else {
+                untrusted.push((names(&sources), &outcome.output));
+            }
+        }
+        for (message, label) in messages.iter().zip(egress::label(messages)) {
+            let sources = taint::untrusted_sources(&label, &policy);
+            if sources.is_empty() {
+                if message.role == "user" {
+                    trusted.push(&message.content);
+                }
+            } else {
+                untrusted.push((names(&sources), &message.content));
+            }
+        }
+        match taint::relay_note(&taint::relayed(&answer, &untrusted, &trusted)) {
+            Some(note) => format!("{}\n\n{}", answer.trim_end(), note),
+            None => answer,
+        }
     }
 
     // ---------------------------------------------------------------- prompts
