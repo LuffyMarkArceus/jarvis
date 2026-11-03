@@ -1,0 +1,80 @@
+# Status
+
+Where Jarvis is, what is open, and where to read more. Updated at the end of
+every phase, as part of finishing it. The plan ahead is in
+[ROADMAP.md](ROADMAP.md).
+
+Last updated: 2026-11-03, after Phase 6 (main `4ac08fa`).
+
+## At a glance
+
+| | |
+| --- | --- |
+| Code | Rust workspace (`core`, `cli`, `tui`, `common`) + Python MCP sidecars; ~25k lines of Rust |
+| Tests | 436 (`cargo test --workspace`), CI on every push |
+| Evals | 53 cases (`jarvis eval`); qwen2.5:3b 90.6%, llama3.2:1b 81.1% ([BASELINES](../evals/BASELINES.md)) |
+| Models | local: Ollama (llama3.2:1b for development, qwen2.5:3b for verification); remote: OpenRouter free tier (nemotron-3-ultra) |
+| Lessons | 26 entries in the [learning log](learning/README.md) |
+
+## Phases
+
+Phases 1-4 are reconstructed from the git history; their plan was made in
+earlier sessions and is not in the repository.
+
+| Phase | What it gave Jarvis | Done | Read |
+| --- | --- | --- | --- |
+| 0 | Scaffolding: Rust daemon, CLI, TUI skeleton, Ollama | 2026-10-21 | - |
+| 1 | Memory (SQLite), daemon + Unix-socket IPC, sessions | 2026-10-21 | README "Memory" |
+| 2 | Permissions and audit log, filesystem/shell/system tools, agent loop, deterministic router | 2026-10-22 | README "How a turn is decided" |
+| 3 | Terminal UI, streaming and cancel, cross-session recall (FTS5), MCP client | 2026-10-24 | README |
+| 4 | Web search and fetch sidecars, answer grounding, recall in the prompt, provider boundary | 2026-10-26 | README "Web questions" |
+| 5a | Eval harness: `jarvis eval`, taped web, `eval diff`, baselines | 2026-10-27 | [evals/README](../evals/README.md) |
+| 5b | Local and remote model tiers, privacy rules (labels, redaction, allow-lists), footer | 2026-10-28 | [model-tiers](design/model-tiers.md) |
+| 5b+ | Follow-ups: round limit per tier, repeat guard, closing answer, web-call egress check, frozen web pages | 2026-10-28 | learning #20-22 |
+| 6 | Prompt-injection gate, exfiltration rule, undo, marking, injection evals | 2026-11-02 | [injection-and-undo](design/injection-and-undo.md) |
+
+## Open items
+
+The order they will be done in is in the roadmap.
+
+**Phase 6 follow-ups**
+
+* Answers can relay an injected instruction to the owner (qwen did, 9/9) -
+  design approved (note every relayed command, option A), not built.
+* Router misroutes: "... and run it" runs the command `it`; a path in a
+  sentence triggers an unfitting tool ("install the tool described in
+  /x/notes.txt" lists the directory).
+* A reconnecting TUI can resend a request and repeat an approved write -
+  fix with request ids (T3 Code's command receipts).
+* Marking covers the current request only; earlier turns come back
+  unmarked (the gate still covers them).
+* The edit tool reads a whole file into memory; the TUI's undo handler has
+  no test of its own.
+* Not built from the original Phase 6 plan: dry-run previews for batch
+  operations, and a safety copy before deletes (deletes go through
+  `shell.run`, which undo cannot reverse).
+
+**Carried over**
+
+* `memory.correction` and `memory.followup_file` fail on every qwen run.
+* Names and free-text personal details are not redacted.
+* A redacted remote answer is not streamed.
+* Answer checks (`contains`) can match text in the raw tool log printed
+  when rounds run out.
+* `core/src/orchestrator.rs` is 3,400 lines and does too much.
+
+**For the owner**
+
+* Cap the OpenRouter key's spend at about $1.
+* `/home/shrey/~/.config/ums-deploy.env` (2026-10-06) is not Jarvis's; check it.
+
+## Where things are
+
+| To learn about | Read |
+| --- | --- |
+| Using Jarvis | [README](../README.md) |
+| Why a design is the way it is | [docs/design/](design/) |
+| What each phase taught, in interview form | [docs/learning/README.md](learning/README.md) |
+| Model scores over time | [evals/BASELINES.md](../evals/BASELINES.md) |
+| Writing and running evals | [evals/README.md](../evals/README.md) |
+| How Phase 6 was built, task by task | [docs/superpowers/plans/](superpowers/plans/) |

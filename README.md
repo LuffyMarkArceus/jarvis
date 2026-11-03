@@ -5,11 +5,12 @@ Python sidecars + TypeScript UI.
 
 ## Status
 
-Phase 5 - an eval harness (`jarvis eval`, see [evals/README.md](evals/README.md))
-that measures answers per model, and privacy rules for remote models
-(redaction, per-folder allow-lists, a footer on every answer), on top of
-Phase 4's web search, answer grounding, recall across sessions and provider
-abstraction (Ollama and any OpenAI-compatible server).
+Phase 6 is done: prompt-injection defences (actions after untrusted content
+ask, naming the source; data-carrying fetches ask; untrusted text is
+marked) and undo for Jarvis's file changes, on top of Phase 5's eval
+harness and local/remote model tiers with privacy rules. What is open and
+where everything is: [docs/STATUS.md](docs/STATUS.md). What comes next:
+[docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Build
 
