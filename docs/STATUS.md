@@ -40,7 +40,8 @@ The order they will be done in is in the roadmap.
 **Phase 6 follow-ups**
 
 * Relayed instructions: tool-turn answers get a note. A plain chat turn
-  that relays from history does not yet (its answer streams).
+  that relays from history does not yet (its answer streams). A link a page
+  mentions gets the note too (`ctrl.research`, qwen 3/3): watch for noise in use.
 * Marking covers the current request only; earlier turns come back
   unmarked (the gate still covers them).
 * The edit tool reads a whole file into memory; the TUI's undo handler has

@@ -320,6 +320,9 @@ runs measure behaviour.
   command in code, or an address from untrusted text that is not a page Jarvis
   read or a search found. Not covered: a plain chat turn relaying from history,
   whose answer streams, and a command written as prose with no address in it.
+  Its cost: a link a page mentions and the answer passes on gets the note too
+  (qwen, `ctrl.research`, 3 of 3), because it has the same shape as an
+  attacker's address.
 * **Marking covers the current request only.** Untrusted text from earlier
   turns returns from history unmarked; the gate still covers it (labels).
 * **On the remote tier** two cases are stopped before the gate: a file
