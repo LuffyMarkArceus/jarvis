@@ -56,7 +56,6 @@ The order they will be done in is in the roadmap.
 * A redacted remote answer is not streamed.
 * Answer checks (`contains`) can match text in the raw tool log printed
   when rounds run out.
-* `core/src/orchestrator.rs` is 3,400 lines and does too much.
 
 **For the owner**
 

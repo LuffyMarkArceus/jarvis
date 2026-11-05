@@ -31,14 +31,17 @@ machines) 11.
    which client (CLI, TUI, a future UI, another machine) or which transport
    (Unix socket today) is on the other end.
 
-## Milestone 6.1 - harden Phase 6 (next)
+## Milestone 6.1 - harden Phase 6 (built; merges after verification)
 
-| # | Item | Why now |
-| --- | --- | --- |
-| 1 | Relay warning: a note when an answer repeats a command or data-carrying address that came only from untrusted content (option A: every relayed command) | qwen handed the owner the attacker's instructions in 9/9 attempts; design approved |
-| 2 | Router misroutes: "... and run it" runs `it`; a path in a sentence triggers an unfitting tool | Wrong behaviour, and it made the injection evals harder to write |
-| 3 | A request is never run twice: `jarvis ask` re-ran a request in direct mode if the daemon died mid-request. Done: once sent, a lost connection is reported, not retried | An approved write could run twice |
-| 4 | Split `orchestrator.rs` (3,400 lines) into the turn loop, web steps, the egress and injection gates, and tool execution | Every phase has added to it; Phase 7 adds scheduled turns. After 1-3, so it moves tested code |
+1. Relay warning: a note when an answer repeats a command or address that came
+   only from untrusted content. qwen handed the owner the attacker's
+   instructions in 9/9 attempts.
+2. Router: "run" is a command only at the start of a request and only with a
+   command after it; a path is a direct read or listing only when that is all
+   that was asked.
+3. A request is never run twice: `jarvis ask` re-ran a request in direct mode if
+   the daemon died mid-request.
+4. `orchestrator.rs` (3,500 lines) split by what each part does.
 
 ## Milestone 6.2 - small items (after 6.1)
 
