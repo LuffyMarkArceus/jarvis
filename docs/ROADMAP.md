@@ -31,7 +31,7 @@ machines) 11.
    which client (CLI, TUI, a future UI, another machine) or which transport
    (Unix socket today) is on the other end.
 
-## Milestone 6.1 - harden Phase 6 (built; merges after verification)
+## Milestone 6.1 - harden Phase 6 (done, 2026-11-05, PR #2)
 
 1. Relay warning: a note when an answer repeats a command or address that came
    only from untrusted content. qwen handed the owner the attacker's
@@ -57,6 +57,8 @@ machines) 11.
 * The two memory cases that fail on every qwen run
   (`memory.correction`, `memory.followup_file`).
 * Answer checks that match text in the raw tool log.
+* An eval attempt that times out while the provider stalls reads as a wrong
+  route; report it as no answer, as `unavailable` does for HTTP errors.
 
 ## Proposed: a week of real use (before Phase 7)
 

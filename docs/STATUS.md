@@ -4,17 +4,17 @@ Where Jarvis is, what is open, and where to read more. Updated at the end of
 every phase, as part of finishing it. The plan ahead is in
 [ROADMAP.md](ROADMAP.md).
 
-Last updated: 2026-11-03, after Phase 6 (main `4ac08fa`).
+Last updated: 2026-11-05, after Milestone 6.1 (main `ee9bc63`).
 
 ## At a glance
 
 | | |
 | --- | --- |
 | Code | Rust workspace (`core`, `cli`, `tui`, `common`) + Python MCP sidecars; ~25k lines of Rust |
-| Tests | 436 (`cargo test --workspace`), CI on every push |
-| Evals | 53 cases (`jarvis eval`); qwen2.5:3b 90.6%, llama3.2:1b 81.1% ([BASELINES](../evals/BASELINES.md)) |
+| Tests | 451 (`cargo test --workspace`), CI on every push |
+| Evals | 53 cases (`jarvis eval`); qwen2.5:3b 90.6%, llama3.2:1b 81.8% ([BASELINES](../evals/BASELINES.md)) |
 | Models | local: Ollama (llama3.2:1b for development, qwen2.5:3b for verification); remote: OpenRouter free tier (nemotron-3-ultra) |
-| Lessons | 26 entries in the [learning log](learning/README.md) |
+| Lessons | 28 entries in the [learning log](learning/README.md) |
 
 ## Phases
 
@@ -32,6 +32,7 @@ earlier sessions and is not in the repository.
 | 5b | Local and remote model tiers, privacy rules (labels, redaction, allow-lists), footer | 2026-10-28 | [model-tiers](design/model-tiers.md) |
 | 5b+ | Follow-ups: round limit per tier, repeat guard, closing answer, web-call egress check, frozen web pages | 2026-10-28 | learning #20-22 |
 | 6 | Prompt-injection gate, exfiltration rule, undo, marking, injection evals | 2026-11-02 | [injection-and-undo](design/injection-and-undo.md) |
+| 6.1 | Relay note, router fixes, a request never runs twice, orchestrator split | 2026-11-05 | learning #27-28 |
 
 ## Open items
 
@@ -57,6 +58,7 @@ The order they will be done in is in the roadmap.
 * A redacted remote answer is not streamed.
 * Answer checks (`contains`) can match text in the raw tool log printed
   when rounds run out.
+* An eval attempt that times out on a stalled provider reads as a wrong route.
 
 **For the owner**
 
