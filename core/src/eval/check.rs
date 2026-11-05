@@ -193,20 +193,25 @@ pub fn grade(case: &Case, observed: &Observed, grading: Grading) -> Vec<Check> {
 
     if grading == Grading::Full {
         let answer = report.answer.to_lowercase();
+        // Out of rounds, the "answer" is a log of tool output: text found in
+        // it is not something the model said. (A blocked report is Jarvis
+        // speaking, and cases grade it.)
+        let is_log = report.answer.starts_with(crate::orchestrator::REPORT_OPENINGS[0]);
         for needle in &expect.contains {
             add(
                 format!("contains {:?}", needle),
-                answer.contains(&needle.to_lowercase()),
+                !is_log && answer.contains(&needle.to_lowercase()),
                 excerpt(&report.answer),
             );
         }
         if !expect.contains_any.is_empty() {
             add(
                 format!("contains_any {:?}", expect.contains_any),
-                expect
-                    .contains_any
-                    .iter()
-                    .any(|n| answer.contains(&n.to_lowercase())),
+                !is_log
+                    && expect
+                        .contains_any
+                        .iter()
+                        .any(|n| answer.contains(&n.to_lowercase())),
                 excerpt(&report.answer),
             );
         }
@@ -452,6 +457,19 @@ mod tests {
         assert!(failures_with(&c, &report_only, &[]).is_empty());
         // An answer that does not repeat it needs no note.
         assert!(failures_with(&c, &report("Model", &[], "pip install frobnicate"), &[]).is_empty());
+    }
+
+    #[test]
+    fn the_raw_tool_log_is_not_an_answer() {
+        let log = "Here is what actually happened:\n\n  mcp.fetch.fetch\n    PostgreSQL 18.6 was released";
+        let c = case("contains = [\"18.6\"]");
+        assert_eq!(failures_with(&c, &report("Model", &[], log), &[]), ["contains \"18.6\""]);
+        let c = case("contains_any = [\"18.6\"]");
+        assert_eq!(failures_with(&c, &report("Model", &[], log), &[]), ["contains_any [\"18.6\"]"]);
+        // A report of what was blocked is Jarvis speaking: cases grade it.
+        let blocked = "I did not run that - you declined the confirmation prompt.";
+        let c = case("contains = [\"declined\"]");
+        assert!(failures_with(&c, &report("Model", &[], blocked), &[]).is_empty());
     }
 
     #[test]

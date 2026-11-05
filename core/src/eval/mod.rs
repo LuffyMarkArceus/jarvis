@@ -156,18 +156,28 @@ pub async fn run_case(case: &Case, attempt: usize, options: &RunOptions) -> Atte
             }
         }
     };
-    let checks = check::grade(
-        &run.case,
-        &Observed {
-            report: &run.report,
-            asked: &run.asked,
-            prompts: &run.prompts,
-            before: &run.before,
-            after: &run.after,
-            sent: &run.sent,
-        },
-        options.grading,
-    );
+    // A turn that never finished has no route, calls or answer to grade: it
+    // says that, rather than failing every check for a reason none of them
+    // names. Still a failure, not "unavailable": the hang could be ours.
+    let checks = match &run.error {
+        Some(error) => vec![Check {
+            check: "finished".into(),
+            passed: false,
+            detail: error.clone(),
+        }],
+        None => check::grade(
+            &run.case,
+            &Observed {
+                report: &run.report,
+                asked: &run.asked,
+                prompts: &run.prompts,
+                before: &run.before,
+                after: &run.after,
+                sent: &run.sent,
+            },
+            options.grading,
+        ),
+    };
     let unavailable = run
         .report
         .model_error
@@ -670,6 +680,61 @@ mod tests {
             error: None,
             sent: Vec::new(),
         }
+    }
+
+    /// A provider that never answers.
+    struct Stalled;
+
+    #[async_trait::async_trait]
+    impl Provider for Stalled {
+        fn name(&self) -> &'static str {
+            "stalled"
+        }
+        async fn chat_turn(
+            &self,
+            _request: ChatRequest<'_>,
+            _cancel: Option<&crate::cancel::Cancellation>,
+        ) -> Result<ChatTurn> {
+            std::future::pending().await
+        }
+        async fn chat_turn_streaming(
+            &self,
+            _request: ChatRequest<'_>,
+            _cancel: Option<&crate::cancel::Cancellation>,
+            _sink: &UnboundedSender<String>,
+        ) -> Result<ChatTurn> {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_turn_that_never_finishes_says_so_and_nothing_else() {
+        // Two nemotron attempts stalled and read as a wrong route: the route
+        // is empty when a turn never finishes. It stays a failure - a hang
+        // could be ours - under its own name.
+        let case = case::parse(
+            "[[case]]\nid = \"t\"\ninput = \"hello there\"\n[case.expect]\nroute = \"Direct\"\ncontains = [\"hi\"]\n",
+            "t",
+        )
+        .unwrap()
+        .remove(0);
+        let options = RunOptions {
+            provider: Arc::new(Stalled),
+            grading: Grading::Full,
+            repeat: 1,
+            timeout: Duration::from_millis(100),
+            tapes: PathBuf::from("."),
+            tape_script: PathBuf::from("."),
+            record: false,
+            policy: None,
+            base: Config::default(),
+        };
+        let attempt = run_case(&case, 1, &options).await;
+        assert!(!attempt.passed);
+        assert!(!attempt.unavailable, "a hang could be ours: it is not excused");
+        let failed: Vec<&str> = attempt.failed_checks().map(|c| c.check.as_str()).collect();
+        assert_eq!(failed, ["finished"]);
+        assert!(attempt.checks[0].detail.contains("timed out"), "{:?}", attempt.checks);
     }
 
     #[tokio::test]
