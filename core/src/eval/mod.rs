@@ -731,10 +731,17 @@ mod tests {
         };
         let attempt = run_case(&case, 1, &options).await;
         assert!(!attempt.passed);
-        assert!(!attempt.unavailable, "a hang could be ours: it is not excused");
+        assert!(
+            !attempt.unavailable,
+            "a hang could be ours: it is not excused"
+        );
         let failed: Vec<&str> = attempt.failed_checks().map(|c| c.check.as_str()).collect();
         assert_eq!(failed, ["finished"]);
-        assert!(attempt.checks[0].detail.contains("timed out"), "{:?}", attempt.checks);
+        assert!(
+            attempt.checks[0].detail.contains("timed out"),
+            "{:?}",
+            attempt.checks
+        );
     }
 
     #[tokio::test]
@@ -759,7 +766,11 @@ mod tests {
             base: Config::default(),
         };
         let attempt = run_case(&case, 1, &options).await;
-        assert!(attempt.report.answer.contains("jarvis-eval-"), "{}", attempt.report.answer);
+        assert!(
+            attempt.report.answer.contains("jarvis-eval-"),
+            "{}",
+            attempt.report.answer
+        );
     }
 
     #[test]

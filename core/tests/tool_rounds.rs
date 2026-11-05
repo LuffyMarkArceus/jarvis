@@ -196,7 +196,10 @@ async fn a_relative_path_lands_in_the_work_dir() {
         PermissionManager::with_paths(dir.join("permissions.toml"), dir.join("audit.db")).unwrap();
     let name = format!("relative-{}.md", uuid::Uuid::new_v4());
     let script = vec![
-        call("filesystem.write", json!({ "path": name, "content": "hello" })),
+        call(
+            "filesystem.write",
+            json!({ "path": name, "content": "hello" }),
+        ),
         answer("done"),
     ];
     let jarvis = Orchestrator::with_parts(config, Arc::new(Script::new(script)), permissions);
@@ -205,8 +208,14 @@ async fn a_relative_path_lands_in_the_work_dir() {
 
     assert_eq!(writes(&report), 1, "{:?}", report.calls);
     assert!(work.join(&name).exists(), "written in the work dir");
-    assert!(!std::path::Path::new(&name).exists(), "not where the process started");
-    assert_eq!(report.calls[0].args["path"], work.join(&name).display().to_string());
+    assert!(
+        !std::path::Path::new(&name).exists(),
+        "not where the process started"
+    );
+    assert_eq!(
+        report.calls[0].args["path"],
+        work.join(&name).display().to_string()
+    );
 }
 
 #[tokio::test]
@@ -221,7 +230,11 @@ async fn a_command_runs_in_the_work_dir() {
     config.tools.work_dir = Some(work.clone());
     let permissions =
         PermissionManager::with_paths(dir.join("permissions.toml"), dir.join("audit.db")).unwrap();
-    let jarvis = Orchestrator::with_parts(config, Arc::new(Script::new(vec![answer("x")])), permissions);
+    let jarvis = Orchestrator::with_parts(
+        config,
+        Arc::new(Script::new(vec![answer("x")])),
+        permissions,
+    );
     let s = Setup { dir, jarvis };
     let report = s
         .jarvis
@@ -229,5 +242,9 @@ async fn a_command_runs_in_the_work_dir() {
         .await
         .unwrap();
     assert_eq!(report.route, "Tool(shell.run)");
-    assert!(report.answer.contains(work.to_str().unwrap()), "{}", report.answer);
+    assert!(
+        report.answer.contains(work.to_str().unwrap()),
+        "{}",
+        report.answer
+    );
 }
