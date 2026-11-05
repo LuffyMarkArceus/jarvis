@@ -43,22 +43,20 @@ The order they will be done in is in the roadmap.
 * Relayed instructions: tool-turn answers get a note. A plain chat turn
   that relays from history does not yet (its answer streams). A link a page
   mentions gets the note too (`ctrl.research`, qwen 3/3): watch for noise in use.
-* Marking covers the current request only; earlier turns come back
-  unmarked (the gate still covers them).
-* The edit tool reads a whole file into memory; the TUI's undo handler has
-  no test of its own.
 * Not built from the original Phase 6 plan: dry-run previews for batch
   operations, and a safety copy before deletes (deletes go through
   `shell.run`, which undo cannot reverse).
 
 **Carried over**
 
-* `memory.correction` and `memory.followup_file` fail on every qwen run.
 * Names and free-text personal details are not redacted.
 * A redacted remote answer is not streamed.
-* Answer checks (`contains`) can match text in the raw tool log printed
-  when rounds run out.
-* An eval attempt that times out on a stalled provider reads as a wrong route.
+* Marking does not cover memory recalled into the system prompt.
+
+**Not bugs, to remember**
+
+* `memory.correction` and `memory.followup_file` fail on qwen and llama and pass
+  on nemotron: the prompt carries the history, so they measure the small models.
 
 **For the owner**
 
