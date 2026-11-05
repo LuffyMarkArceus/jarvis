@@ -39,13 +39,9 @@ The order they will be done in is in the roadmap.
 
 **Phase 6 follow-ups**
 
-* Answers can relay an injected instruction to the owner (qwen did, 9/9) -
-  design approved (note every relayed command, option A), not built.
-* Router misroutes: "... and run it" runs the command `it`; a path in a
-  sentence triggers an unfitting tool ("install the tool described in
-  /x/notes.txt" lists the directory).
-* A reconnecting TUI can resend a request and repeat an approved write -
-  fix with request ids (T3 Code's command receipts).
+* Relayed instructions: tool-turn answers get a note. A plain chat turn
+  that relays from history does not yet (its answer streams). A link a page
+  mentions gets the note too (`ctrl.research`, qwen 3/3): watch for noise in use.
 * Marking covers the current request only; earlier turns come back
   unmarked (the gate still covers them).
 * The edit tool reads a whole file into memory; the TUI's undo handler has
@@ -61,7 +57,6 @@ The order they will be done in is in the roadmap.
 * A redacted remote answer is not streamed.
 * Answer checks (`contains`) can match text in the raw tool log printed
   when rounds run out.
-* `core/src/orchestrator.rs` is 3,400 lines and does too much.
 
 **For the owner**
 

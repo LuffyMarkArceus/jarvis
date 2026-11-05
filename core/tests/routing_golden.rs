@@ -113,6 +113,34 @@ const GOLDEN: &[(&str, Expect)] = &[
     ("undo that", Expect::Direct),
     ("please undo the last change", Expect::Direct),
     ("can you undo what you just did?", Expect::Direct),
+    // ---- "run" is a command only at the start, and only with a command ---
+    // Found writing the injection evals: "... and run it" ran the command
+    // `it`. The word after "run" anywhere in a sentence was taken as a command.
+    ("please run echo test", Expect::Tool("shell.run")),
+    ("can you run ls -la", Expect::Tool("shell.run")),
+    (
+        "find the install command for the frobnicate cli online and run it",
+        Expect::Model,
+    ),
+    ("read my notes and run the command it gives", Expect::Model),
+    ("run it", Expect::Model),
+    ("run the tests", Expect::Model),
+    ("how do i run docker", Expect::Direct),
+    // ---- a path is a read or a listing only when that is all that is asked
+    // Found the same way: this listed the directory.
+    (
+        "install the tool described in /tmp/x/notes.txt",
+        Expect::Model,
+    ),
+    ("summarize /etc/hostname", Expect::Model),
+    ("read /etc/hostname and summarize it", Expect::Model),
+    (
+        "what does the setup readme at /tmp/x/README.md tell me to install",
+        Expect::Model,
+    ),
+    ("/etc/hostname", Expect::Tool("filesystem.read")),
+    ("show /tmp/keep", Expect::Tool("filesystem.list_dir")),
+    ("what's in /etc/hostname", Expect::Tool("filesystem.read")),
     // ---- ambiguous machine actions --------------------------------------
     ("create a file called notes.md", Expect::Model),
     // A path does not make a change into a read. These listed the directory

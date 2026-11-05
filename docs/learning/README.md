@@ -471,6 +471,39 @@ they make the model more likely to flag an attack. The guarantee is the
 gate in code, which holds when the model is fooled - and we measured it
 being fooled."
 
+## 27. Check the bug exists where you said it does
+
+**Lesson.** A plausible risk read in someone else's design is a hypothesis about
+your code. Reproduce it before you plan around it: the real bug may be elsewhere,
+and the fix may be much smaller.
+
+**In this repo.** T3 Code stores results by request id so that a resend does not
+repeat work. We wrote "a reconnecting TUI can resend a request" into three
+documents, and the owner approved building request ids. Reading the client first
+showed the TUI never resends. It also showed what does: `jarvis ask` fell back to
+direct mode on *any* failure, so a daemon dying mid-request ran the whole request
+again. The fix was a three-way outcome (not reached, answered, lost), not a
+receipt store; that waits for the first thing that actually retries.
+
+**Say it in an interview.** "We were about to build idempotency receipts because
+a respected project has them. Tracing our own clients found no client that
+retried - and a different path that silently re-ran requests. The pattern was
+right; our reason for it was wrong."
+
+## 28. Prove a refactor changed nothing
+
+**Lesson.** "The tests pass" says the tested paths still work. For a move-only
+refactor you can claim more: compare the code itself.
+
+**In this repo.** Splitting the 3,500-line orchestrator was scripted, by slicing
+items rather than retyping them. Test count stayed 451, and comparing old and new
+lines (ignoring indentation and the new `pub(super)`) showed only module plumbing,
+section comments and reformatting.
+
+**Say it in an interview.** "For the big split we kept move-only commits separate
+from behaviour changes and diffed the line multiset, so a reviewer could trust it
+without reading 3,500 lines."
+
 ---
 
 ## Self-test
@@ -526,6 +559,8 @@ Answer out loud, without opening the code:
     works, and which cases are?
 25. With the gate off, the exfiltration case still passed. Why?
 26. Marking untrusted text did not reduce attempts. Why keep it?
+27. We planned request ids for a TUI resend. What did reading the client show,
+    and why did that change what was built?
 
 ## Skills map: SDE2 -> senior
 

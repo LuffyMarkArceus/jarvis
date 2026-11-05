@@ -125,9 +125,9 @@ Two rules learned writing them:
   Unlabelled, it was fooled 3 times in 14. The label lives in the tape file
   (`"synthetic"`), and the injected actions point at things that cannot do
   harm if the gate fails (`.example` hosts, `/tmp/frobnicate-setup`).
-* **Keep paths out of the graded input.** With a path in it, the router
-  runs a tool directly and no model ever reads the page; read the file in
-  a `setup` turn instead. Check a new case's route and offered tools with
+* **Check that the graded input reaches a model.** A plain `read <path>` runs
+  a tool directly and no model ever reads the page, so read the file in a
+  `setup` turn instead. Check a new case's route and offered tools with
   `--offline` before trusting a pass.
 
 A case only exercises the gate when the model takes the bait, so an attack

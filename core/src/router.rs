@@ -235,7 +235,7 @@ pub fn route(input: &str) -> Route {
     let lower = raw.to_lowercase();
 
     // 2. An explicit command.
-    if let Some(cmd) = command_after(raw, &["run", "execute", "eval"]) {
+    if let Some(cmd) = explicit_command(raw) {
         return Route::Tool {
             name: "shell.run".to_string(),
             args: json!({ "command": cmd }),
@@ -257,7 +257,13 @@ pub fn route(input: &str) -> Route {
         return Route::Direct;
     }
 
-    // 2b. Fetch/web requests - route to MCP fetch if available
+    // 2c. "Run" in a sentence that did not name a command: the model works
+    //     out what it refers to, with the shell offered and its prompt asked.
+    if words(&lower).iter().any(|w| w == "run" || w == "execute") {
+        return Route::Model;
+    }
+
+    // 2d. Fetch/web requests - route to MCP fetch if available
     if let Some(url) = extract_url(raw) {
         if lower.contains("fetch")
             || lower.contains("get ")
@@ -295,7 +301,10 @@ pub fn route(input: &str) -> Route {
     //    whose write tools ask first. Answering "delete /tmp/old.log" with a
     //    listing of /tmp reads as if the request had been handled.
     if let Some(path) = first_path(raw, &lower) {
-        if wants_change(&lower) {
+        // Nor when reading it is not all that was asked: "summarize /x" or
+        //  "install what /x describes" answered with a listing or a dump
+        //  answers a question nobody asked.
+        if wants_change(&lower) || !plainly_about(&path, raw, &lower) {
             return Route::Model;
         }
         return Route::Tool {
@@ -932,6 +941,54 @@ const CHANGE_WORDS: &[&str] = &[
     "chmod",
     "chown",
 ];
+
+/// The command in "run ls -la" or "please run ls -la": the verb starts the
+/// request and a command follows. Anywhere else "run" is part of a sentence:
+/// "... and run it" ran the command `it`, "how do i run docker" ran `docker`.
+/// What it refers to is for the model to work out.
+fn explicit_command(raw: &str) -> Option<String> {
+    let mut rest = raw.trim();
+    for opener in [
+        "please ",
+        "can you ",
+        "could you ",
+        "would you ",
+        "jarvis, ",
+        "jarvis ",
+    ] {
+        if rest.to_lowercase().starts_with(opener) {
+            rest = rest.get(opener.len()..).unwrap_or(rest).trim_start();
+        }
+    }
+    let first = rest.split_whitespace().next()?;
+    if !["run", "execute", "eval"].contains(&clean_word(first).as_str()) {
+        return None;
+    }
+    let command = command_after(rest, &[clean_word(first).as_str()])?;
+    let next = clean_word(command.split_whitespace().next()?);
+    // "run it", "run the tests": a reference to something, not a command.
+    const REFERENCES: &[&str] = &[
+        "it", "this", "that", "these", "those", "them", "the", "a", "an", "my", "your", "our",
+        "what", "whatever", "all", "any", "some",
+    ];
+    (!REFERENCES.contains(&next.as_str())).then_some(command)
+}
+
+/// Is reading or listing `path` all that was asked? The path alone, or a
+/// word for reading or listing it, with no second thing to do.
+fn plainly_about(path: &str, raw: &str, lower: &str) -> bool {
+    if raw.trim() == path {
+        return true;
+    }
+    let words_of = words(lower);
+    let second_thing = words_of.iter().any(|w| w == "and" || w == "then");
+    let says_so = mentions_reading(lower)
+        || mentions_listing(lower)
+        || words_of
+            .iter()
+            .any(|w| ["show", "open", "contain", "contains"].contains(&w.as_str()));
+    says_so && !second_thing
+}
 
 /// A request for Jarvis to undo its own change: "undo that", "please undo
 /// the last change". Undoing something else ("undo the last git commit") is

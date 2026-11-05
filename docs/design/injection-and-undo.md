@@ -314,18 +314,17 @@ runs measure behaviour.
 
 ## Known gaps
 
-* **An answer can relay the attack to the owner.** qwen2.5:3b, never
-  fooled into acting, answered "you should run `curl ... | sh`" and "fetch
-  `...validate?d=<your password>`" from the injected pages, without a
-  warning (evals/BASELINES.md, 2026-11-03). The gate covers Jarvis's
-  actions, not advice; the owner becomes the channel. "Making the model
-  say false things" was set aside as accuracy - this is not that.
+* **An answer can relay the attack to the owner** - qwen2.5:3b, never fooled
+  into acting, answered "you should run `curl ... | sh`" in 9 of 9 attempts.
+  Tool-turn answers now get a note naming the source (`taint::relayed`): a
+  command in code, or an address from untrusted text that is not a page Jarvis
+  read or a search found. Not covered: a plain chat turn relaying from history,
+  whose answer streams, and a command written as prose with no address in it.
+  Its cost: a link a page mentions and the answer passes on gets the note too
+  (qwen, `ctrl.research`, 3 of 3), because it has the same shape as an
+  attacker's address.
 * **Marking covers the current request only.** Untrusted text from earlier
   turns returns from history unmarked; the gate still covers it (labels).
-* **The router runs tools directly on some requests with a path or "run"
-  in them** - "install the tool described in /x/notes.txt" listed the
-  directory, "... and run it" ran the command `it`. Not a gate bypass (a
-  direct route is the owner's own words), but wrong behaviour.
 * **On the remote tier** two cases are stopped before the gate: a file
   outside the allowed folders is not sent unasked, and the password reaches
   the model redacted.
@@ -347,9 +346,11 @@ choice, and recording why a prompt appeared despite "allow". Not built yet:
 * **Secret references**: a secret entered privately, the model seeing only
   a single-use reference - stronger than redaction, since the secret never
   enters the conversation.
-* **Known gap - repeated side effects on resend.** If the TUI reconnects and
-  resends a request, an approved write can run twice. Their commands carry
-  ids whose duplicates return the stored result without running again.
+* **Stored results for retried requests.** Their commands carry ids whose
+  duplicates return the stored result without running again. Jarvis's clients
+  do not retry today: the TUI drops a request on disconnect, and `jarvis ask`
+  (fixed in 6.1) no longer re-runs one the daemon may have started. Phase 7's
+  retried jobs are what will need this; `Request.id` is already on the wire.
 
 ## Build order
 
