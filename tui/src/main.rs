@@ -261,3 +261,86 @@ impl Drop for TerminalGuard {
         restore_terminal();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jarvis_core::undo::UndoStore;
+
+    /// A config whose data lives in a fresh folder, with one undoable change
+    /// to `notes.md` ("mine" -> "jarvis").
+    fn with_a_change(name: &str) -> (Config, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("jarvis-tui-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut config = Config::default();
+        config.general.data_dir = dir.clone();
+        let notes = dir.join("notes.md");
+        std::fs::write(&notes, "mine").unwrap();
+        let store = UndoStore::for_config(&config).unwrap();
+        let pending = store
+            .before_change(&notes, "filesystem.write", "s1")
+            .unwrap();
+        std::fs::write(&notes, "jarvis").unwrap();
+        store.after_change(pending).unwrap();
+        (config, dir)
+    }
+
+    fn typed(app: &mut App, text: &str, config: &Config) {
+        app.input.set(text);
+        for action in app.submit() {
+            undo(action, app, config);
+        }
+    }
+
+    fn last(app: &App) -> String {
+        app.entries.last().unwrap().text.clone()
+    }
+
+    #[test]
+    fn undo_previews_then_restores_exactly_what_it_showed() {
+        let (config, dir) = with_a_change("flow");
+        let mut app = App::new("test".into());
+
+        typed(&mut app, "/undo", &config);
+        assert!(last(&app).contains("Restore"), "{}", last(&app));
+        assert!(last(&app).contains("/undo yes"), "{}", last(&app));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("notes.md")).unwrap(),
+            "jarvis",
+            "only shown so far"
+        );
+
+        typed(&mut app, "/undo yes", &config);
+        assert!(last(&app).starts_with("Undone"), "{}", last(&app));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("notes.md")).unwrap(),
+            "mine"
+        );
+
+        typed(&mut app, "/undo list", &config);
+        assert!(last(&app).contains("undone"), "{}", last(&app));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_refused_undo_says_why_and_changes_nothing() {
+        let (config, dir) = with_a_change("refused");
+        std::fs::write(dir.join("notes.md"), "my own edit").unwrap();
+        let mut app = App::new("test".into());
+
+        typed(&mut app, "/undo", &config);
+        assert!(
+            last(&app).contains("changed after Jarvis wrote it"),
+            "{}",
+            last(&app)
+        );
+        typed(&mut app, "/undo yes", &config);
+        assert!(last(&app).contains("/undo first"), "{}", last(&app));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("notes.md")).unwrap(),
+            "my own edit"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
