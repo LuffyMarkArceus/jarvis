@@ -3,7 +3,22 @@ use crate::error::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
-pub struct RunShellTool;
+#[derive(Default)]
+pub struct RunShellTool {
+    /// Where commands run; `None` is wherever the process started.
+    pub work_dir: Option<std::path::PathBuf>,
+}
+
+impl RunShellTool {
+    fn sh(&self, script: String) -> tokio::process::Command {
+        let mut command = tokio::process::Command::new("sh");
+        command.arg("-c").arg(script);
+        if let Some(dir) = &self.work_dir {
+            command.current_dir(dir);
+        }
+        command
+    }
+}
 
 #[async_trait]
 impl Tool for RunShellTool {
@@ -36,9 +51,8 @@ impl Tool for RunShellTool {
             // Detach the child so a GUI app does not hold the call open.
             // `setsid` detaches from the controlling terminal, which means the
             // process survives the shell that started it.
-            let output = tokio::process::Command::new("sh")
-                .arg("-c")
-                .arg(format!("setsid {} >/dev/null 2>&1 &", command))
+            let output = self
+                .sh(format!("setsid {} >/dev/null 2>&1 &", command))
                 .output()
                 .await?;
             return Ok(json!({
@@ -49,11 +63,7 @@ impl Tool for RunShellTool {
             }));
         }
 
-        let output = tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .output()
-            .await?;
+        let output = self.sh(command.to_string()).output().await?;
         Ok(json!({
             "stdout": String::from_utf8_lossy(&output.stdout),
             "stderr": String::from_utf8_lossy(&output.stderr),

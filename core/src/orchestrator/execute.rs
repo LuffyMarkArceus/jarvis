@@ -657,7 +657,13 @@ impl Orchestrator {
         if tool.starts_with("filesystem.") {
             if let Some(path) = args.get("path").and_then(Value::as_str) {
                 let expanded = router::expand_tilde(path);
-                args["path"] = Value::String(expanded);
+                let resolved = match &self.config.tools.work_dir {
+                    Some(dir) if !std::path::Path::new(&expanded).is_absolute() => {
+                        dir.join(&expanded).display().to_string()
+                    }
+                    _ => expanded,
+                };
+                args["path"] = Value::String(resolved);
             }
         }
         args

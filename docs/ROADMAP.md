@@ -1,6 +1,6 @@
 # Roadmap
 
-Confirmed by the owner 2026-11-03, except where an item says "proposed".
+Confirmed by the owner 2026-11-03 and 2026-11-05.
 Where Jarvis stands today is in [STATUS.md](STATUS.md).
 
 Phases 7-11 grew out of the plan written after Phase 4 (voice, proactive
@@ -60,7 +60,7 @@ machines) 11.
 * An eval attempt that times out while the provider stalls reads as a wrong
   route; report it as no answer, as `unavailable` does for HTTP errors.
 
-## Proposed: a week of real use (before Phase 7)
+## A week of real use (before Phase 7)
 
 Use Jarvis for ordinary work for a week and log every failure: wrong
 route, wrong answer, a prompt that was noise, something it could not do.
@@ -126,10 +126,3 @@ reach (T3 Code's "hit every surface"), which is a reason to add it late.
   device a tool may act on.
 * Secret references (T3 Code's `request_secret`): a secret entered
   privately, never in the conversation.
-
-## Open questions for the owner
-
-1. The real-use week before Phase 7 - yes or no?
-2. Phase 10 (UI) before Phase 11 (other machines), as listed - or the
-   other way round? Proposed: UI first, because it completes the
-   single-machine product; other machines multiply it.

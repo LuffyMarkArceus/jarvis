@@ -328,6 +328,9 @@ fn attempt_config(case: &Case, sandbox: &Sandbox, options: &RunOptions) -> Resul
     config.general.data_dir = sandbox.data.clone();
     config.memory.db_path = sandbox.data.join("memory.db");
     config.mcp = None;
+    // Approved cases really run: a relative path or a command stays in the
+    // sandbox instead of landing in the repository the eval was started from.
+    config.tools.work_dir = Some(sandbox.files.clone());
     // Fixture files are not private. With a remote model, asking before
     // sending them would grade the privacy rules instead of the model; the
     // egress cases (`remote = true`) test those rules and keep them.
@@ -667,6 +670,31 @@ mod tests {
             error: None,
             sent: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn an_attempt_runs_in_its_sandbox() {
+        // Approved cases really run. A relative path or a command must not
+        // land in the repository the eval was started from.
+        let case = case::parse(
+            "[[case]]\nid = \"t\"\ninput = \"run pwd\"\napprove = true\n[case.expect]\n",
+            "t",
+        )
+        .unwrap()
+        .remove(0);
+        let options = RunOptions {
+            provider: Arc::new(ScriptedProvider),
+            grading: Grading::Structural,
+            repeat: 1,
+            timeout: Duration::from_secs(30),
+            tapes: PathBuf::from("."),
+            tape_script: PathBuf::from("."),
+            record: false,
+            policy: None,
+            base: Config::default(),
+        };
+        let attempt = run_case(&case, 1, &options).await;
+        assert!(attempt.report.answer.contains("jarvis-eval-"), "{}", attempt.report.answer);
     }
 
     #[test]
