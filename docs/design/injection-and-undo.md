@@ -347,9 +347,11 @@ choice, and recording why a prompt appeared despite "allow". Not built yet:
 * **Secret references**: a secret entered privately, the model seeing only
   a single-use reference - stronger than redaction, since the secret never
   enters the conversation.
-* **Known gap - repeated side effects on resend.** If the TUI reconnects and
-  resends a request, an approved write can run twice. Their commands carry
-  ids whose duplicates return the stored result without running again.
+* **Stored results for retried requests.** Their commands carry ids whose
+  duplicates return the stored result without running again. Jarvis's clients
+  do not retry today: the TUI drops a request on disconnect, and `jarvis ask`
+  (fixed in 6.1) no longer re-runs one the daemon may have started. Phase 7's
+  retried jobs are what will need this; `Request.id` is already on the wire.
 
 ## Build order
 

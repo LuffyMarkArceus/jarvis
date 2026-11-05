@@ -37,7 +37,7 @@ machines) 11.
 | --- | --- | --- |
 | 1 | Relay warning: a note when an answer repeats a command or data-carrying address that came only from untrusted content (option A: every relayed command) | qwen handed the owner the attacker's instructions in 9/9 attempts; design approved |
 | 2 | Router misroutes: "... and run it" runs `it`; a path in a sentence triggers an unfitting tool | Wrong behaviour, and it made the injection evals harder to write |
-| 3 | Request ids: a resent request returns its stored result instead of running again (T3 Code's command receipts) | An approved write can run twice after a TUI reconnect; Phase 7 jobs need the same guarantee |
+| 3 | A request is never run twice: `jarvis ask` re-ran a request in direct mode if the daemon died mid-request. Done: once sent, a lost connection is reported, not retried | An approved write could run twice |
 | 4 | Split `orchestrator.rs` (3,400 lines) into the turn loop, web steps, the egress and injection gates, and tool execution | Every phase has added to it; Phase 7 adds scheduled turns. After 1-3, so it moves tested code |
 
 ## Milestone 6.2 - small items (after 6.1)
@@ -73,7 +73,9 @@ download finishes", "every morning, summarise my unread mail".
   runs at a set level, and nothing it starts goes higher.
 * Unattended means nobody to ask: Phase 6 already says the action is not
   run. Phase 7 adds where those go instead - a queue the owner reviews.
-* Request ids (6.1) make a retried job safe.
+* Stored results for request ids (T3 Code's command receipts): a retried job
+  returns the first run's result instead of running again. No client retries
+  today, so this is built with the first thing that does.
 
 ## Phase 8 - semantic memory
 

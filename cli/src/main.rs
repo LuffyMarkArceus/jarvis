@@ -454,7 +454,37 @@ async fn send_request_streaming(
         anyhow::bail!("Daemon not running");
     }
     let stream_socket = UnixStream::connect(&socket_path).await?;
-    let (reader, mut writer) = stream_socket.into_split();
+    exchange(stream_socket, request, stream).await
+}
+
+/// How a request to the daemon ended. `NotRunning` and `Lost` differ in
+/// whether the daemon may have acted: nothing was sent, or it was and the
+/// connection dropped before the answer.
+#[derive(Debug)]
+enum AskOutcome {
+    NotRunning,
+    Answered(Response, bool),
+    Lost(anyhow::Error),
+}
+
+async fn ask_daemon(socket_path: &std::path::Path, request: Request, stream: bool) -> AskOutcome {
+    let Ok(socket) = UnixStream::connect(socket_path).await else {
+        return AskOutcome::NotRunning;
+    };
+    match exchange(socket, request, stream).await {
+        Ok((response, printed)) => AskOutcome::Answered(response, printed),
+        Err(e) => AskOutcome::Lost(e),
+    }
+}
+
+/// Send `request` on an open connection and read until its response,
+/// answering confirmation prompts on the way.
+async fn exchange(
+    socket: UnixStream,
+    request: Request,
+    stream: bool,
+) -> anyhow::Result<(Response, bool)> {
+    let (reader, mut writer) = socket.into_split();
     let request_id = request.id;
 
     writer
@@ -563,8 +593,8 @@ async fn main() -> anyhow::Result<()> {
             }
             let request = Request::new("ask", json!({"prompt": prompt}));
             let interactive = std::io::stdout().is_terminal();
-            match send_request_streaming(request, interactive).await {
-                Ok((response, printed)) => {
+            match ask_daemon(&get_socket_path(), request, interactive).await {
+                AskOutcome::Answered(response, printed) => {
                     if printed {
                         println!();
                     }
@@ -602,7 +632,17 @@ async fn main() -> anyhow::Result<()> {
                             .unwrap_or_else(|| "Unknown error".to_string())
                     );
                 }
-                Err(_) => {
+                // The daemon may have done any part of the request before the
+                // connection dropped - an approved write, say - so running it
+                // again here could do the same thing twice.
+                AskOutcome::Lost(e) => {
+                    eprintln!(
+                        "The daemon stopped before answering ({}). The request may have run in part, so it was not run again. `jarvis undo --list` shows any file changes.",
+                        e
+                    );
+                    std::process::exit(1);
+                }
+                AskOutcome::NotRunning => {
                     // Fallback to direct mode
                     info!("Daemon not running, using direct mode");
                     let orch = Orchestrator::new()?;
@@ -1308,4 +1348,89 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::UnixListener;
+
+    fn socket_in_temp() -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("jarvis-ask-{}-{}", std::process::id(), n));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("jarvis.sock")
+    }
+
+    fn request() -> Request {
+        Request::new("ask", json!({ "prompt": "write the file" }))
+    }
+
+    /// A daemon that reads one request, then does `then` with the socket.
+    async fn fake_daemon(path: &std::path::Path, reply: Option<Response>) {
+        let listener = UnixListener::bind(path).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (reader, mut writer) = stream.into_split();
+            let mut line = String::new();
+            BufReader::new(reader).read_line(&mut line).await.unwrap();
+            if let Some(reply) = reply {
+                let text = format!("{}\n", Message::Response(reply).encode());
+                writer.write_all(text.as_bytes()).await.unwrap();
+            }
+            // Dropped here: the connection closes.
+        });
+    }
+
+    #[tokio::test]
+    async fn no_daemon_means_nothing_was_sent() {
+        let path = socket_in_temp();
+        assert!(matches!(
+            ask_daemon(&path, request(), false).await,
+            AskOutcome::NotRunning
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_stale_socket_means_nothing_was_sent() {
+        let path = socket_in_temp();
+        // Bound, then dropped: the file stays and refuses connections.
+        drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+        assert!(path.exists());
+        assert!(matches!(
+            ask_daemon(&path, request(), false).await,
+            AskOutcome::NotRunning
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_daemon_that_dies_mid_request_is_lost_and_not_retried() {
+        // It may have run an approved write before dying, so running the
+        // request again in direct mode could do the same thing twice.
+        let path = socket_in_temp();
+        fake_daemon(&path, None).await;
+        assert!(matches!(
+            ask_daemon(&path, request(), false).await,
+            AskOutcome::Lost(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_answer_is_returned() {
+        let path = socket_in_temp();
+        let req = request();
+        fake_daemon(
+            &path,
+            Some(Response::ok(req.id, json!({ "response": "done" }))),
+        )
+        .await;
+        match ask_daemon(&path, req, false).await {
+            AskOutcome::Answered(response, printed) => {
+                assert!(response.ok);
+                assert!(!printed);
+            }
+            other => panic!("{:?}", other),
+        }
+    }
 }
