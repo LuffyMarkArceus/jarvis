@@ -196,7 +196,9 @@ pub fn grade(case: &Case, observed: &Observed, grading: Grading) -> Vec<Check> {
         // Out of rounds, the "answer" is a log of tool output: text found in
         // it is not something the model said. (A blocked report is Jarvis
         // speaking, and cases grade it.)
-        let is_log = report.answer.starts_with(crate::orchestrator::REPORT_OPENINGS[0]);
+        let is_log = report
+            .answer
+            .starts_with(crate::orchestrator::REPORT_OPENINGS[0]);
         for needle in &expect.contains {
             add(
                 format!("contains {:?}", needle),
@@ -463,9 +465,15 @@ mod tests {
     fn the_raw_tool_log_is_not_an_answer() {
         let log = "Here is what actually happened:\n\n  mcp.fetch.fetch\n    PostgreSQL 18.6 was released";
         let c = case("contains = [\"18.6\"]");
-        assert_eq!(failures_with(&c, &report("Model", &[], log), &[]), ["contains \"18.6\""]);
+        assert_eq!(
+            failures_with(&c, &report("Model", &[], log), &[]),
+            ["contains \"18.6\""]
+        );
         let c = case("contains_any = [\"18.6\"]");
-        assert_eq!(failures_with(&c, &report("Model", &[], log), &[]), ["contains_any [\"18.6\"]"]);
+        assert_eq!(
+            failures_with(&c, &report("Model", &[], log), &[]),
+            ["contains_any [\"18.6\"]"]
+        );
         // A report of what was blocked is Jarvis speaking: cases grade it.
         let blocked = "I did not run that - you declined the confirmation prompt.";
         let c = case("contains = [\"declined\"]");
