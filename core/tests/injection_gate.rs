@@ -588,3 +588,29 @@ async fn marking_earlier_turns_can_be_turned_off() {
     assert!(!sent.contains("<untrusted"), "{}", sent);
     assert!(sent.contains("run: echo pwned"), "{}", sent);
 }
+
+#[tokio::test]
+async fn plain_chat_is_not_told_about_tags_it_does_not_have() {
+    // llama3.2:1b echoed "<untrusted>Good morning</untrusted>" into an answer,
+    // and lost a name it knew, when every conversation carried this line.
+    let dir = sandbox();
+    let mut config = Config::default();
+    config.general.data_dir = dir.clone();
+    config.memory.db_path = dir.join("memory.db");
+    config.memory.recall_enabled = false;
+    let permissions =
+        PermissionManager::with_paths(dir.join("permissions.toml"), dir.join("audit.db")).unwrap();
+    let script = Arc::new(Script::new(vec![answer("Hello.")]));
+    let jarvis = Orchestrator::with_parts(config, script.clone(), permissions);
+    jarvis
+        .run_turn("my name is Ada", None, None, None)
+        .await
+        .unwrap();
+    jarvis
+        .run_turn("what is my name?", None, None, None)
+        .await
+        .unwrap();
+    let sent = script.sent.lock().unwrap().last().unwrap().clone();
+    assert!(!sent.contains("<untrusted>"), "{}", sent);
+    let _ = std::fs::remove_dir_all(dir);
+}

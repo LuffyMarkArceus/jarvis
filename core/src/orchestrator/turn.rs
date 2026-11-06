@@ -110,7 +110,7 @@ impl Orchestrator {
         rec: &TurnRecorder,
     ) -> Result<String> {
         let (system_prompt, recall_label) =
-            self.with_recall(input, self.conversation_system_prompt());
+            self.with_recall(input, self.conversation_prompt_for(history));
         let mut plan = context::assemble(&system_prompt, input, history, &self.config.context, 0);
         self.mark_history(&mut plan.messages);
         self.log_plan(&plan);
