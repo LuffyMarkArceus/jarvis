@@ -43,9 +43,8 @@ The order they will be done in is in the roadmap.
 * Relayed instructions: tool-turn answers get a note. A plain chat turn
   that relays from history does not yet (its answer streams). A link a page
   mentions gets the note too (`ctrl.research`, qwen 3/3): watch for noise in use.
-* Not built from the original Phase 6 plan: dry-run previews for batch
-  operations, and a safety copy before deletes (deletes go through
-  `shell.run`, which undo cannot reverse).
+* Batch operations with a dry-run preview: later, with the operation itself.
+* Deletes through `shell.run` (`rm`) cannot be undone; `filesystem.delete` can.
 
 **Carried over**
 

@@ -127,7 +127,7 @@ pub fn is_untrusted(label: &Label, policy: &Policy) -> bool {
 /// search and fetch: a tool Jarvis does not know is assumed able to act.
 pub fn is_action(tool: &str) -> bool {
     match tool {
-        "filesystem.write" | "filesystem.edit" | "shell.run" => true,
+        "filesystem.write" | "filesystem.edit" | "filesystem.delete" | "shell.run" => true,
         t if t.starts_with("mcp.search.") || t.starts_with("mcp.fetch.") => false,
         t => t.starts_with("mcp."),
     }
@@ -715,6 +715,7 @@ mod tests {
         for tool in [
             "filesystem.write",
             "filesystem.edit",
+            "filesystem.delete",
             "shell.run",
             "mcp.github.create_issue",
         ] {

@@ -266,7 +266,8 @@ fn select_model_tools(
             | "filesystem.search"
             | "filesystem.stat"
             | "filesystem.write"
-            | "filesystem.edit" => intent.files,
+            | "filesystem.edit"
+            | "filesystem.delete" => intent.files,
             "shell.run" => intent.shell,
             "process.list" => intent.processes,
             "system.info" => intent.system,

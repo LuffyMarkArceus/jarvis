@@ -189,6 +189,46 @@ impl Tool for EditFileTool {
     }
 }
 
+/// Delete one file. A folder is refused: it can hold anything, and a copy
+/// of it for undo could be any size. Before it runs, the orchestrator keeps
+/// a copy so `jarvis undo` can bring the file back.
+pub struct DeleteFileTool;
+
+#[async_trait]
+impl Tool for DeleteFileTool {
+    fn name(&self) -> &str {
+        "filesystem.delete"
+    }
+
+    fn description(&self) -> &str {
+        "Delete one file (not a folder). It can be restored with jarvis undo"
+    }
+
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path"}
+            },
+            "required": ["path"]
+        })
+    }
+
+    async fn execute(&self, args: Value) -> Result<Value> {
+        let path = args["path"]
+            .as_str()
+            .ok_or_else(|| crate::error::JarvisError::Tool("Missing path".to_string()))?;
+        if tokio::fs::metadata(path).await?.is_dir() {
+            return Err(crate::error::JarvisError::Tool(format!(
+                "{} is a folder; only single files can be deleted",
+                path
+            )));
+        }
+        tokio::fs::remove_file(path).await?;
+        Ok(json!({"deleted": path}))
+    }
+}
+
 /// Directories that are never worth walking.
 ///
 /// A search from `~` would otherwise spend all its time inside build output
@@ -455,6 +495,47 @@ mod tests {
 
     fn as_arg(path: &std::path::Path) -> String {
         path.to_string_lossy().to_string()
+    }
+
+    #[tokio::test]
+    async fn delete_removes_one_file() {
+        let dir = temp_dir();
+        let file = dir.join("old.log");
+        std::fs::write(&file, "x").unwrap();
+        let out = DeleteFileTool
+            .execute(json!({ "path": as_arg(&file) }))
+            .await
+            .unwrap();
+        assert_eq!(out["deleted"], as_arg(&file));
+        assert!(!file.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn delete_refuses_a_folder() {
+        // One file at a time: a folder can hold anything, and a copy of it
+        // for undo could be any size.
+        let dir = temp_dir();
+        std::fs::create_dir_all(dir.join("keep")).unwrap();
+        std::fs::write(dir.join("keep/a.txt"), "x").unwrap();
+        let err = DeleteFileTool
+            .execute(json!({ "path": as_arg(&dir.join("keep")) }))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("is a folder"), "{}", err);
+        assert!(dir.join("keep/a.txt").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_missing_file_fails() {
+        let dir = temp_dir();
+        assert!(DeleteFileTool
+            .execute(json!({ "path": as_arg(&dir.join("nope.txt")) }))
+            .await
+            .is_err());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn large_file(dir: &std::path::Path) -> std::path::PathBuf {

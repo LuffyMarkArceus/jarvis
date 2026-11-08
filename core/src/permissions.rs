@@ -278,6 +278,11 @@ fn default_rules() -> Vec<PermissionRule> {
             action: PermissionAction::Ask,
             patterns: None,
         },
+        PermissionRule {
+            tool: "filesystem.delete".to_string(),
+            action: PermissionAction::Ask,
+            patterns: None,
+        },
     ]
 }
 

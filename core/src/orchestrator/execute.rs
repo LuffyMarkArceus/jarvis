@@ -482,7 +482,10 @@ impl Orchestrator {
     /// (no copy over the size limit), `unavailable` (no undo folder), or
     /// `never` (commands and other tools).
     pub(super) fn undo_note(&self, name: &str, args: &Value) -> &'static str {
-        if !matches!(name, "filesystem.write" | "filesystem.edit") {
+        if !matches!(
+            name,
+            "filesystem.write" | "filesystem.edit" | "filesystem.delete"
+        ) {
             return "never";
         }
         let Some(store) = &self.undo else {
@@ -567,7 +570,10 @@ impl Orchestrator {
             // it back. Every write goes through here, typed or the model's.
             let pending = match (&self.undo, args.get("path").and_then(Value::as_str)) {
                 (Some(store), Some(path))
-                    if matches!(name.as_str(), "filesystem.write" | "filesystem.edit") =>
+                    if matches!(
+                        name.as_str(),
+                        "filesystem.write" | "filesystem.edit" | "filesystem.delete"
+                    ) =>
                 {
                     match store.before_change(std::path::Path::new(path), &name, &self.session_id) {
                         Ok(pending) => Some(pending),
