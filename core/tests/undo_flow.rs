@@ -46,6 +46,9 @@ fn setup_with(config: Config, dir: PathBuf, script: Vec<ChatTurn>) -> Setup {
     permissions
         .set_rule("filesystem.edit", PermissionAction::Allow)
         .unwrap();
+    permissions
+        .set_rule("filesystem.delete", PermissionAction::Allow)
+        .unwrap();
     let jarvis =
         Orchestrator::with_parts(config.clone(), Arc::new(Script::new(script)), permissions);
     Setup {
@@ -239,4 +242,35 @@ fn undo_is_never_a_tool() {
     let names = jarvis_core::tools::known_tool_names();
     assert!(!names.is_empty());
     assert!(names.iter().all(|n| !n.contains("undo")), "{:?}", names);
+}
+
+#[tokio::test]
+async fn a_deleted_file_comes_back_with_undo() {
+    // "please delete X" had no tool that could do it. Now it has, and the
+    // file is copied first, so the delete can be reversed.
+    let dir = sandbox();
+    let old = dir.join("project/old.log");
+    std::fs::write(&old, "keep me after all").unwrap();
+    let script = vec![
+        call("filesystem.delete", json!({ "path": old })),
+        answer("Deleted."),
+    ];
+    let mut config = config_in(&dir);
+    config.memory.recall_enabled = false;
+    let s = setup_with(config, dir.clone(), script);
+    let input = format!("please delete {}", old.display());
+    let report = s.jarvis.run_turn(&input, None, None, None).await.unwrap();
+    assert_eq!(report.route, "Model");
+    assert!(
+        report.offered.iter().any(|t| t == "filesystem.delete"),
+        "{:?}",
+        report.offered
+    );
+    assert!(!old.exists(), "{:?}", report.calls);
+
+    let store = UndoStore::for_config(&s.config).unwrap();
+    let plan = store.plan(None, false).unwrap();
+    assert!(matches!(plan, UndoPlan::Restore(_)), "{:?}", plan);
+    store.apply(&plan).unwrap();
+    assert_eq!(std::fs::read_to_string(&old).unwrap(), "keep me after all");
 }

@@ -42,6 +42,10 @@ tool = "filesystem.edit"
 action = "ask"
 
 [[rules]]
+tool = "filesystem.delete"
+action = "ask"
+
+[[rules]]
 tool = "mcp.search.search"
 action = "allow"
 

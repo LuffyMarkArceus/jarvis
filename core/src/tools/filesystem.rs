@@ -2,6 +2,7 @@ use super::Tool;
 use crate::error::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use tokio::io::AsyncReadExt;
 
 pub struct ListDirTool;
 
@@ -69,10 +70,33 @@ impl Tool for ReadFileTool {
         let path = args["path"]
             .as_str()
             .ok_or_else(|| crate::error::JarvisError::Tool("Missing path".to_string()))?;
-        let content = tokio::fs::read_to_string(path).await?;
-        Ok(json!({"content": content}))
+        let size = tokio::fs::metadata(path).await?.len();
+        if size <= MAX_WHOLE_FILE_BYTES {
+            let content = tokio::fs::read_to_string(path).await?;
+            return Ok(json!({"content": content}));
+        }
+        let mut bytes = Vec::new();
+        tokio::fs::File::open(path)
+            .await?
+            .take(MAX_WHOLE_FILE_BYTES)
+            .read_to_end(&mut bytes)
+            .await?;
+        // The limit can fall inside a character.
+        let valid = match std::str::from_utf8(&bytes) {
+            Ok(text) => text,
+            Err(e) => std::str::from_utf8(&bytes[..e.valid_up_to()]).unwrap_or_default(),
+        };
+        Ok(json!({
+            "content": format!("{}\n\n[{} is {} bytes; only the first 10 MB shown]", valid, path, size)
+        }))
     }
 }
+
+/// Past this, `read` returns the start of a file and `edit` refuses it. Both
+/// would otherwise hold the whole file in memory: asking for a 5 GB log loaded
+/// 5 GB to show its first lines. The same as undo's default copy limit, so a
+/// file too large to edit is also one with no copy to undo to.
+const MAX_WHOLE_FILE_BYTES: u64 = 10 * 1024 * 1024;
 
 pub struct WriteFileTool;
 
@@ -146,6 +170,13 @@ impl Tool for EditFileTool {
         let new_string = args["new_string"]
             .as_str()
             .ok_or_else(|| crate::error::JarvisError::Tool("Missing new_string".to_string()))?;
+        let size = tokio::fs::metadata(path).await?.len();
+        if size > MAX_WHOLE_FILE_BYTES {
+            return Err(crate::error::JarvisError::Tool(format!(
+                "{} is too large to edit ({} bytes; the limit is 10 MB)",
+                path, size
+            )));
+        }
         let content = tokio::fs::read_to_string(path).await?;
         if !content.contains(old_string) {
             return Err(crate::error::JarvisError::Tool(
@@ -155,6 +186,46 @@ impl Tool for EditFileTool {
         let new_content = content.replace(old_string, new_string);
         tokio::fs::write(path, new_content).await?;
         Ok(json!({"success": true, "path": path}))
+    }
+}
+
+/// Delete one file. A folder is refused: it can hold anything, and a copy
+/// of it for undo could be any size. Before it runs, the orchestrator keeps
+/// a copy so `jarvis undo` can bring the file back.
+pub struct DeleteFileTool;
+
+#[async_trait]
+impl Tool for DeleteFileTool {
+    fn name(&self) -> &str {
+        "filesystem.delete"
+    }
+
+    fn description(&self) -> &str {
+        "Delete one file (not a folder). It can be restored with jarvis undo"
+    }
+
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path"}
+            },
+            "required": ["path"]
+        })
+    }
+
+    async fn execute(&self, args: Value) -> Result<Value> {
+        let path = args["path"]
+            .as_str()
+            .ok_or_else(|| crate::error::JarvisError::Tool("Missing path".to_string()))?;
+        if tokio::fs::metadata(path).await?.is_dir() {
+            return Err(crate::error::JarvisError::Tool(format!(
+                "{} is a folder; only single files can be deleted",
+                path
+            )));
+        }
+        tokio::fs::remove_file(path).await?;
+        Ok(json!({"deleted": path}))
     }
 }
 
@@ -424,6 +495,108 @@ mod tests {
 
     fn as_arg(path: &std::path::Path) -> String {
         path.to_string_lossy().to_string()
+    }
+
+    #[tokio::test]
+    async fn delete_removes_one_file() {
+        let dir = temp_dir();
+        let file = dir.join("old.log");
+        std::fs::write(&file, "x").unwrap();
+        let out = DeleteFileTool
+            .execute(json!({ "path": as_arg(&file) }))
+            .await
+            .unwrap();
+        assert_eq!(out["deleted"], as_arg(&file));
+        assert!(!file.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn delete_refuses_a_folder() {
+        // One file at a time: a folder can hold anything, and a copy of it
+        // for undo could be any size.
+        let dir = temp_dir();
+        std::fs::create_dir_all(dir.join("keep")).unwrap();
+        std::fs::write(dir.join("keep/a.txt"), "x").unwrap();
+        let err = DeleteFileTool
+            .execute(json!({ "path": as_arg(&dir.join("keep")) }))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("is a folder"), "{}", err);
+        assert!(dir.join("keep/a.txt").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_missing_file_fails() {
+        let dir = temp_dir();
+        assert!(DeleteFileTool
+            .execute(json!({ "path": as_arg(&dir.join("nope.txt")) }))
+            .await
+            .is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn large_file(dir: &std::path::Path) -> std::path::PathBuf {
+        let path = dir.join("big.log");
+        std::fs::write(&path, "first line\n").unwrap();
+        // Sparse: reads as zeros, takes no disk.
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_len(MAX_WHOLE_FILE_BYTES + 1).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn reading_a_large_file_returns_its_start_and_says_so() {
+        let dir = std::env::temp_dir().join(format!("jarvis-large-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = large_file(&dir);
+        let out = ReadFileTool.execute(json!({ "path": path })).await.unwrap();
+        let content = out["content"].as_str().unwrap();
+        assert!(content.starts_with("first line"), "{}", &content[..20]);
+        assert!(
+            content.len() <= MAX_WHOLE_FILE_BYTES as usize + 200,
+            "{}",
+            content.len()
+        );
+        assert!(
+            content.ends_with("only the first 10 MB shown]"),
+            "{}",
+            &content[content.len() - 80..]
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn reading_cuts_on_a_character_boundary() {
+        let dir = std::env::temp_dir().join(format!("jarvis-large-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("wide.txt");
+        // Every character is 3 bytes, so the limit falls inside one.
+        let line = "\u{20AC}".repeat((MAX_WHOLE_FILE_BYTES as usize / 3) + 2);
+        std::fs::write(&path, line).unwrap();
+        let out = ReadFileTool.execute(json!({ "path": path })).await.unwrap();
+        assert!(out["content"].as_str().unwrap().starts_with('\u{20AC}'));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn editing_a_large_file_is_refused_and_leaves_it_alone() {
+        let dir = std::env::temp_dir().join(format!("jarvis-large-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = large_file(&dir);
+        let err = EditFileTool
+            .execute(json!({ "path": path, "old_string": "first", "new_string": "second" }))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("too large to edit"), "{}", err);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            MAX_WHOLE_FILE_BYTES + 1
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]

@@ -1,6 +1,6 @@
 # Roadmap
 
-Confirmed by the owner 2026-11-03, except where an item says "proposed".
+Confirmed by the owner 2026-11-03 and 2026-11-05.
 Where Jarvis stands today is in [STATUS.md](STATUS.md).
 
 Phases 7-11 grew out of the plan written after Phase 4 (voice, proactive
@@ -43,24 +43,25 @@ machines) 11.
    the daemon died mid-request.
 4. `orchestrator.rs` (3,500 lines) split by what each part does.
 
-## Milestone 6.2 - small items (after 6.1)
+## Milestone 6.2 - small items (built; merges after verification)
 
-* Marking for earlier turns: untrusted text from history is wrapped like
-  text read in the current request.
-* The edit tool reads a whole file into memory: refuse or stream past the
-  undo size limit.
+* Marking for earlier turns (tags explained only to a turn that has some).
+* `read` returns the start of a file over 10 MB; `edit` refuses one.
 * A test for the TUI's undo handler.
-* From the original Phase 6 plan, not yet built: a `filesystem.delete` tool
-  that keeps a copy (today deletes go through `shell.run` and cannot be
-  undone), and a dry-run preview for batch operations ("about to rename
-  340 files").
-* The two memory cases that fail on every qwen run
-  (`memory.correction`, `memory.followup_file`).
-* Answer checks that match text in the raw tool log.
-* An eval attempt that times out while the provider stalls reads as a wrong
-  route; report it as no answer, as `unavailable` does for HTTP errors.
+* `filesystem.delete`: one file at a time, asks first, kept for undo.
+* Evals: relative paths and commands run in the sandbox (`[tools] work_dir`);
+  a turn that never finishes says so; a raw tool log is not an answer.
+* The two memory cases failing on small models are not a Jarvis bug: the
+  history reaches the model and nemotron passes them.
 
-## Proposed: a week of real use (before Phase 7)
+## Later, when wanted: batch operations
+
+Renaming or moving many files at once, with a dry-run preview first ("about to
+rename 340 files"). Infrequent but very useful (owner, 2026-11-08). Jarvis has no
+batch operation yet - each change is its own call and prompt - so the preview is
+designed with the operation, not before it.
+
+## A week of real use (before Phase 7)
 
 Use Jarvis for ordinary work for a week and log every failure: wrong
 route, wrong answer, a prompt that was noise, something it could not do.
@@ -126,10 +127,3 @@ reach (T3 Code's "hit every surface"), which is a reason to add it late.
   device a tool may act on.
 * Secret references (T3 Code's `request_secret`): a secret entered
   privately, never in the conversation.
-
-## Open questions for the owner
-
-1. The real-use week before Phase 7 - yes or no?
-2. Phase 10 (UI) before Phase 11 (other machines), as listed - or the
-   other way round? Proposed: UI first, because it completes the
-   single-machine product; other machines multiply it.

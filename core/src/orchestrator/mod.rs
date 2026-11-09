@@ -63,7 +63,8 @@ use crate::router::{self, Route};
 use crate::taint::{self, SessionTrust, Source};
 use crate::tools::{
     filesystem::{
-        EditFileTool, ListDirTool, ReadFileTool, SearchFilesTool, StatFileTool, WriteFileTool,
+        DeleteFileTool, EditFileTool, ListDirTool, ReadFileTool, SearchFilesTool, StatFileTool,
+        WriteFileTool,
     },
     parser,
     shell::RunShellTool,
@@ -196,7 +197,10 @@ impl Orchestrator {
         tools.register(Box::new(StatFileTool));
         tools.register(Box::new(WriteFileTool));
         tools.register(Box::new(EditFileTool));
-        tools.register(Box::new(RunShellTool));
+        tools.register(Box::new(DeleteFileTool));
+        tools.register(Box::new(RunShellTool {
+            work_dir: config.tools.work_dir.clone(),
+        }));
         tools.register(Box::new(GetSystemInfoTool));
         tools.register(Box::new(ListProcessesTool));
         let session_id = Uuid::new_v4().to_string();

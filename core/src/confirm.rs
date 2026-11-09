@@ -75,6 +75,10 @@ pub fn describe_action(tool: &str, args: &Value) -> String {
             Some(path) => format!("Write to file: {}", shorten(path)),
             None => "Write a file".to_string(),
         },
+        "filesystem.delete" => match str_arg(args, "path") {
+            Some(path) => format!("Delete file: {}", shorten(path)),
+            None => "Delete a file".to_string(),
+        },
         "filesystem.edit" => match str_arg(args, "path") {
             Some(path) => format!("Edit file: {}", shorten(path)),
             None => "Edit a file".to_string(),
@@ -380,6 +384,10 @@ mod tests {
         assert_eq!(
             describe_action("filesystem.edit", &json!({"path": "/tmp/a.txt"})),
             "Edit file: /tmp/a.txt"
+        );
+        assert_eq!(
+            describe_action("filesystem.delete", &json!({"path": "/tmp/a.txt"})),
+            "Delete file: /tmp/a.txt"
         );
     }
 

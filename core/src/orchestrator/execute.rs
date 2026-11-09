@@ -482,7 +482,10 @@ impl Orchestrator {
     /// (no copy over the size limit), `unavailable` (no undo folder), or
     /// `never` (commands and other tools).
     pub(super) fn undo_note(&self, name: &str, args: &Value) -> &'static str {
-        if !matches!(name, "filesystem.write" | "filesystem.edit") {
+        if !matches!(
+            name,
+            "filesystem.write" | "filesystem.edit" | "filesystem.delete"
+        ) {
             return "never";
         }
         let Some(store) = &self.undo else {
@@ -567,7 +570,10 @@ impl Orchestrator {
             // it back. Every write goes through here, typed or the model's.
             let pending = match (&self.undo, args.get("path").and_then(Value::as_str)) {
                 (Some(store), Some(path))
-                    if matches!(name.as_str(), "filesystem.write" | "filesystem.edit") =>
+                    if matches!(
+                        name.as_str(),
+                        "filesystem.write" | "filesystem.edit" | "filesystem.delete"
+                    ) =>
                 {
                     match store.before_change(std::path::Path::new(path), &name, &self.session_id) {
                         Ok(pending) => Some(pending),
@@ -657,7 +663,13 @@ impl Orchestrator {
         if tool.starts_with("filesystem.") {
             if let Some(path) = args.get("path").and_then(Value::as_str) {
                 let expanded = router::expand_tilde(path);
-                args["path"] = Value::String(expanded);
+                let resolved = match &self.config.tools.work_dir {
+                    Some(dir) if !std::path::Path::new(&expanded).is_absolute() => {
+                        dir.join(&expanded).display().to_string()
+                    }
+                    _ => expanded,
+                };
+                args["path"] = Value::String(resolved);
             }
         }
         args

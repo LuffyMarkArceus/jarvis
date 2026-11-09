@@ -246,6 +246,9 @@ pub struct McpConfig {
 pub struct ToolsConfig {
     pub require_confirmation: bool,
     pub allowed_shell_commands: Vec<String>,
+    /// Where relative paths and shell commands run. Unset: wherever the
+    /// process started. Not a sandbox - an absolute path goes anywhere.
+    pub work_dir: Option<PathBuf>,
 }
 
 impl Default for ToolsConfig {
@@ -253,6 +256,7 @@ impl Default for ToolsConfig {
         Self {
             require_confirmation: true,
             allowed_shell_commands: Vec::new(),
+            work_dir: None,
         }
     }
 }

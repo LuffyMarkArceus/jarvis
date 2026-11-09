@@ -266,7 +266,8 @@ fn select_model_tools(
             | "filesystem.search"
             | "filesystem.stat"
             | "filesystem.write"
-            | "filesystem.edit" => intent.files,
+            | "filesystem.edit"
+            | "filesystem.delete" => intent.files,
             "shell.run" => intent.shell,
             "process.list" => intent.processes,
             "system.info" => intent.system,
@@ -401,7 +402,7 @@ mod tests {
         tools.register(Box::new(crate::tools::filesystem::ListDirTool));
         tools.register(Box::new(crate::tools::filesystem::ReadFileTool));
         tools.register(Box::new(crate::tools::filesystem::WriteFileTool));
-        tools.register(Box::new(crate::tools::shell::RunShellTool));
+        tools.register(Box::new(crate::tools::shell::RunShellTool::default()));
         tools.register(Box::new(crate::tools::system::GetSystemInfoTool));
         tools
     }

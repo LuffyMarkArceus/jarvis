@@ -30,6 +30,7 @@ pub fn known_tool_names() -> Vec<&'static str> {
         "filesystem.stat",
         "filesystem.write",
         "filesystem.edit",
+        "filesystem.delete",
         "process.list",
         "shell.run",
         "system.info",
