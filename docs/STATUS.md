@@ -4,15 +4,15 @@ Where Jarvis is, what is open, and where to read more. Updated at the end of
 every phase, as part of finishing it. The plan ahead is in
 [ROADMAP.md](ROADMAP.md).
 
-Last updated: 2026-11-05, after Milestone 6.1 (main `ee9bc63`).
+Last updated: 2026-11-09, after Milestone 6.2 (main `f91104c`).
 
 ## At a glance
 
 | | |
 | --- | --- |
 | Code | Rust workspace (`core`, `cli`, `tui`, `common`) + Python MCP sidecars; ~25k lines of Rust |
-| Tests | 451 (`cargo test --workspace`), CI on every push |
-| Evals | 53 cases (`jarvis eval`); qwen2.5:3b 90.6%, llama3.2:1b 81.8% ([BASELINES](../evals/BASELINES.md)) |
+| Tests | 469 (`cargo test --workspace`), CI on every push |
+| Evals | 53 cases (`jarvis eval`); qwen2.5:3b 90.6%, llama3.2:1b 82.4% ([BASELINES](../evals/BASELINES.md)) |
 | Models | local: Ollama (llama3.2:1b for development, qwen2.5:3b for verification); remote: OpenRouter free tier (nemotron-3-ultra) |
 | Lessons | 28 entries in the [learning log](learning/README.md) |
 
@@ -33,6 +33,7 @@ earlier sessions and is not in the repository.
 | 5b+ | Follow-ups: round limit per tier, repeat guard, closing answer, web-call egress check, frozen web pages | 2026-10-28 | learning #20-22 |
 | 6 | Prompt-injection gate, exfiltration rule, undo, marking, injection evals | 2026-11-02 | [injection-and-undo](design/injection-and-undo.md) |
 | 6.1 | Relay note, router fixes, a request never runs twice, orchestrator split | 2026-11-05 | learning #27-28 |
+| 6.2 | Earlier-turn marking, `filesystem.delete` with undo, large-file limits, eval sandbox (`work_dir`) and honesty fixes | 2026-11-09 | [ROADMAP](ROADMAP.md) |
 
 ## Open items
 

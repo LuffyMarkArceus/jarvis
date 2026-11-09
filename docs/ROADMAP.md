@@ -43,7 +43,7 @@ machines) 11.
    the daemon died mid-request.
 4. `orchestrator.rs` (3,500 lines) split by what each part does.
 
-## Milestone 6.2 - small items (built; merges after verification)
+## Milestone 6.2 - small items (done, 2026-11-09, PR #3)
 
 * Marking for earlier turns (tags explained only to a turn that has some).
 * `read` returns the start of a file over 10 MB; `edit` refuses one.
