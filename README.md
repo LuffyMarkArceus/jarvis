@@ -223,6 +223,7 @@ api_key_env = "OPENROUTER_API_KEY"
 default_model = "google/gemma-4-31b-it:free"
 data_policy = "may_train"
 max_rounds = 8                # model round-trips per request (default 8)
+max_answer_tokens = 8192      # longest answer (default 2048); reasoning models count thinking
 default = false               # sessions start local
 ```
 
