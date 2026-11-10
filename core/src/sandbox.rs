@@ -61,8 +61,9 @@ impl Sandbox {
         push(&["--dev".as_ref(), "/dev".as_ref()]);
         push(&["--proc".as_ref(), "/proc".as_ref()]);
         push(&["--tmpfs".as_ref(), "/tmp".as_ref()]);
-        for dir in self.writable.iter().filter(|p| p.exists()) {
-            push(&["--bind".as_ref(), dir.as_os_str(), dir.as_os_str()]);
+        for (dir, writable) in self.mounts() {
+            let how = if writable { "--bind" } else { "--ro-bind" };
+            push(&[how.as_ref(), dir.as_os_str(), dir.as_os_str()]);
         }
         // After the binds: in bwrap the later mount wins, so a hidden folder
         // inside the workspace stays hidden.
@@ -85,6 +86,54 @@ impl Sandbox {
             push(&["--chdir".as_ref(), dir.as_os_str()]);
         }
         args
+    }
+}
+
+impl Sandbox {
+    /// The writable folders, and the folders inside them kept read-only so a
+    /// hidden folder cannot be moved aside and forged: hiding
+    /// `.config/jarvis` stops it being renamed, not `.config`. Shallowest
+    /// first, so a deeper mount wins.
+    ///
+    /// A hidden folder that does not exist yet has its deepest existing
+    /// parent locked instead; when that parent is the writable folder
+    /// itself, nothing smaller can be locked and the folder is left out.
+    fn mounts(&self) -> Vec<(PathBuf, bool)> {
+        let mut mounts: Vec<(PathBuf, bool)> = Vec::new();
+        for w in self.writable.iter().filter(|p| p.is_dir()) {
+            let mut keep = true;
+            let mut guards = Vec::new();
+            for h in self.hidden.iter().filter(|h| h.starts_with(w) && *h != w) {
+                let deepest = if h.exists() {
+                    h.parent().map(Path::to_path_buf)
+                } else {
+                    h.ancestors().find(|a| a.exists()).map(Path::to_path_buf)
+                };
+                let Some(deepest) = deepest else { continue };
+                if deepest == *w && !h.exists() {
+                    tracing::warn!(
+                        "{} is not writable to commands: {} does not exist yet and could be planted",
+                        w.display(),
+                        h.display()
+                    );
+                    keep = false;
+                    break;
+                }
+                guards.extend(
+                    deepest
+                        .ancestors()
+                        .take_while(|a| *a != w.as_path())
+                        .map(Path::to_path_buf),
+                );
+            }
+            if keep {
+                mounts.push((w.clone(), true));
+                mounts.extend(guards.into_iter().map(|g| (g, false)));
+            }
+        }
+        mounts.sort_by_key(|(p, _)| p.components().count());
+        mounts.dedup();
+        mounts
     }
 }
 
@@ -333,5 +382,28 @@ mod tests {
         ] {
             assert!(!is_secret_var(name, &keys), "{}", name);
         }
+    }
+
+    #[test]
+    fn a_workspace_where_a_hidden_folder_could_be_planted_is_not_writable() {
+        let home = temp();
+        let sandbox = Sandbox {
+            writable: vec![home.clone()],
+            hidden: vec![home.join("not-yet/jarvis")],
+            network: false,
+        };
+        let args = s(&sandbox.bwrap_args(None, false));
+        let h = home.display().to_string();
+        assert!(position(&args, &["--bind", &h, &h]).is_none(), "{:?}", args);
+        std::fs::create_dir_all(home.join("not-yet")).unwrap();
+        let args = s(&sandbox.bwrap_args(None, false));
+        let guard = home.join("not-yet").display().to_string();
+        assert!(position(&args, &["--bind", &h, &h]).is_some(), "{:?}", args);
+        assert!(
+            position(&args, &["--ro-bind", &guard, &guard]).is_some(),
+            "{:?}",
+            args
+        );
+        let _ = std::fs::remove_dir_all(home);
     }
 }

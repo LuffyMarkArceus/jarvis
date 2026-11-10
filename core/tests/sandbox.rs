@@ -211,3 +211,62 @@ async fn the_session_bus_and_agent_sockets_are_out_of_reach() {
     let stdout = out["stdout"].as_str().unwrap();
     assert_eq!(stdout.trim(), "0", "{}", out);
 }
+
+/// A writable "home" with Jarvis's config two levels down.
+fn home_setup() -> (Dirs, PathBuf, RunShellTool) {
+    let d = dirs();
+    let home = d.root.join("home");
+    let config = home.join(".config/jarvis");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(config.join("permissions.toml"), "real").unwrap();
+    std::fs::create_dir_all(home.join(".local")).unwrap();
+    let sandbox = Sandbox {
+        writable: vec![home.clone()],
+        hidden: vec![config.clone(), home.join(".local/share/jarvis")],
+        network: false,
+    };
+    let t = RunShellTool {
+        work_dir: Some(home.clone()),
+        sandbox: Some(sandbox),
+        key_vars: vec![],
+    };
+    (d, home, t)
+}
+
+#[tokio::test]
+async fn renaming_a_folder_above_a_hidden_one_cannot_forge_it() {
+    // Hiding `.config/jarvis` blocks renaming it, not renaming `.config`:
+    // a command could move the real one aside and plant its own rules.
+    if skip() {
+        return;
+    }
+    let (_d, home, t) = home_setup();
+    run(
+        &t,
+        json!({ "command": "mv .config .config.moved; mkdir -p .config/jarvis; echo forged > .config/jarvis/permissions.toml" }),
+    )
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(home.join(".config/jarvis/permissions.toml")).unwrap(),
+        "real"
+    );
+    assert!(!home.join(".config.moved").exists());
+}
+
+#[tokio::test]
+async fn a_hidden_folder_that_does_not_exist_yet_cannot_be_planted() {
+    if skip() {
+        return;
+    }
+    let (_d, home, t) = home_setup();
+    run(
+        &t,
+        json!({ "command": "mkdir -p .local/share/jarvis && echo forged > .local/share/jarvis/memory.db" }),
+    )
+    .await;
+    assert!(!home.join(".local/share/jarvis").exists());
+    // The rest of the workspace stays writable.
+    let out = run(&t, json!({ "command": "echo ok > notes.md" })).await;
+    assert_eq!(out["status"], 0, "{}", out);
+    assert!(home.join("notes.md").exists());
+}
