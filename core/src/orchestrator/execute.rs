@@ -272,6 +272,14 @@ impl Orchestrator {
         outcome
     }
 
+    /// Whether this call runs outside the sandbox: asked for, or there is
+    /// no sandbox to run it in.
+    pub(super) fn runs_outside(&self, name: &str, args: &Value) -> bool {
+        name == "shell.run"
+            && (args["outside_sandbox"].as_bool().unwrap_or(false)
+                || !crate::sandbox::ready(&self.config))
+    }
+
     /// Run a single tool call through the permission gate and the registry.
     ///
     /// `untrusted` is what the model read that the owner has not vouched
@@ -284,8 +292,62 @@ impl Orchestrator {
         confirm: Option<&dyn ConfirmationHandler>,
         untrusted: &[Source],
     ) -> ToolOutcome {
-        let args = self.sanitize_args(&name, args);
-        let verdict = self.permissions.check_permission(&name, &args);
+        let mut args = self.sanitize_args(&name, args);
+        let mut verdict = self.permissions.check_permission(&name, &args);
+
+        // Outside the sandbox: asked every time, never on a page's say-so,
+        // and not at all when the owner switched it off. Deny still wins.
+        if self.runs_outside(&name, &args) && verdict.action != PermissionAction::Deny {
+            if let Some(map) = args.as_object_mut() {
+                map.insert("outside_sandbox".into(), json!(true));
+            }
+            if !self.config.sandbox.allow_outside {
+                let msg = format!(
+                    "Tool {} was not run: running a command outside the sandbox is switched off ([sandbox] allow_outside). Args: {}",
+                    name,
+                    compact_args(&args)
+                );
+                let _ = self.permissions.log_audit(
+                    Some(&self.session_id),
+                    &name,
+                    &args,
+                    "outside_sandbox_off",
+                    Some(&msg),
+                );
+                return ToolOutcome {
+                    name,
+                    args,
+                    status: OutcomeStatus::Denied,
+                    output: msg,
+                    result: None,
+                    pattern: verdict.pattern,
+                };
+            }
+            if !untrusted.is_empty() {
+                let names: Vec<&str> = untrusted.iter().map(|s| s.name.as_str()).collect();
+                let msg = format!(
+                    "Tool {} was not run: the model asked to run outside the sandbox after reading content you have not marked as trusted ({}). If you want it, run it yourself.",
+                    name,
+                    names.join(", ")
+                );
+                let _ = self.permissions.log_audit(
+                    Some(&self.session_id),
+                    &name,
+                    &args,
+                    "outside_sandbox_untrusted",
+                    Some(&msg),
+                );
+                return ToolOutcome {
+                    name,
+                    args,
+                    status: OutcomeStatus::Untrusted,
+                    output: msg,
+                    result: None,
+                    pattern: verdict.pattern,
+                };
+            }
+            verdict.action = PermissionAction::Ask;
+        }
 
         if !untrusted.is_empty() && verdict.action != PermissionAction::Deny {
             return self

@@ -68,6 +68,9 @@ pub fn describe_action(tool: &str, args: &Value) -> String {
             )
         }
         "shell.run" => match str_arg(args, "command") {
+            Some(command) if args["outside_sandbox"].as_bool() == Some(true) => {
+                format!("Run OUTSIDE the sandbox: {}", shorten(command))
+            }
             Some(command) => format!("Run shell command: {}", shorten(command)),
             None => "Run a shell command".to_string(),
         },
@@ -421,5 +424,19 @@ mod tests {
         let prompt = confirmation_prompt("shell.run", &json!({"command": long}));
         assert!(prompt.contains("..."));
         assert!(prompt.chars().count() < 600);
+    }
+
+    #[test]
+    fn a_command_outside_the_sandbox_says_so() {
+        let text = describe_action(
+            "shell.run",
+            &json!({"command": "git push", "outside_sandbox": true}),
+        );
+        assert_eq!(text, "Run OUTSIDE the sandbox: git push");
+        let text = describe_action(
+            "shell.run",
+            &json!({"command": "ls", "outside_sandbox": false}),
+        );
+        assert_eq!(text, "Run shell command: ls");
     }
 }
