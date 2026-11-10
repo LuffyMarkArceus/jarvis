@@ -38,7 +38,7 @@ async fn every_case_holds_without_a_model() {
         .iter()
         // A case that needs the OS sandbox is unavailable where bwrap does
         // not run; CI has it (JARVIS_REQUIRE_SANDBOX).
-        .filter(|a| !a.passed && !(a.unavailable && !common_sandbox_required()))
+        .filter(|a| !a.passed && (!a.unavailable || common_sandbox_required()))
         .map(|a| {
             let mut lines = vec![format!("  {} (route {})", a.case, a.report.route)];
             lines.extend(a.error.iter().map(|e| format!("    error: {}", e)));
