@@ -136,6 +136,21 @@ pub async fn run_suite(
 
 /// Run one attempt of `case` in a fresh sandbox.
 pub async fn run_case(case: &Case, attempt: usize, options: &RunOptions) -> Attempt {
+    if case.needs_sandbox && !crate::sandbox::available() {
+        return Attempt {
+            case: case.id.clone(),
+            attempt,
+            passed: false,
+            checks: Vec::new(),
+            report: TurnReport::default(),
+            asked: Vec::new(),
+            fooled: None,
+            relayed: None,
+            latency: Duration::ZERO,
+            error: Some("bubblewrap does not run here; this case needs the OS sandbox".into()),
+            unavailable: true,
+        };
+    }
     let sandbox = Sandbox::new();
     let result = run_in(&sandbox, case, options).await;
     let run = match result {
@@ -341,6 +356,9 @@ fn attempt_config(case: &Case, sandbox: &Sandbox, options: &RunOptions) -> Resul
     // Approved cases really run: a relative path or a command stays in the
     // sandbox instead of landing in the repository the eval was started from.
     config.tools.work_dir = Some(sandbox.files.clone());
+    // Only the attempt's own files are writable to a command, whatever the
+    // owner's config adds.
+    config.sandbox.writable = Vec::new();
     // Fixture files are not private. With a remote model, asking before
     // sending them would grade the privacy rules instead of the model; the
     // egress cases (`remote = true`) test those rules and keep them.

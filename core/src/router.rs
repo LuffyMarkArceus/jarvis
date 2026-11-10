@@ -234,7 +234,14 @@ pub fn route(input: &str) -> Route {
 
     let lower = raw.to_lowercase();
 
-    // 2. An explicit command.
+    // 2. An explicit command; "run outside the sandbox: X" is the owner's
+    //    own way out of the sandbox, and still asks.
+    if let Some(cmd) = outside_command(raw) {
+        return Route::Tool {
+            name: "shell.run".to_string(),
+            args: json!({ "command": cmd, "outside_sandbox": true }),
+        };
+    }
     if let Some(cmd) = explicit_command(raw) {
         return Route::Tool {
             name: "shell.run".to_string(),
@@ -330,7 +337,8 @@ pub fn route(input: &str) -> Route {
     if let Some(app) = app_after(raw) {
         return Route::Tool {
             name: "shell.run".to_string(),
-            args: json!({ "command": app, "background": true }),
+            // A GUI app needs a writable profile and usually the network.
+            args: json!({ "command": app, "background": true, "outside_sandbox": true }),
         };
     }
 
@@ -947,6 +955,35 @@ const CHANGE_WORDS: &[&str] = &[
 /// "... and run it" ran the command `it`, "how do i run docker" ran `docker`.
 /// What it refers to is for the model to work out.
 fn explicit_command(raw: &str) -> Option<String> {
+    let rest = strip_openers(raw);
+    let first = rest.split_whitespace().next()?;
+    if !["run", "execute", "eval"].contains(&clean_word(first).as_str()) {
+        return None;
+    }
+    let command = command_after(rest, &[clean_word(first).as_str()])?;
+    let next = clean_word(command.split_whitespace().next()?);
+    // "run it", "run the tests": a reference to something, not a command.
+    const REFERENCES: &[&str] = &[
+        "it", "this", "that", "these", "those", "them", "the", "a", "an", "my", "your", "our",
+        "what", "whatever", "all", "any", "some",
+    ];
+    (!REFERENCES.contains(&next.as_str())).then_some(command)
+}
+
+/// "run outside the sandbox: <command>" - the command, if that is what
+/// was asked.
+fn outside_command(raw: &str) -> Option<String> {
+    const PHRASE: &str = "run outside the sandbox";
+    let rest = strip_openers(raw);
+    if !rest.to_lowercase().starts_with(PHRASE) {
+        return None;
+    }
+    let command = rest.get(PHRASE.len()..)?.trim_start_matches(':').trim();
+    (!command.is_empty()).then(|| command.to_string())
+}
+
+/// Polite openers removed from the start of a request.
+fn strip_openers(raw: &str) -> &str {
     let mut rest = raw.trim();
     for opener in [
         "please ",
@@ -960,18 +997,7 @@ fn explicit_command(raw: &str) -> Option<String> {
             rest = rest.get(opener.len()..).unwrap_or(rest).trim_start();
         }
     }
-    let first = rest.split_whitespace().next()?;
-    if !["run", "execute", "eval"].contains(&clean_word(first).as_str()) {
-        return None;
-    }
-    let command = command_after(rest, &[clean_word(first).as_str()])?;
-    let next = clean_word(command.split_whitespace().next()?);
-    // "run it", "run the tests": a reference to something, not a command.
-    const REFERENCES: &[&str] = &[
-        "it", "this", "that", "these", "those", "them", "the", "a", "an", "my", "your", "our",
-        "what", "whatever", "all", "any", "some",
-    ];
-    (!REFERENCES.contains(&next.as_str())).then_some(command)
+    rest
 }
 
 /// Is reading or listing `path` all that was asked? The path alone, or a
@@ -1230,6 +1256,26 @@ mod tests {
         assert_eq!(name, "shell.run");
         assert_eq!(args["command"], "firefox");
         assert_eq!(args["background"], true);
+        // A GUI app needs a writable profile and usually the network.
+        assert_eq!(args["outside_sandbox"], true);
+    }
+
+    #[test]
+    fn runs_a_command_outside_the_sandbox_when_told_to() {
+        for input in [
+            "run outside the sandbox: git push",
+            "please run outside the sandbox git push",
+            "Run outside the sandbox: git push",
+        ] {
+            let r = route(input);
+            let (name, args) = tool_of(&r).unwrap_or_else(|| panic!("{}: {:?}", input, r));
+            assert_eq!(name, "shell.run", "{}", input);
+            assert_eq!(args["command"], "git push", "{}", input);
+            assert_eq!(args["outside_sandbox"], true, "{}", input);
+        }
+        let r = route("run echo test");
+        let (_, args) = tool_of(&r).unwrap();
+        assert!(args.get("outside_sandbox").is_none(), "{}", args);
     }
 
     #[test]

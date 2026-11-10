@@ -271,6 +271,40 @@ so), 500 MB in total. Commands cannot be undone, and their prompts say so.
 undo could only rewrite the file from memory. The design and threat model
 are in [docs/design/injection-and-undo.md](docs/design/injection-and-undo.md).
 
+### The sandbox
+
+Every command Jarvis runs (`shell.run`) runs in a bubblewrap sandbox: it can
+read your files but write only the work folder (`[tools] work_dir`, plus
+`[sandbox] writable`) and a private `/tmp`, has no network, and cannot see
+`~/.ssh`, `~/.gnupg`, Jarvis's config, permissions, keys, memory, audit log
+or undo copies. Keys are removed from every command's environment.
+
+A command that needs more runs outside the sandbox, and that always asks -
+even where your rules allow `shell.run`:
+
+```
+Jarvis wants to: Run OUTSIDE the sandbox: git push
+```
+
+Ask for it with `run outside the sandbox: git push`; app launches ("open
+firefox") run outside too. After the model has read untrusted content, or
+with nobody to ask, a call outside the sandbox is not run at all. Without
+bubblewrap every command counts as outside and asks.
+
+```toml
+[sandbox]
+enabled = true
+writable = ["/mnt/storage/CS"]   # besides [tools] work_dir
+hidden = []                      # besides the built-in list
+network = false
+allow_outside = true             # false: never run outside the sandbox
+```
+
+One thing the sandbox cannot catch: a command can change files in the work
+folder that later run with your full rights (a git hook, a `Makefile`). Before
+approving a command outside the sandbox in a folder Jarvis has been working
+in, know what it will run. Details and known gaps: [docs/design/sandbox.md](docs/design/sandbox.md).
+
 ## MCP sidecars
 
 MCP servers are started over stdio and their tools are namespaced as

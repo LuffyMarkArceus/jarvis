@@ -54,6 +54,25 @@ machines) 11.
 * The two memory cases failing on small models are not a Jarvis bug: the
   history reaches the model and nemotron passes them.
 
+## Milestone 6.3 - OS sandbox (done, 2026-11-09)
+
+Before Phase 7, because an unattended job needs a boundary that does not
+depend on someone reading a prompt (owner, 2026-11-09).
+
+* `shell.run` runs in bubblewrap: writes only to the workspace, no network,
+  Jarvis's config, permissions, keys, memory, audit, undo and socket hidden.
+* Keys removed from every command's environment.
+* Outside the sandbox (`outside_sandbox`, "run outside the sandbox: X", app
+  launches) always asks; never after untrusted content or unattended.
+* [docs/design/sandbox.md](design/sandbox.md).
+
+## Later, when wanted: Claude Code / Codex beside Jarvis
+
+Driving the owner's own installed agent CLIs from Jarvis. Revisit after the UI
+and/or other-machines phases, if at all (owner, 2026-11-09). Their tools would
+run outside Jarvis's guardrails, so it is a separate trust boundary, not a
+model provider; check each product's terms first.
+
 ## Later, when wanted: batch operations
 
 Renaming or moving many files at once, with a dry-run preview first ("about to

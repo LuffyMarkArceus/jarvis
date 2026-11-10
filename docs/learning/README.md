@@ -504,6 +504,27 @@ section comments and reformatting.
 from behaviour changes and diffed the line multiset, so a reviewer could trust it
 without reading 3,500 lines."
 
+## 29. Protect the guard from what it guards
+
+**Lesson.** A control the controlled code can edit is a suggestion. When you add
+a boundary, list the files and channels that *implement* your other controls,
+and put them outside it first.
+
+**In this repo.** Designing the shell sandbox, we listed what a command could
+reach. The permission rules, the audit log and the undo copies were ordinary
+files the owner's account - and so every command - could write: one `sed` turns
+`shell.run` to allow and erases the trail. The daemon socket was a second door:
+a command could ask Jarvis for a fresh turn with none of this turn's labels. And
+the API key sat in the environment every command inherited. The sandbox hides
+all of them; a test runs real bubblewrap and checks a hidden folder inside the
+writable workspace stays hidden, and mutation checks prove the tests notice
+when the mount order is swapped.
+
+**Say it in an interview.** "Before deciding what the sandbox allows, we asked
+what enforces our other rules - and found the policy file, the audit log and
+the control socket were all writable by the thing being policed. Those went
+behind the boundary first."
+
 ---
 
 ## Self-test

@@ -24,7 +24,18 @@ jobs:
         uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --workspace
+      # The OS sandbox tests run real bubblewrap. Ubuntu 24.04 restricts
+      # unprivileged user namespaces through AppArmor; lift that for the job.
+      - name: Install bubblewrap
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bwrap --ro-bind / / true
       - name: Run tests
+        # A sandbox test that would skip here fails instead.
+        env:
+          JARVIS_REQUIRE_SANDBOX: "1"
         run: cargo test --workspace
       - name: Test sidecars
         run: |
