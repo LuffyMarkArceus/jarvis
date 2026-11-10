@@ -508,3 +508,26 @@ async fn other_tools_are_not_web_calls() {
     assert_eq!(sent, args);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn the_owner_is_told_how_to_get_past_the_sandbox() {
+    // The hint is written for the model; the owner who typed `run X` needs
+    // the words that run it outside.
+    let outcome = ToolOutcome {
+        name: "shell.run".into(),
+        args: json!({ "command": "touch /etc/x" }),
+        status: OutcomeStatus::Succeeded,
+        output: "stderr: touch: Read-only file system".into(),
+        result: Some(json!({ "status": 1, "sandboxed": true, "hint": "The sandbox stopped this" })),
+        pattern: None,
+    };
+    let shown = render_tool_output(&outcome);
+    assert!(
+        shown.contains("run outside the sandbox: touch /etc/x"),
+        "{}",
+        shown
+    );
+    let mut fine = outcome.clone();
+    fine.result = Some(json!({ "status": 1, "sandboxed": true }));
+    assert!(!render_tool_output(&fine).contains("outside the sandbox"));
+}

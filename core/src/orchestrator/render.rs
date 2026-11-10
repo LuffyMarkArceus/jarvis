@@ -236,6 +236,16 @@ pub(super) fn render_tool_output(outcome: &ToolOutcome) -> String {
                     out.push_str(&outcome.output);
                     out.push('\n');
                 }
+                let stopped = outcome
+                    .result
+                    .as_ref()
+                    .is_some_and(|r| r.get("hint").is_some());
+                if stopped {
+                    out.push_str(&format!(
+                        "The sandbox stopped this: commands can write only the work folder and have no network. To run it without the sandbox, say: run outside the sandbox: {}\n",
+                        cmd
+                    ));
+                }
             }
         }
         "system.info" => {
