@@ -324,7 +324,7 @@ fn detect_intent(input: &str) -> Intent {
         files: has_file_noun || has_file_path || (has_file_verb && has_path(&without_urls)),
         shell: [
             "run", "execute", "exec", "command", "install", "launch", "kill", "sudo", "package",
-            "service",
+            "service", "shell", "terminal", "bash",
         ]
         .iter()
         .any(|w| words.contains(*w)),
@@ -453,6 +453,20 @@ mod tests {
             &fetch_tools(),
         );
         assert!(!plan.web);
+    }
+
+    #[test]
+    fn naming_the_shell_offers_it() {
+        // "use the shell to ..." was offered only file tools: every model was
+        // graded on a request it could not do the way it was asked.
+        for input in [
+            "use the shell to add a line to /tmp/log.txt",
+            "in a terminal, count the lines in notes.md",
+            "with bash, list the biggest files here",
+        ] {
+            let plan = plan(input, Route::Model, &native(), &fetch_tools());
+            assert!(plan.allows("shell.run"), "{}", input);
+        }
     }
 
     #[test]
