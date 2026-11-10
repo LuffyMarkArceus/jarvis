@@ -543,3 +543,18 @@ fn every_request_caps_the_answer_length() {
     assert_eq!(jarvis.model_options(&model)["num_predict"], 512);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn jarvis_has_a_voice_in_chat_and_none_in_facts_or_actions() {
+    // Owner, 2026-11-10: "a bit witty for chat, while factual for actions
+    // and facts". Asked for a favourite MCU character, llama refused to have
+    // one: nothing said it could.
+    let (jarvis, dir) = web_jarvis();
+    let chat = jarvis.conversation_system_prompt();
+    assert!(chat.contains("witty"), "{}", chat);
+    assert!(chat.contains("opinions"), "{}", chat);
+    assert!(chat.contains("Never let wit change a fact"), "{}", chat);
+    let tools = jarvis.tool_system_prompt(&[]);
+    assert!(tools.contains("plain and factual about what was done"), "{}", tools);
+    let _ = std::fs::remove_dir_all(dir);
+}
