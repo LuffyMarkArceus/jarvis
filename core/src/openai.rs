@@ -194,6 +194,10 @@ pub fn to_openai_options(options: Option<&Value>) -> Value {
             out.insert(key.to_string(), value.clone());
         }
     }
+    // Ollama's name for the answer cap; OpenAI's is `max_tokens`.
+    if let Some(value) = options.get("num_predict") {
+        out.insert("max_tokens".to_string(), value.clone());
+    }
     Value::Object(out)
 }
 
@@ -717,6 +721,21 @@ mod tests {
         let body = build_body(&request, false);
         assert_eq!(body["temperature"], 0.2);
         assert!(body.get("num_ctx").is_none());
+    }
+
+    #[test]
+    fn the_answer_cap_is_sent_as_max_tokens() {
+        let messages = vec![message("user", "hi")];
+        let request = ChatRequest {
+            model: "remote",
+            system: None,
+            messages: &messages,
+            tools: None,
+            options: Some(json!({"temperature": 0.2, "num_predict": 1024})),
+        };
+        let body = build_body(&request, false);
+        assert_eq!(body["max_tokens"], 1024);
+        assert!(body.get("num_predict").is_none());
     }
 
     #[test]

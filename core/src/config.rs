@@ -176,6 +176,9 @@ pub struct ModelConfig {
     /// More models on the same provider, offered by `/model` besides
     /// `default_model`.
     pub models: Vec<String>,
+    /// The longest answer a request may produce, in tokens. A small model
+    /// that loops would otherwise generate for minutes and hold the GPU.
+    pub max_answer_tokens: usize,
     pub routing_model: String,
     pub embedding_model: String,
     /// Use the provider's native function-calling interface when available.
@@ -223,6 +226,7 @@ impl Default for ModelConfig {
             base_url: "http://127.0.0.1:11434".to_string(),
             default_model: "llama3.2:1b".to_string(),
             models: Vec::new(),
+            max_answer_tokens: 2048,
             routing_model: "llama3.2:1b".to_string(),
             embedding_model: "nomic-embed-text".to_string(),
             native_tool_calling: true,

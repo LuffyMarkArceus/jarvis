@@ -36,6 +36,7 @@ impl Orchestrator {
         serde_json::json!({
             "temperature": model.temperature,
             "num_ctx": self.config.context.num_ctx,
+            "num_predict": model.max_answer_tokens,
         })
     }
 
