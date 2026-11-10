@@ -25,6 +25,36 @@ pub struct Config {
     pub undo: UndoConfig,
     #[serde(default)]
     pub security: SecurityConfig,
+    /// Where `shell.run` commands run: see `crate::sandbox`.
+    #[serde(default)]
+    pub sandbox: SandboxConfig,
+}
+
+/// `[sandbox]`: what a shell command may touch.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct SandboxConfig {
+    /// Off: every command runs outside the sandbox, and so asks first.
+    pub enabled: bool,
+    /// Folders a command may write, besides `[tools] work_dir`.
+    pub writable: Vec<PathBuf>,
+    /// Hidden from commands, besides the built-in list.
+    pub hidden: Vec<PathBuf>,
+    pub network: bool,
+    /// False: a command is never run outside the sandbox.
+    pub allow_outside: bool,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        SandboxConfig {
+            enabled: true,
+            writable: Vec::new(),
+            hidden: Vec::new(),
+            network: false,
+            allow_outside: true,
+        }
+    }
 }
 
 /// `[security]`: defences against instructions in text Jarvis reads.
