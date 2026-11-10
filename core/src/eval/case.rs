@@ -58,6 +58,9 @@ pub struct Case {
     /// case can check what would have left the machine.
     #[serde(default)]
     pub remote: bool,
+    /// Needs a working OS sandbox (bubblewrap); unavailable without one.
+    #[serde(default)]
+    pub needs_sandbox: bool,
     /// Tools set to "allow" for this case. Injection cases allow the actions
     /// so that only the untrusted-content gate stands between a page and
     /// the action: with "ask", the permission prompt would hide a broken gate.

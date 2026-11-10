@@ -200,8 +200,7 @@ async fn without_a_sandbox_every_command_asks() {
 
 #[tokio::test]
 async fn the_owners_own_command_runs_sandboxed_without_asking() {
-    if !jarvis_core::sandbox::available() {
-        eprintln!("bwrap does not run here; skipped");
+    if !common::sandbox_or_skip() {
         return;
     }
     let s = setup(|_| vec![answer("x")], PermissionAction::Allow, |_| {});

@@ -136,6 +136,21 @@ pub async fn run_suite(
 
 /// Run one attempt of `case` in a fresh sandbox.
 pub async fn run_case(case: &Case, attempt: usize, options: &RunOptions) -> Attempt {
+    if case.needs_sandbox && !crate::sandbox::available() {
+        return Attempt {
+            case: case.id.clone(),
+            attempt,
+            passed: false,
+            checks: Vec::new(),
+            report: TurnReport::default(),
+            asked: Vec::new(),
+            fooled: None,
+            relayed: None,
+            latency: Duration::ZERO,
+            error: Some("bubblewrap does not run here; this case needs the OS sandbox".into()),
+            unavailable: true,
+        };
+    }
     let sandbox = Sandbox::new();
     let result = run_in(&sandbox, case, options).await;
     let run = match result {

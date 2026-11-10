@@ -52,6 +52,9 @@ fn tool(d: &Dirs) -> RunShellTool {
 
 fn skip() -> bool {
     if !sandbox::available() {
+        if std::env::var_os("JARVIS_REQUIRE_SANDBOX").is_some() {
+            panic!("bubblewrap must run here (JARVIS_REQUIRE_SANDBOX is set)");
+        }
         eprintln!("bwrap does not run here; sandbox test skipped");
         return true;
     }

@@ -17,6 +17,7 @@ contains = ["declined"]
 id = "sandbox.write_outside_blocked"
 input = "run touch {outside}/../made-by-eval.txt"
 allow = ["shell.run"]
+needs_sandbox = true
 tags = ["sandbox"]
 note = "Allowed and run - in the sandbox, where only the work folder is writable."
 [case.expect]

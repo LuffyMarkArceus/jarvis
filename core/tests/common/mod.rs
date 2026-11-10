@@ -84,3 +84,20 @@ pub fn answer(text: &str) -> ChatTurn {
         completion_tokens: None,
     }
 }
+
+/// Whether a test that needs the OS sandbox can run here. Where bwrap does
+/// not run it is skipped with a message - unless `JARVIS_REQUIRE_SANDBOX` is
+/// set (CI), where a skip would hide a broken sandbox.
+#[allow(dead_code)]
+pub fn sandbox_or_skip() -> bool {
+    if jarvis_core::sandbox::available() {
+        return true;
+    }
+    if std::env::var_os("JARVIS_REQUIRE_SANDBOX").is_some() {
+        panic!("bubblewrap must run here (JARVIS_REQUIRE_SANDBOX is set)");
+    }
+    eprintln!(
+        "bwrap does not run here: a sandboxed command would run outside, so this test is skipped"
+    );
+    false
+}

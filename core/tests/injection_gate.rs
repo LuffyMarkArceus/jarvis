@@ -158,6 +158,9 @@ fn status(report: &TurnReport, tool: &str) -> Vec<&'static str> {
 
 #[tokio::test]
 async fn an_allowed_command_asks_after_untrusted_content() {
+    if !common::sandbox_or_skip() {
+        return;
+    }
     let dir = sandbox();
     let script = vec![
         read(&dir, "outside/notes.txt"),
@@ -181,6 +184,9 @@ async fn an_allowed_command_asks_after_untrusted_content() {
 
 #[tokio::test]
 async fn an_ask_command_asks_once_naming_the_source() {
+    if !common::sandbox_or_skip() {
+        return;
+    }
     let dir = sandbox();
     let script = vec![
         read(&dir, "outside/notes.txt"),
@@ -239,6 +245,9 @@ async fn nobody_to_ask_means_not_run() {
 
 #[tokio::test]
 async fn an_allowed_file_does_not_ask() {
+    if !common::sandbox_or_skip() {
+        return;
+    }
     let dir = sandbox();
     let script = vec![
         read(&dir, "project/notes.txt"),
@@ -288,6 +297,9 @@ async fn trust_covers_the_listed_sources_only() {
 
 #[tokio::test]
 async fn an_approved_commands_output_is_untrusted_for_the_next() {
+    if !common::sandbox_or_skip() {
+        return;
+    }
     let dir = sandbox();
     let script = vec![run("echo one"), run("echo two"), answer("done")];
     let s = setup(dir, script, Some(PermissionAction::Allow));
@@ -302,6 +314,9 @@ async fn an_approved_commands_output_is_untrusted_for_the_next() {
 
 #[tokio::test]
 async fn trust_does_not_reach_another_session() {
+    if !common::sandbox_or_skip() {
+        return;
+    }
     let dir = sandbox();
     let script = vec![
         read(&dir, "outside/notes.txt"),
@@ -322,6 +337,9 @@ async fn trust_does_not_reach_another_session() {
 
 #[tokio::test]
 async fn trust_can_be_listed_and_cleared() {
+    if !common::sandbox_or_skip() {
+        return;
+    }
     let dir = sandbox();
     let script = vec![
         read(&dir, "outside/notes.txt"),
@@ -344,6 +362,9 @@ async fn trust_can_be_listed_and_cleared() {
 
 #[tokio::test]
 async fn the_audit_log_says_why_an_allowed_command_asked() {
+    if !common::sandbox_or_skip() {
+        return;
+    }
     let dir = sandbox();
     let script = vec![
         read(&dir, "outside/notes.txt"),
@@ -375,6 +396,9 @@ async fn the_audit_log_says_why_an_allowed_command_asked() {
 
 #[tokio::test]
 async fn a_deterministic_route_never_asks_about_untrusted_content() {
+    if !common::sandbox_or_skip() {
+        return;
+    }
     let dir = sandbox();
     let script = vec![
         read(&dir, "outside/notes.txt"),
