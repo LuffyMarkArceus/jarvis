@@ -18,6 +18,6 @@ Each finding says whose problem it is - **ours** (Jarvis's code) or the
 | `/model remote : ...` in a TUI without `/model` was sent to llama as a question | ours | Fixed: an unknown `/word` says so and sends nothing |
 | Even with the shell, llama cannot make the call; qwen proposes a real `du` | the model's | Use `/model qwen` (or a remote model) for machine tasks |
 | P vs NP answer is wrong (it defines P vs NP backwards) and does not look up "OpenAI's progress" | the model's | A 1B is not a source for this; `/model` to a larger one |
-| "Have some personality, who is your favourite character?" - llama refuses to have a view | open | The system prompt says nothing about opinions; a decision for the owner |
+| "Have some personality, who is your favourite character?" - llama refuses to have a view | ours, then the model's | Owner: witty in chat, factual for facts and actions. The prompt now says so; qwen picks Tony Stark and says why, llama still disclaims first, then picks Nebula |
 | Refuses to continue song lyrics | not a bug | Full lyrics are copyrighted; any model should decline |
 | The TUI resumed a session from 2026-10-28 | by design | `/new` (Ctrl+N) starts a fresh one |
