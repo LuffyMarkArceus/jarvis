@@ -200,6 +200,9 @@ impl Orchestrator {
         tools.register(Box::new(DeleteFileTool));
         tools.register(Box::new(RunShellTool {
             work_dir: config.tools.work_dir.clone(),
+            sandbox: crate::sandbox::ready(&config)
+                .then(|| crate::sandbox::Sandbox::for_config(&config)),
+            key_vars: crate::sandbox::key_vars(&config),
         }));
         tools.register(Box::new(GetSystemInfoTool));
         tools.register(Box::new(ListProcessesTool));
