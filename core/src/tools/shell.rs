@@ -1,6 +1,6 @@
 use super::Tool;
 use crate::error::Result;
-use crate::sandbox::{is_secret_var, Sandbox};
+use crate::sandbox::{is_secret_var, Sandbox, SESSION_VARS};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 
@@ -44,8 +44,12 @@ impl RunShellTool {
         if let Some(dir) = &self.work_dir {
             command.current_dir(dir);
         }
+        let sandboxed = self.sandbox.is_some() && !outside;
         for (name, _) in std::env::vars_os() {
-            if is_secret_var(&name.to_string_lossy(), &self.key_vars) {
+            let name_str = name.to_string_lossy();
+            if is_secret_var(&name_str, &self.key_vars)
+                || (sandboxed && SESSION_VARS.contains(&name_str.as_ref()))
+            {
                 command.env_remove(name);
             }
         }

@@ -29,6 +29,11 @@ impl Sandbox {
             hidden.push(home.join(".ssh"));
             hidden.push(home.join(".gnupg"));
         }
+        // The session and system buses, gpg-agent, Wayland and systemd's
+        // private socket: a read-only mount does not stop a connect(), and
+        // `systemd-run --user` over the bus starts a program outside.
+        hidden.push(PathBuf::from("/run/user"));
+        hidden.push(PathBuf::from("/run/dbus"));
         // Config, permission rules and key files.
         if let Some(dir) = dirs::config_dir() {
             hidden.push(dir.join("jarvis"));
@@ -112,12 +117,35 @@ pub fn key_vars(config: &Config) -> Vec<String> {
 }
 
 /// Whether a command must not see the variable `name`.
+///
+/// By whole words of the name, so `AWS_SECRET_ACCESS_KEY` is a secret and
+/// `TOKENIZERS_PARALLELISM` is not.
 pub fn is_secret_var(name: &str, key_vars: &[String]) -> bool {
+    const WORDS: &[&str] = &[
+        "SECRET",
+        "PASSWORD",
+        "PASSWD",
+        "TOKEN",
+        "CREDENTIAL",
+        "CREDENTIALS",
+    ];
+    let upper = name.to_ascii_uppercase();
+    let parts: Vec<&str> = upper.split('_').collect();
     key_vars.iter().any(|k| k == name)
-        || ["_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD"]
-            .iter()
-            .any(|suffix| name.ends_with(suffix))
+        || parts.iter().any(|p| WORDS.contains(p))
+        || parts.last() == Some(&"KEY")
+        || parts.last() == Some(&"DSN")
+        || upper == "DATABASE_URL"
+        || upper == "PGPASSWORD"
 }
+
+/// Addresses of what is hidden inside the sandbox; a command run there
+/// does not get them.
+pub const SESSION_VARS: &[&str] = &[
+    "DBUS_SESSION_BUS_ADDRESS",
+    "SSH_AUTH_SOCK",
+    "XDG_RUNTIME_DIR",
+];
 
 #[cfg(test)]
 mod tests {
@@ -255,6 +283,11 @@ mod tests {
         let home = dirs::home_dir().unwrap();
         assert!(sandbox.hidden.contains(&home.join(".ssh")));
         assert!(sandbox.hidden.contains(&home.join(".gnupg")));
+        // The session bus and its siblings (gpg-agent, Wayland, systemd's
+        // private socket) are ways out of the sandbox: a read-only mount does
+        // not stop a connect().
+        assert!(sandbox.hidden.contains(&PathBuf::from("/run/user")));
+        assert!(sandbox.hidden.contains(&PathBuf::from("/run/dbus")));
         assert!(sandbox
             .hidden
             .contains(&dirs::config_dir().unwrap().join("jarvis")));
@@ -280,7 +313,24 @@ mod tests {
         ] {
             assert!(is_secret_var(name, &keys), "{}", name);
         }
-        for name in ["PATH", "HOME", "TOKENIZERS_PARALLELISM", "MY_KEYBOARD"] {
+        for name in [
+            "AWS_SECRET_ACCESS_KEY",
+            "GCP_PRIVATE_KEY",
+            "STRIPE_KEY",
+            "DOCKER_CREDENTIALS",
+            "DATABASE_URL",
+            "SENTRY_DSN",
+            "PGPASSWORD",
+        ] {
+            assert!(is_secret_var(name, &keys), "{}", name);
+        }
+        for name in [
+            "PATH",
+            "HOME",
+            "TOKENIZERS_PARALLELISM",
+            "MY_KEYBOARD",
+            "KEYMAP",
+        ] {
             assert!(!is_secret_var(name, &keys), "{}", name);
         }
     }

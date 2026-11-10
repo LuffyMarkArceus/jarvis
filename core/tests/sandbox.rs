@@ -193,3 +193,21 @@ async fn without_a_sandbox_a_command_runs_outside() {
     let out = run(&t, json!({ "command": "true" })).await;
     assert_eq!(out["sandboxed"], false, "{}", out);
 }
+
+#[tokio::test]
+async fn the_session_bus_and_agent_sockets_are_out_of_reach() {
+    // `busctl --user call org.freedesktop.systemd1 ... StartTransientUnit`
+    // would start a program outside the sandbox, unasked.
+    if skip() {
+        return;
+    }
+    let d = dirs();
+    std::env::set_var("JARVIS_SBX_PROBE", "1");
+    let out = run(
+        &tool(&d),
+        json!({ "command": "ls -A /run/user | wc -l; test -e /run/dbus/system_bus_socket && echo SYSBUS; env | grep -E '^(DBUS_SESSION_BUS_ADDRESS|SSH_AUTH_SOCK|XDG_RUNTIME_DIR)=' ; true" }),
+    )
+    .await;
+    let stdout = out["stdout"].as_str().unwrap();
+    assert_eq!(stdout.trim(), "0", "{}", out);
+}
