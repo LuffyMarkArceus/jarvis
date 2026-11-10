@@ -156,6 +156,9 @@ pub struct ModelConfig {
     pub provider: String,
     pub base_url: String,
     pub default_model: String,
+    /// More models on the same provider, offered by `/model` besides
+    /// `default_model`.
+    pub models: Vec<String>,
     pub routing_model: String,
     pub embedding_model: String,
     /// Use the provider's native function-calling interface when available.
@@ -202,6 +205,7 @@ impl Default for ModelConfig {
             provider: "ollama".to_string(),
             base_url: "http://127.0.0.1:11434".to_string(),
             default_model: "llama3.2:1b".to_string(),
+            models: Vec::new(),
             routing_model: "llama3.2:1b".to_string(),
             embedding_model: "nomic-embed-text".to_string(),
             native_tool_calling: true,

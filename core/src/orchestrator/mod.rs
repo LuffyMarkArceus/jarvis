@@ -128,6 +128,16 @@ pub const EGRESS_LOCAL_TOOL: &str = "egress.local";
 /// Asked before a web call carries something this turn may not send.
 pub const EGRESS_WEB_TOOL: &str = "egress.web";
 
+/// A model `/model` can switch to.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ModelChoice {
+    pub name: String,
+    /// On the `[remote]` tier.
+    pub remote: bool,
+    /// The model answering this conversation now.
+    pub current: bool,
+}
+
 pub struct Orchestrator {
     config: Config,
     /// The `[model]` tier: local unless configured otherwise.
@@ -136,6 +146,9 @@ pub struct Orchestrator {
     remote: Option<Arc<dyn Provider>>,
     /// Whether this session's turns go to the remote tier.
     use_remote: std::sync::atomic::AtomicBool,
+    /// The model `/model` chose on each tier, `[local, remote]`; `None` is
+    /// the tier's `default_model`.
+    chosen: std::sync::Mutex<[Option<String>; 2]>,
     tools: ToolRegistry,
     memory: Option<MemoryManager>,
     session_id: String,
@@ -223,6 +236,7 @@ impl Orchestrator {
             client,
             remote: None,
             use_remote: std::sync::atomic::AtomicBool::new(false),
+            chosen: std::sync::Mutex::new([None, None]),
             tools,
             memory,
             session_id,
@@ -258,19 +272,111 @@ impl Orchestrator {
         self.use_remote.load(std::sync::atomic::Ordering::Relaxed) && self.remote.is_some()
     }
 
-    /// The model settings and provider this session's turns go to.
-    fn tier(&self) -> (&ModelConfig, &Arc<dyn Provider>) {
-        match (&self.config.remote, &self.remote) {
-            (Some(cfg), Some(client)) if self.uses_remote() => (&cfg.model, client),
+    /// The model settings and provider this session's turns go to, with
+    /// the model `/model` chose.
+    fn tier(&self) -> (ModelConfig, Arc<dyn Provider>) {
+        let remote = self.uses_remote();
+        let (cfg, client) = match (&self.config.remote, &self.remote) {
+            (Some(cfg), Some(client)) if remote => (&cfg.model, client),
             _ => (&self.config.model, &self.client),
+        };
+        (self.with_choice(cfg, remote), client.clone())
+    }
+
+    /// `cfg` with the model chosen for its tier.
+    fn with_choice(&self, cfg: &ModelConfig, remote: bool) -> ModelConfig {
+        let mut cfg = cfg.clone();
+        if let Some(model) = self.chosen.lock().unwrap()[remote as usize].clone() {
+            cfg.default_model = model;
         }
+        cfg
     }
 
     /// The model to offer when a remote request was not sent: `[model]`,
     /// if this session is on the remote tier and `[model]` is local.
-    fn local_fallback(&self) -> Option<(&ModelConfig, &Arc<dyn Provider>)> {
-        (self.uses_remote() && !destination_of(&self.config.model).is_remote())
-            .then_some((&self.config.model, &self.client))
+    fn local_fallback(&self) -> Option<(ModelConfig, Arc<dyn Provider>)> {
+        (self.uses_remote() && !destination_of(&self.config.model).is_remote()).then(|| {
+            (
+                self.with_choice(&self.config.model, false),
+                self.client.clone(),
+            )
+        })
+    }
+
+    /// Every model `/model` can switch to: each tier's `default_model`, then
+    /// its `models`, local first. `current` marks the one answering now.
+    pub fn models(&self) -> Vec<ModelChoice> {
+        let mut tiers = vec![(&self.config.model, false)];
+        if let (Some(cfg), Some(_)) = (&self.config.remote, &self.remote) {
+            tiers.push((&cfg.model, true));
+        }
+        let now = self.tier().0.default_model;
+        let on_remote = self.uses_remote();
+        let mut out: Vec<ModelChoice> = Vec::new();
+        for (cfg, remote) in tiers {
+            for name in std::iter::once(&cfg.default_model).chain(cfg.models.iter()) {
+                if out.iter().any(|m| m.remote == remote && &m.name == name) {
+                    continue;
+                }
+                out.push(ModelChoice {
+                    name: name.clone(),
+                    remote,
+                    current: remote == on_remote && *name == now,
+                });
+            }
+        }
+        out
+    }
+
+    /// Switch this conversation to the model `query` names: its exact name,
+    /// or a part of exactly one name, any case. The model's tier comes with
+    /// it. A name that is not configured, or matches several, changes
+    /// nothing.
+    pub fn set_model(&self, query: &str) -> Result<ModelChoice> {
+        let models = self.models();
+        let q = query.trim().to_lowercase();
+        let exact: Vec<&ModelChoice> = models
+            .iter()
+            .filter(|m| m.name.to_lowercase() == q)
+            .collect();
+        let matches: Vec<&ModelChoice> = if !exact.is_empty() {
+            exact
+        } else {
+            models
+                .iter()
+                .filter(|m| !q.is_empty() && m.name.to_lowercase().contains(&q))
+                .collect()
+        };
+        let names = |list: &[&ModelChoice]| {
+            list.iter()
+                .map(|m| m.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let chosen = match matches.as_slice() {
+            [one] => (*one).clone(),
+            [] => {
+                let all: Vec<&ModelChoice> = models.iter().collect();
+                return Err(JarvisError::Config(format!(
+                    "No model matches \"{}\". Available: {}. To add one, list it in `models = [...]` under [model] or [remote] in config.toml.",
+                    query.trim(),
+                    names(&all)
+                )));
+            }
+            several => {
+                return Err(JarvisError::Config(format!(
+                    "\"{}\" matches several models: {}. Type more of the name.",
+                    query.trim(),
+                    names(several)
+                )))
+            }
+        };
+        self.chosen.lock().unwrap()[chosen.remote as usize] = Some(chosen.name.clone());
+        self.set_remote(chosen.remote)?;
+        Ok(ModelChoice {
+            current: true,
+            ..chosen
+        })
     }
 
     /// Start the configured MCP servers and wait until discovery finishes.
@@ -282,9 +388,9 @@ impl Orchestrator {
     }
 
     /// The provider and model a turn will be sent to, for `jarvis status`.
-    pub fn model_info(&self) -> (&'static str, &str, &str) {
+    pub fn model_info(&self) -> (&'static str, String, String) {
         let (cfg, client) = self.tier();
-        (client.name(), &cfg.default_model, &cfg.base_url)
+        (client.name(), cfg.default_model, cfg.base_url)
     }
 
     /// Where this orchestrator's requests go. A config that cannot be read
@@ -292,7 +398,7 @@ impl Orchestrator {
     /// here anyway, it is treated as remote with an undeclared policy, which
     /// asks rather than sends.
     pub fn destination(&self) -> Destination {
-        destination_of(self.tier().0)
+        destination_of(&self.tier().0)
     }
 
     /// The owner's policy for remote requests, with their allow-list.

@@ -233,6 +233,17 @@ impl Daemon {
         self.orchestrator.lock().await.set_remote(on)
     }
 
+    /// The models `/model` can switch to.
+    pub async fn models(&self) -> Vec<crate::orchestrator::ModelChoice> {
+        self.orchestrator.lock().await.models()
+    }
+
+    /// Switch to the model `query` names; it lasts across new sessions,
+    /// like the tier, until switched again or the daemon restarts.
+    pub async fn set_model(&self, query: &str) -> Result<crate::orchestrator::ModelChoice> {
+        self.orchestrator.lock().await.set_model(query)
+    }
+
     /// What the active conversation trusts (`[t]`).
     pub async fn trusted(&self) -> Vec<String> {
         self.orchestrator.lock().await.trusted()
@@ -326,6 +337,26 @@ mod tests {
         config.general.data_dir = dir.to_path_buf();
         config.memory.db_path = dir.join("memory.db");
         config
+    }
+
+    #[tokio::test]
+    async fn a_chosen_model_lasts_into_a_new_session() {
+        let dir = std::env::temp_dir().join(format!("jarvis-daemon-test-{}", Uuid::new_v4()));
+        let mut config = test_config(&dir);
+        config.model.models = vec!["qwen2.5:3b".into()];
+        let daemon = Daemon::new(config).expect("daemon");
+        assert_eq!(daemon.set_model("qwen").await.unwrap().name, "qwen2.5:3b");
+        daemon.new_session().await.unwrap();
+        assert_eq!(daemon.model_info().await.1, "qwen2.5:3b");
+        let current: Vec<String> = daemon
+            .models()
+            .await
+            .into_iter()
+            .filter(|m| m.current)
+            .map(|m| m.name)
+            .collect();
+        assert_eq!(current, vec!["qwen2.5:3b"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

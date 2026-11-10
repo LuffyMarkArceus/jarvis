@@ -68,6 +68,7 @@ impl Orchestrator {
     ) -> Result<ModelReply> {
         rec.saw_request(system, system_label, messages);
         let (cfg, client) = self.tier();
+        let (cfg, client) = (&cfg, &client);
         let request = Request {
             system,
             messages,
@@ -109,6 +110,7 @@ impl Orchestrator {
         // The owner's rule: when nothing could be sent, ask each time whether
         // the local model should answer instead. Nobody to ask means no.
         if let (Some((local_cfg, local)), Some(confirm)) = (self.local_fallback(), confirm) {
+            let (local_cfg, local) = (&local_cfg, &local);
             let args = json!({ "model": local_cfg.default_model, "reason": why });
             if confirm.confirm(EGRESS_LOCAL_TOOL, &args).await {
                 return self

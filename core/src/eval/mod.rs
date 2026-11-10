@@ -571,6 +571,8 @@ pub struct RecordingProvider {
     pub sent: std::sync::Mutex<Vec<String>>,
     /// What it answers.
     pub reply: String,
+    /// The model each request named.
+    pub models: std::sync::Mutex<Vec<String>>,
 }
 
 impl RecordingProvider {
@@ -578,6 +580,7 @@ impl RecordingProvider {
         RecordingProvider {
             sent: Default::default(),
             reply: reply.to_string(),
+            models: Default::default(),
         }
     }
 
@@ -602,6 +605,7 @@ impl Provider for RecordingProvider {
             text.push_str(&format!("\n[{}] {}", m.role, m.content));
         }
         self.sent.lock().unwrap().push(text);
+        self.models.lock().unwrap().push(request.model.to_string());
         Ok(ChatTurn {
             message: ChatMessage::text("assistant", &self.reply),
             prompt_tokens: Some(100),
