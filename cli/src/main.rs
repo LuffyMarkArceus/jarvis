@@ -230,6 +230,8 @@ enum Commands {
     MemoryStats,
     /// Show or switch the model tier: `local` or `remote`
     Tier { tier: Option<String> },
+    /// List the models, or switch to one: its name or a unique part of it
+    Model { name: Option<String> },
     /// Undo Jarvis's last file change, or the one with this id
     Undo {
         /// A change id (or its start) from `--list`
@@ -1216,6 +1218,39 @@ async fn main() -> anyhow::Result<()> {
                 ),
             }
         }
+        Commands::Model { name } => {
+            let Some(name) = name else {
+                let response = send_request(Request::new("model.list", json!({}))).await?;
+                let result = response
+                    .result
+                    .ok_or_else(|| anyhow::anyhow!("{}", response.error.unwrap_or_default()))?;
+                for line in model_lines(&result) {
+                    println!("{}", line);
+                }
+                return Ok(());
+            };
+            let response =
+                send_request(Request::new("model.set", json!({ "model": name }))).await?;
+            match (response.ok, response.result) {
+                (true, Some(result)) => {
+                    let field = |k: &str| {
+                        result
+                            .get(k)
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?")
+                            .to_string()
+                    };
+                    println!("Now answering with {} ({})", field("model"), field("tier"));
+                    println!("{}", field("privacy"));
+                }
+                _ => anyhow::bail!(
+                    "{}",
+                    response
+                        .error
+                        .unwrap_or_else(|| "could not switch model".into())
+                ),
+            }
+        }
         Commands::Undo { id, list, force } => {
             use jarvis_core::undo::{self, UndoPlan, UndoStore};
             // Read directly, not through the daemon: undo works with it stopped.
@@ -1350,6 +1385,31 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `jarvis model`: one line per model, the one answering marked.
+fn model_lines(result: &serde_json::Value) -> Vec<String> {
+    result["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|m| {
+            format!(
+                "{} {}  ({})",
+                if m["current"].as_bool() == Some(true) {
+                    "●"
+                } else {
+                    " "
+                },
+                m["name"].as_str().unwrap_or("?"),
+                if m["remote"].as_bool() == Some(true) {
+                    "remote"
+                } else {
+                    "local"
+                }
+            )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1432,5 +1492,20 @@ mod tests {
             }
             other => panic!("{:?}", other),
         }
+    }
+
+    #[test]
+    fn the_model_list_marks_the_current_one_and_the_remote_ones() {
+        let lines = model_lines(&json!({ "models": [
+            { "name": "llama3.2:1b", "remote": false, "current": false },
+            { "name": "cohere/north-mini-code:free", "remote": true, "current": true },
+        ]}));
+        assert_eq!(
+            lines,
+            vec![
+                "  llama3.2:1b  (local)".to_string(),
+                "● cohere/north-mini-code:free  (remote)".to_string(),
+            ]
+        );
     }
 }
