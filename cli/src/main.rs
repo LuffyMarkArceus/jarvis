@@ -1,4 +1,5 @@
 mod eval;
+mod up;
 
 use clap::{Parser, Subcommand};
 use jarvis_common::ipc::{Choice, ConfirmationRequest, Message, Request, Response};
@@ -232,6 +233,15 @@ enum Commands {
     Tier { tier: Option<String> },
     /// List the models, or switch to one: its name or a unique part of it
     Model { name: Option<String> },
+    /// Start Ollama, load the keys, start the daemon and open the TUI
+    Up {
+        /// Restart a running daemon, to reload its config and keys
+        #[arg(long)]
+        restart: bool,
+        /// Start everything but do not open the TUI
+        #[arg(long)]
+        no_tui: bool,
+    },
     /// Undo Jarvis's last file change, or the one with this id
     Undo {
         /// A change id (or its start) from `--list`
@@ -1218,6 +1228,7 @@ async fn main() -> anyhow::Result<()> {
                 ),
             }
         }
+        Commands::Up { restart, no_tui } => up::run(restart, !no_tui).await?,
         Commands::Model { name } => {
             let Some(name) = name else {
                 let response = send_request(Request::new("model.list", json!({}))).await?;
