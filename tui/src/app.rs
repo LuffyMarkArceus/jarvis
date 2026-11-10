@@ -262,6 +262,9 @@ pub enum Command {
     Trust(String),
     Clear,
     Quit,
+    /// `/word` that is no command: shown as a mistake, not sent to the
+    /// model.
+    Unknown(String),
 }
 
 pub fn parse_command(text: &str) -> Option<Command> {
@@ -286,6 +289,15 @@ pub fn parse_command(text: &str) -> Option<Command> {
         "/session" => Command::Session,
         "/clear" => Command::Clear,
         "/quit" | "/exit" => Command::Quit,
+        // A path ("/etc/hosts is broken") is a prompt; a lone "/word" is a
+        // mistyped command.
+        other
+            if other.starts_with('/')
+                && other.len() > 1
+                && other[1..].chars().all(|c| c.is_ascii_alphabetic()) =>
+        {
+            Command::Unknown(other.to_string())
+        }
         _ => return None,
     })
 }
@@ -473,7 +485,7 @@ impl App {
     fn run_command(&mut self, command: Command) -> Vec<Action> {
         let needs_daemon = !matches!(
             command,
-            Command::Help | Command::Quit | Command::Clear | Command::Session
+            Command::Help | Command::Quit | Command::Clear | Command::Session | Command::Unknown(_)
         );
         if needs_daemon && self.pending.is_some() {
             self.note(Entry::system("Still waiting for the daemon."));
@@ -488,6 +500,12 @@ impl App {
             Command::Quit => {
                 self.should_quit = true;
                 vec![Action::Quit]
+            }
+            Command::Unknown(name) => {
+                self.note(Entry::error(format!(
+                    "Unknown command {name}. /help lists the commands; nothing was sent."
+                )));
+                vec![]
             }
             Command::Clear => {
                 self.entries.clear();
@@ -1062,6 +1080,21 @@ impl App {
         }
     }
 
+    /// A mouse wheel step: scrolls the conversation, or moves a picker's
+    /// selection. Without this the terminal sent arrow keys, which recalled
+    /// old prompts.
+    pub fn on_wheel(&mut self, up: bool) {
+        let code = if up { KeyCode::Up } else { KeyCode::Down };
+        match &self.overlay {
+            Some(Overlay::Models { .. }) | Some(Overlay::Sessions { .. }) => {
+                self.handle_overlay_key(KeyEvent::new(code, KeyModifiers::NONE));
+            }
+            Some(_) => {}
+            None if up => self.scroll_up(3),
+            None => self.scroll_down(3),
+        }
+    }
+
     pub fn on_paste(&mut self, text: &str) {
         if self.overlay.is_some() {
             return;
@@ -1198,7 +1231,48 @@ mod tests {
     #[test]
     fn a_prompt_that_merely_starts_with_a_slash_is_sent_to_the_model() {
         assert_eq!(parse_command("/etc/hosts is broken"), None);
-        assert_eq!(parse_command("/unknown command"), None);
+        assert_eq!(parse_command("/tmp/x.log has an error"), None);
+    }
+
+    #[test]
+    fn an_unknown_command_is_not_sent_to_the_model() {
+        // "/model remote : ..." in a TUI without /model went to llama as a
+        // question (session fe3f7d69).
+        assert_eq!(
+            parse_command("/modle qwen"),
+            Some(Command::Unknown("/modle".into()))
+        );
+        let mut app = App::new("test".into());
+        app.input.set("/modle qwen");
+        let actions = press(&mut app, KeyCode::Enter);
+        assert!(actions.is_empty(), "{actions:?}");
+        let last = app.entries.last().unwrap();
+        assert!(last.text.contains("Unknown command /modle"), "{:?}", last);
+    }
+
+    #[test]
+    fn the_mouse_wheel_scrolls_the_conversation_not_the_prompt_history() {
+        let mut app = App::new("test".into());
+        app.max_scroll = 100;
+        app.history.push("an old prompt".into());
+        app.on_wheel(true);
+        assert_eq!(app.scroll, 3);
+        assert!(app.input.is_empty(), "history was not recalled");
+        app.on_wheel(false);
+        assert_eq!(app.scroll, 0);
+    }
+
+    #[test]
+    fn the_wheel_moves_the_picker_selection() {
+        let mut app = App::new("llama3.2:1b".into());
+        let request = Request::new("model.list", json!({}));
+        app.begin_request(request.id, Pending::Models);
+        app.on_response(Response::ok(request.id, models_reply()));
+        app.on_wheel(false);
+        assert!(matches!(
+            app.overlay,
+            Some(Overlay::Models { selected: 1, .. })
+        ));
     }
 
     #[test]
