@@ -4,15 +4,15 @@ Where Jarvis is, what is open, and where to read more. Updated at the end of
 every phase, as part of finishing it. The plan ahead is in
 [ROADMAP.md](ROADMAP.md).
 
-Last updated: 2026-11-09, after Milestone 6.2 (main `f91104c`).
+Last updated: 2026-11-09, after Milestone 6.3 (main `6e7216b`).
 
 ## At a glance
 
 | | |
 | --- | --- |
-| Code | Rust workspace (`core`, `cli`, `tui`, `common`) + Python MCP sidecars; ~25k lines of Rust |
-| Tests | 469 (`cargo test --workspace`), CI on every push |
-| Evals | 53 cases (`jarvis eval`); qwen2.5:3b 90.6%, llama3.2:1b 82.4% ([BASELINES](../evals/BASELINES.md)) |
+| Code | Rust workspace (`core`, `cli`, `tui`, `common`) + Python MCP sidecars; ~28k lines of Rust |
+| Tests | 498 (`cargo test --workspace`), CI on every push, with real bubblewrap |
+| Evals | 57 cases (`jarvis eval`), five models measured: qwen2.5:3b 91.2%, llama3.2:1b 83.6%, nemotron-3-ultra 98.2%, north-mini-code 100%, flint 96.3% ([BASELINES](../evals/BASELINES.md)) |
 | Models | local: Ollama (llama3.2:1b for development, qwen2.5:3b for verification); remote: OpenRouter free tier (nemotron-3-ultra) |
 | Lessons | 29 entries in the [learning log](learning/README.md) |
 
@@ -34,7 +34,7 @@ earlier sessions and is not in the repository.
 | 6 | Prompt-injection gate, exfiltration rule, undo, marking, injection evals | 2026-11-02 | [injection-and-undo](design/injection-and-undo.md) |
 | 6.1 | Relay note, router fixes, a request never runs twice, orchestrator split | 2026-11-05 | learning #27-28 |
 | 6.2 | Earlier-turn marking, `filesystem.delete` with undo, large-file limits, eval sandbox (`work_dir`) and honesty fixes | 2026-11-09 | [ROADMAP](ROADMAP.md) |
-| 6.3 | OS sandbox for commands (bubblewrap), keys out of command environments, an always-asked way out | 2026-11-09 | [sandbox](design/sandbox.md) |
+| 6.3 | OS sandbox for commands (bubblewrap), keys out of command environments, an always-asked way out; five-model run | 2026-11-09 | [sandbox](design/sandbox.md) |
 
 ## Open items
 
@@ -55,6 +55,13 @@ The order they will be done in is in the roadmap.
   full rights (it always asks). Typed file tools and MCP sidecars are not
   sandboxed. Linux only. See [sandbox](design/sandbox.md), known gaps.
 
+* Deferred from the 6.3 review: the "sandbox stopped this" hint also fires
+  on build errors that say "Could not resolve"; with `network = true`
+  abstract sockets (X11) are reachable; a relative `data_dir` breaks bwrap
+  (fails safe); "run outside the sandboxes" runs `es` (still asks).
+* Eval scoring: about two thirds of the suite passes without a model. Read the
+  model-dependent score (BASELINES, 2026-11-09) when comparing models.
+
 **Carried over**
 
 * Names and free-text personal details are not redacted.
@@ -68,7 +75,8 @@ The order they will be done in is in the roadmap.
 
 **For the owner**
 
-* Cap the OpenRouter key's spend at about $1.
+* The OpenRouter key is capped at $11 ($0 spent); about $1 was suggested.
+* OpenCode Zen free models (Big Pickle, Beam Free) refuse API use; see the 2026-11-09 baselines entry.
 * `/home/shrey/~/.config/ums-deploy.env` (2026-10-06) is not Jarvis's; check it.
 
 ## Where things are
