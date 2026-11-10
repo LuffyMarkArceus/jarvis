@@ -300,7 +300,10 @@ network = false
 allow_outside = true             # false: never run outside the sandbox
 ```
 
-Details and known gaps: [docs/design/sandbox.md](docs/design/sandbox.md).
+One thing the sandbox cannot catch: a command can change files in the work
+folder that later run with your full rights (a git hook, a `Makefile`). Before
+approving a command outside the sandbox in a folder Jarvis has been working
+in, know what it will run. Details and known gaps: [docs/design/sandbox.md](docs/design/sandbox.md).
 
 ## MCP sidecars
 

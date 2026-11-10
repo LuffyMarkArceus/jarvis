@@ -24,13 +24,25 @@ without this turn's labels. The sandbox hides all of them.
 | --- | --- |
 | Reads | everything, except the hidden list |
 | Writes | `[sandbox] writable`, `[tools] work_dir`, a private `/tmp` thrown away afterwards |
-| Hidden | `~/.ssh`, `~/.gnupg`, `~/.config/jarvis`, `general.data_dir` (memory, audit, undo, socket), the memory database's folder, `[undo] dir`, `[sandbox] hidden` |
+| Hidden | `~/.ssh`, `~/.gnupg`, `~/.config/jarvis`, `general.data_dir` (memory, audit, undo, socket), the memory database's folder, `[undo] dir`, `/run/user` and `/run/dbus` (session and system buses, gpg-agent, Wayland), `[sandbox] hidden` |
 | Network | none, unless `[sandbox] network = true` |
 | Processes | own PID namespace and session; dies with Jarvis (not `background`) |
-| Environment | no `api_key_env` variables, nothing ending `_API_KEY`, `_TOKEN`, `_SECRET`, `_PASSWORD` (outside the sandbox too) |
+| Environment | no `api_key_env` variables and no secret-looking names - a word `SECRET`, `TOKEN`, `PASSWORD`, `CREDENTIALS`, or ending `_KEY` / `_DSN`, `DATABASE_URL` (outside the sandbox too); inside, no bus, agent or runtime-dir addresses |
 
 Hidden wins over writable: bwrap applies mounts in order, and the hiding
 comes last. A test runs real bwrap to prove it.
+
+Hiding a folder stops it being renamed, but not a folder above it: with the
+home folder writable, a command could move `.config` aside and plant its own
+`permissions.toml`. So every folder between a workspace and a hidden folder
+is mounted read-only (for a hidden folder that does not exist yet, its
+deepest existing parent); if that parent is the workspace itself, the
+workspace is not writable and a warning says why.
+
+The final review of this milestone found the session bus open: a read-only
+mount does not stop a `connect()`, and `systemd-run --user` over the bus
+starts a program outside the sandbox, unasked. `/run/user` and `/run/dbus`
+are hidden for that reason.
 
 ## The way out
 
@@ -55,4 +67,15 @@ and asks - the sandbox fails closed.
   is not there for a command.
 * MCP sidecars are not sandboxed; Jarvis starts them, a model does not
   choose them.
+* A sandboxed command can change files in the workspace that later run
+  with full rights: a git hook, a `Makefile`, `.envrc`. Approving
+  `run outside the sandbox: git push` runs a planted `pre-push` hook too, and
+  the prompt shows only `git push`.
+* With `[sandbox] network = true`, abstract Unix sockets (X11) are reachable.
 * Linux only (bubblewrap). macOS would need `sandbox-exec`.
+
+## Tests
+
+Integration tests run real bubblewrap (`core/tests/sandbox.rs`,
+`sandbox_gate.rs`). Where it does not run they skip with a message; CI
+installs it and sets `JARVIS_REQUIRE_SANDBOX`, so there a skip is a failure.
