@@ -163,6 +163,8 @@ pub enum Pending {
     Trust,
     /// `model.list`, for the picker.
     Models,
+    /// `model.set`; then the message to send, if one followed the name.
+    Model(Option<String>),
 }
 
 /// What `main` has to do after a key press or daemon event.
@@ -424,12 +426,34 @@ impl App {
     }
 
     /// Record that a request is in flight.
-    /// Switch to the model `name` names.
-    fn model_set(name: &str) -> Action {
+    /// After `/remote`, `/local` or `/model`: the header follows the model
+    /// now answering, and the switch is noted.
+    fn on_response_tier(&mut self, result: &Value) -> Vec<Action> {
+        if let Some(model) = result.get("model").and_then(Value::as_str) {
+            self.model = model.to_string();
+        }
+        let field = |k: &str| {
+            result
+                .get(k)
+                .and_then(Value::as_str)
+                .unwrap_or("?")
+                .to_string()
+        };
+        self.note(Entry::system(format!(
+            "Now answering with {} ({}). {}",
+            field("model"),
+            field("tier"),
+            field("privacy")
+        )));
+        vec![]
+    }
+
+    /// Switch to the model `name` names, then send `then` if given.
+    fn model_set(name: &str, then: Option<String>) -> Action {
         Action::Request {
             method: "model.set",
             params: json!({ "model": name }),
-            pending: Pending::Tier,
+            pending: Pending::Model(then),
         }
     }
 
@@ -579,7 +603,16 @@ impl App {
                 params: json!({}),
                 pending: Pending::Models,
             }],
-            Command::Model(name) => vec![Self::model_set(&name)],
+            Command::Model(rest) => {
+                // "/model qwen", "/model qwen what is 2+2?", "/model qwen: ...":
+                // the first word is the model, the rest a message.
+                let rest = rest.trim();
+                let (name, then) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+                let name = name.trim_end_matches([':', ',']);
+                let then = then.trim().trim_start_matches([':', ',']).trim();
+                let then = (!then.is_empty()).then(|| then.to_string());
+                vec![Self::model_set(name, then)]
+            }
             Command::Tier(remote) => vec![Action::Request {
                 method: "tier.set",
                 params: json!({ "tier": if remote { "remote" } else { "local" } }),
@@ -653,6 +686,10 @@ impl App {
                 .error
                 .unwrap_or_else(|| "the daemon did not say why".to_string());
             self.note(Entry::error(reason));
+            // The message that was to follow a failed /model is not lost.
+            if let Some(Pending::Model(Some(message))) = pending {
+                self.input.set(&message);
+            }
             return vec![];
         }
         let result = response.result.unwrap_or(Value::Null);
@@ -836,25 +873,20 @@ impl App {
                 self.overlay = Some(Overlay::Models { rows, selected });
                 vec![]
             }
-            Some(Pending::Tier) => {
-                if let Some(model) = result.get("model").and_then(Value::as_str) {
-                    self.model = model.to_string();
+            Some(Pending::Model(then)) => {
+                let mut actions = self.on_response_tier(&result);
+                if let Some(message) = then {
+                    self.history.push(message.clone());
+                    self.note(Entry::user(message.clone()));
+                    actions.push(Action::Request {
+                        method: "ask",
+                        params: json!({ "prompt": message }),
+                        pending: Pending::Turn,
+                    });
                 }
-                let field = |k: &str| {
-                    result
-                        .get(k)
-                        .and_then(Value::as_str)
-                        .unwrap_or("?")
-                        .to_string()
-                };
-                self.note(Entry::system(format!(
-                    "Now answering with {} ({}). {}",
-                    field("model"),
-                    field("tier"),
-                    field("privacy")
-                )));
-                vec![]
+                actions
             }
+            Some(Pending::Tier) => self.on_response_tier(&result),
             Some(Pending::Tools) => {
                 let tools = result
                     .get("tools")
@@ -1044,7 +1076,7 @@ impl App {
                     }
                     KeyCode::Enter => {
                         if let Some(row) = rows.get(selected) {
-                            return vec![Self::model_set(&row.name)];
+                            return vec![Self::model_set(&row.name, None)];
                         }
                     }
                     _ => {
@@ -1677,7 +1709,7 @@ mod tests {
             }] => {
                 assert_eq!(*method, "model.set");
                 assert_eq!(params["model"], "qwen");
-                assert_eq!(*pending, Pending::Tier);
+                assert_eq!(*pending, Pending::Model(None));
             }
             other => panic!("unexpected actions: {other:?}"),
         }
@@ -1768,5 +1800,50 @@ mod tests {
             json!({ "session_id": "abc", "model": "cohere/north-mini-code:free", "tier": "remote" }),
         ));
         assert_eq!(app.model, "cohere/north-mini-code:free");
+    }
+
+    #[test]
+    fn model_then_a_message_switches_then_sends_it() {
+        // Real use: "/model qwen <question>" looked for a model named
+        // "qwen <question>", found none, and sent nothing.
+        let mut app = App::new("llama3.2:1b".into());
+        app.input.set("/model qwen: what is 2+2?");
+        let actions = press(&mut app, KeyCode::Enter);
+        let request = match actions.as_slice() {
+            [Action::Request {
+                method,
+                params,
+                pending,
+            }] => {
+                assert_eq!(*method, "model.set");
+                assert_eq!(params["model"], "qwen", "the first word is the model");
+                assert_eq!(*pending, Pending::Model(Some("what is 2+2?".into())));
+                Request::new("model.set", json!({}))
+            }
+            other => panic!("unexpected actions: {other:?}"),
+        };
+        app.begin_request(request.id, Pending::Model(Some("what is 2+2?".into())));
+        let actions = app.on_response(Response::ok(
+            request.id,
+            json!({ "model": "qwen2.5:3b", "tier": "local", "privacy": "local" }),
+        ));
+        assert_eq!(app.model, "qwen2.5:3b");
+        match actions.as_slice() {
+            [Action::Request { method, params, .. }] => {
+                assert_eq!(*method, "ask");
+                assert_eq!(params["prompt"], "what is 2+2?");
+            }
+            other => panic!("the message was not sent: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_failed_switch_keeps_the_message_in_the_box() {
+        let mut app = App::new("llama3.2:1b".into());
+        let request = Request::new("model.set", json!({}));
+        app.begin_request(request.id, Pending::Model(Some("my question".into())));
+        let actions = app.on_response(Response::err(request.id, "No model matches".into()));
+        assert!(actions.is_empty());
+        assert_eq!(app.input.text(), "my question", "not lost");
     }
 }

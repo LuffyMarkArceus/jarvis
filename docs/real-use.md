@@ -21,3 +21,9 @@ Each finding says whose problem it is - **ours** (Jarvis's code) or the
 | "Have some personality, who is your favourite character?" - llama refuses to have a view | ours, then the model's | Owner: witty in chat, factual for facts and actions. The prompt now says so; qwen picks Tony Stark and says why, llama still disclaims first, then picks Nebula |
 | Refuses to continue song lyrics | not a bug | Full lyrics are copyrighted; any model should decline |
 | The TUI resumed a session from 2026-10-28 | by design | `/new` (Ctrl+N) starts a fresh one |
+
+## 2026-11-10, later
+
+| Finding | Whose | Done |
+| --- | --- | --- |
+| `/model qwen <message>` failed: everything after `/model` was taken as the model's name, so nothing matched and nothing was sent. The owner wrote it this way twice | ours | `/model <name> <message>` switches, then sends the message; if the switch fails, the message stays in the box |
