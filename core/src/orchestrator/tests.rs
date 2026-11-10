@@ -555,6 +555,10 @@ fn jarvis_has_a_voice_in_chat_and_none_in_facts_or_actions() {
     assert!(chat.contains("opinions"), "{}", chat);
     assert!(chat.contains("Never let wit change a fact"), "{}", chat);
     let tools = jarvis.tool_system_prompt(&[]);
-    assert!(tools.contains("plain and factual about what was done"), "{}", tools);
+    assert!(
+        tools.contains("plain and factual about what was done"),
+        "{}",
+        tools
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
