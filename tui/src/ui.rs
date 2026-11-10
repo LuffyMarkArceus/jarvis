@@ -192,6 +192,7 @@ fn draw_overlay(frame: &mut Frame, app: &App, area: Rect) {
             draw_sessions(frame, rows, *selected, app.session_id.as_deref(), area)
         }
         Overlay::Recall(rows) => draw_recall(frame, rows, area),
+        Overlay::Models { rows, selected } => draw_models(frame, rows, *selected, area),
         Overlay::Confirm(request) => draw_confirm(frame, &request.prompt, area),
     }
 }
@@ -205,6 +206,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         ("Ctrl+N", "start a new session"),
         ("Ctrl+C", "cancel the running turn, or quit when idle"),
         ("Ctrl+S", "list and switch sessions"),
+        ("Ctrl+P", "pick the model"),
         ("/recall <q>", "search memories across sessions"),
         ("Ctrl+L", "clear the screen"),
         ("Ctrl+U", "clear the message box"),
@@ -218,6 +220,7 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         ("/session", "show the current session id"),
         ("/recall <query>", "search memories across sessions"),
         ("/status, /tools", "daemon information"),
+        ("/model [name]", "pick the model, or switch to one by name"),
         (
             "/remote, /local",
             "answer with the remote or the local model",
@@ -332,6 +335,49 @@ fn draw_sessions(
                 Block::bordered()
                     .title(" Sessions ")
                     .title_bottom(Line::from(" Enter switch · Esc close ").right_aligned()),
+            )
+            .highlight_style(Style::new().bg(Color::DarkGray)),
+        popup,
+        &mut state,
+    );
+}
+
+fn draw_models(frame: &mut Frame, rows: &[crate::app::ModelRow], selected: usize, area: Rect) {
+    let items: Vec<ListItem> = if rows.is_empty() {
+        vec![ListItem::new(Line::styled(
+            "No models configured. Press Esc to close.",
+            Style::new().fg(Color::DarkGray),
+        ))]
+    } else {
+        rows.iter()
+            .map(|row| {
+                let marker = if row.current { "● " } else { "  " };
+                let tier = if row.remote {
+                    "  remote · leaves this machine"
+                } else {
+                    "  local"
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(marker, Style::new().fg(Color::Green)),
+                    Span::styled(row.name.clone(), Style::new().add_modifier(Modifier::BOLD)),
+                    Span::styled(tier, Style::new().fg(Color::DarkGray)),
+                ]))
+            })
+            .collect()
+    };
+    let height = (items.len() as u16 + 2).min((area.height * 7 / 10).max(5));
+    let popup = centered(area, 70, height);
+    let mut state = ListState::default();
+    if !rows.is_empty() {
+        state.select(Some(selected.min(rows.len() - 1)));
+    }
+    frame.render_widget(Clear, popup);
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(
+                Block::bordered().title(" Model ").title_bottom(
+                    Line::from(" ↑↓ choose · Enter switch · Esc close ").right_aligned(),
+                ),
             )
             .highlight_style(Style::new().bg(Color::DarkGray)),
         popup,

@@ -21,10 +21,25 @@ cargo build --workspace
 ## Usage
 
 ```sh
-jarvis daemon start      # background daemon (Unix socket)
+jarvis up                # start Ollama, load the keys, start the daemon, open the TUI
+jarvis up --restart      # the same, restarting the daemon (new config or keys)
 jarvis ask "hello"       # one turn; falls back to direct mode if the daemon is down
-jarvis-tui               # full terminal UI
+jarvis model [name]      # list the models, or switch to one
 ```
+
+`jarvis up` starts only what is not running. It starts `ollama serve` when a
+tier uses Ollama on this machine and nothing answers, loads every `*.env` key
+file in `~/.config/jarvis` (names are printed, values never) and hands them to
+the daemon only:
+
+```toml
+[up]
+ollama_env = { OLLAMA_MODELS = "/mnt/storage/models/ollama" }
+ollama_log = "/mnt/storage/models/ollama-serve.log"   # default <data_dir>/ollama.log
+env_files = []          # default: every *.env in ~/.config/jarvis
+```
+
+The pieces still work on their own: `jarvis daemon start`, `jarvis-tui`.
 
 The TUI resumes the session you last used. Inside it, `F1` lists the keys and
 `/help` lists the session and daemon commands.
@@ -212,7 +227,30 @@ default = false               # sessions start local
 ```
 
 `jarvis tier remote` (or `/remote` in the TUI) switches to it and `jarvis
-tier local` back. When a remote request is not sent, Jarvis asks whether the
+tier local` back.
+
+### Switching models
+
+List more models per tier with `models`, then switch at any point in a
+conversation - the history comes along:
+
+```toml
+[model]
+default_model = "llama3.2:1b"
+models = ["qwen2.5:3b"]
+
+[remote]
+default_model = "nvidia/nemotron-3-ultra-550b-a55b:free"
+models = ["cohere/north-mini-code:free", "recursive/flint-v1.0:free"]
+```
+
+In the TUI, `/model` (or `Ctrl+P`) opens a picker - arrows, Enter - and
+`/model qwen` switches directly: an exact name or a part of exactly one. The
+model's tier comes with it, so picking a remote model sends the conversation
+through the same privacy rules as `/remote`. The header and each answer's
+footer name the model that answered. The choice lasts across new sessions
+until you switch again or the daemon restarts; `jarvis model` does the same
+from the shell. When a remote request is not sent, Jarvis asks whether the
 local model should answer instead. "Always allow" answers and `jarvis egress
 allow <folder>` add a folder to the allow-list; `jarvis egress list` shows
 it.

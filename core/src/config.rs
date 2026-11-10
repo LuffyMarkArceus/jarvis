@@ -28,6 +28,23 @@ pub struct Config {
     /// Where `shell.run` commands run: see `crate::sandbox`.
     #[serde(default)]
     pub sandbox: SandboxConfig,
+    /// What `jarvis up` starts.
+    #[serde(default)]
+    pub up: UpConfig,
+}
+
+/// `[up]`: `jarvis up` starts Ollama, loads keys, starts the daemon and
+/// opens the TUI.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct UpConfig {
+    /// `KEY=value` files handed to the daemon. Empty: every `*.env` in
+    /// Jarvis's config folder.
+    pub env_files: Vec<PathBuf>,
+    /// Environment for `ollama serve`, e.g. `OLLAMA_MODELS`.
+    pub ollama_env: std::collections::BTreeMap<String, String>,
+    /// Where `ollama serve` logs. Unset: `<data_dir>/ollama.log`.
+    pub ollama_log: Option<PathBuf>,
 }
 
 /// `[sandbox]`: what a shell command may touch.
@@ -156,6 +173,9 @@ pub struct ModelConfig {
     pub provider: String,
     pub base_url: String,
     pub default_model: String,
+    /// More models on the same provider, offered by `/model` besides
+    /// `default_model`.
+    pub models: Vec<String>,
     pub routing_model: String,
     pub embedding_model: String,
     /// Use the provider's native function-calling interface when available.
@@ -202,6 +222,7 @@ impl Default for ModelConfig {
             provider: "ollama".to_string(),
             base_url: "http://127.0.0.1:11434".to_string(),
             default_model: "llama3.2:1b".to_string(),
+            models: Vec::new(),
             routing_model: "llama3.2:1b".to_string(),
             embedding_model: "nomic-embed-text".to_string(),
             native_tool_calling: true,

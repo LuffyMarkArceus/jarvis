@@ -161,6 +161,8 @@ pub enum Pending {
     Tools,
     Tier,
     Trust,
+    /// `model.list`, for the picker.
+    Models,
 }
 
 /// What `main` has to do after a key press or daemon event.
@@ -208,6 +210,18 @@ pub enum Overlay {
         selected: usize,
     },
     Recall(Vec<RecallRow>),
+    Models {
+        rows: Vec<ModelRow>,
+        selected: usize,
+    },
+}
+
+/// A model in the `/model` picker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelRow {
+    pub name: String,
+    pub remote: bool,
+    pub current: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -240,6 +254,8 @@ pub enum Command {
     Recall(String),
     /// `/remote` (true) or `/local` (false).
     Tier(bool),
+    /// `/model` opens the picker; `/model <name>` switches to it.
+    Model(String),
     /// `/undo`, `/undo list`, `/undo yes`, `/undo <id>`.
     Undo(String),
     /// `/trust`, `/trust clear`.
@@ -263,6 +279,7 @@ pub fn parse_command(text: &str) -> Option<Command> {
         "/status" => Command::Status,
         "/remote" => Command::Tier(true),
         "/local" => Command::Tier(false),
+        "/model" => Command::Model(rest),
         "/undo" => Command::Undo(rest),
         "/trust" => Command::Trust(rest),
         "/tools" => Command::Tools,
@@ -395,6 +412,15 @@ impl App {
     }
 
     /// Record that a request is in flight.
+    /// Switch to the model `name` names.
+    fn model_set(name: &str) -> Action {
+        Action::Request {
+            method: "model.set",
+            params: json!({ "model": name }),
+            pending: Pending::Tier,
+        }
+    }
+
     pub fn begin_request(&mut self, id: Uuid, pending: Pending) {
         self.pending_id = Some(id);
         self.pending = Some(pending);
@@ -530,6 +556,12 @@ impl App {
                 params: json!({}),
                 pending: Pending::Tools,
             }],
+            Command::Model(name) if name.is_empty() => vec![Action::Request {
+                method: "model.list",
+                params: json!({}),
+                pending: Pending::Models,
+            }],
+            Command::Model(name) => vec![Self::model_set(&name)],
             Command::Tier(remote) => vec![Action::Request {
                 method: "tier.set",
                 params: json!({ "tier": if remote { "remote" } else { "local" } }),
@@ -657,6 +689,9 @@ impl App {
                     return vec![];
                 };
                 self.session_id = Some(id.to_string());
+                if let Some(model) = result.get("model").and_then(Value::as_str) {
+                    self.model = model.to_string();
+                }
                 vec![self.show_request(id)]
             }
             Some(Pending::ShowSession(id)) => {
@@ -768,7 +803,25 @@ impl App {
                 }));
                 vec![]
             }
+            Some(Pending::Models) => {
+                let rows: Vec<ModelRow> = result["models"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|m| ModelRow {
+                        name: m["name"].as_str().unwrap_or_default().to_string(),
+                        remote: m["remote"].as_bool().unwrap_or(false),
+                        current: m["current"].as_bool().unwrap_or(false),
+                    })
+                    .collect();
+                let selected = rows.iter().position(|r| r.current).unwrap_or(0);
+                self.overlay = Some(Overlay::Models { rows, selected });
+                vec![]
+            }
             Some(Pending::Tier) => {
+                if let Some(model) = result.get("model").and_then(Value::as_str) {
+                    self.model = model.to_string();
+                }
                 let field = |k: &str| {
                     result
                         .get(k)
@@ -889,6 +942,9 @@ impl App {
         if ctrl && key.code == KeyCode::Char('s') {
             return self.run_command(Command::Sessions);
         }
+        if ctrl && key.code == KeyCode::Char('p') {
+            return self.run_command(Command::Model(String::new()));
+        }
         if ctrl && key.code == KeyCode::Char('l') {
             return self.run_command(Command::Clear);
         }
@@ -955,6 +1011,29 @@ impl App {
                         vec![]
                     }
                 }
+            }
+            Overlay::Models { rows, mut selected } => {
+                let last = rows.len().saturating_sub(1);
+                match key.code {
+                    KeyCode::Esc => {}
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        selected = selected.saturating_sub(1);
+                        self.overlay = Some(Overlay::Models { rows, selected });
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        selected = (selected + 1).min(last);
+                        self.overlay = Some(Overlay::Models { rows, selected });
+                    }
+                    KeyCode::Enter => {
+                        if let Some(row) = rows.get(selected) {
+                            return vec![Self::model_set(&row.name)];
+                        }
+                    }
+                    _ => {
+                        self.overlay = Some(Overlay::Models { rows, selected });
+                    }
+                }
+                vec![]
             }
             Overlay::Sessions { rows, mut selected } => {
                 let last = rows.len().saturating_sub(1);
@@ -1491,5 +1570,129 @@ mod tests {
         ));
         assert!(app.overlay.is_none());
         assert!(app.cancelling);
+    }
+
+    // ------------------------------------------------------------ /model
+
+    fn models_reply() -> Value {
+        json!({ "models": [
+            { "name": "llama3.2:1b", "remote": false, "current": true },
+            { "name": "qwen2.5:3b", "remote": false, "current": false },
+            { "name": "cohere/north-mini-code:free", "remote": true, "current": false },
+        ]})
+    }
+
+    #[test]
+    fn model_commands_parse() {
+        assert_eq!(parse_command("/model"), Some(Command::Model(String::new())));
+        assert_eq!(
+            parse_command("/model qwen"),
+            Some(Command::Model("qwen".into()))
+        );
+    }
+
+    #[test]
+    fn model_with_a_name_switches_directly() {
+        let mut app = App::new("llama3.2:1b".into());
+        let actions = app.run_command(Command::Model("qwen".into()));
+        match actions.as_slice() {
+            [Action::Request {
+                method,
+                params,
+                pending,
+            }] => {
+                assert_eq!(*method, "model.set");
+                assert_eq!(params["model"], "qwen");
+                assert_eq!(*pending, Pending::Tier);
+            }
+            other => panic!("unexpected actions: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn model_alone_and_ctrl_p_open_the_picker_on_the_current_model() {
+        for open in [
+            |app: &mut App| app.run_command(Command::Model(String::new())),
+            |app: &mut App| {
+                app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            },
+        ] {
+            let mut app = App::new("qwen2.5:3b".into());
+            let actions = open(&mut app);
+            assert!(matches!(
+                actions.as_slice(),
+                [Action::Request {
+                    method: "model.list",
+                    pending: Pending::Models,
+                    ..
+                }]
+            ));
+            let request = Request::new("model.list", json!({}));
+            app.begin_request(request.id, Pending::Models);
+            let mut reply = models_reply();
+            reply["models"][0]["current"] = json!(false);
+            reply["models"][1]["current"] = json!(true);
+            app.on_response(Response::ok(request.id, reply));
+            match &app.overlay {
+                Some(Overlay::Models { rows, selected }) => {
+                    assert_eq!(rows.len(), 3);
+                    assert_eq!(*selected, 1, "starts on the current model");
+                }
+                other => panic!("no picker: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_picker_moves_and_enter_switches_to_the_selected_model() {
+        let mut app = App::new("llama3.2:1b".into());
+        let request = Request::new("model.list", json!({}));
+        app.begin_request(request.id, Pending::Models);
+        app.on_response(Response::ok(request.id, models_reply()));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let actions = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        match actions.as_slice() {
+            [Action::Request { method, params, .. }] => {
+                assert_eq!(*method, "model.set");
+                assert_eq!(params["model"], "cohere/north-mini-code:free");
+            }
+            other => panic!("unexpected actions: {other:?}"),
+        }
+        assert!(app.overlay.is_none());
+    }
+
+    #[test]
+    fn esc_closes_the_picker_without_switching() {
+        let mut app = App::new("llama3.2:1b".into());
+        let request = Request::new("model.list", json!({}));
+        app.begin_request(request.id, Pending::Models);
+        app.on_response(Response::ok(request.id, models_reply()));
+        let actions = app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(actions.is_empty());
+        assert!(app.overlay.is_none());
+    }
+
+    #[test]
+    fn the_header_follows_the_model_that_answers() {
+        // It showed the TUI's own config, so after /remote it named the
+        // wrong model.
+        let mut app = App::new("llama3.2:1b".into());
+        let request = Request::new("model.set", json!({}));
+        app.begin_request(request.id, Pending::Tier);
+        app.on_response(Response::ok(
+            request.id,
+            json!({ "model": "qwen2.5:3b", "tier": "local", "privacy": "local" }),
+        ));
+        assert_eq!(app.model, "qwen2.5:3b");
+
+        let request = Request::new("session.current", json!({}));
+        app.begin_request(request.id, Pending::CurrentSession);
+        app.on_response(Response::ok(
+            request.id,
+            json!({ "session_id": "abc", "model": "cohere/north-mini-code:free", "tier": "remote" }),
+        ));
+        assert_eq!(app.model, "cohere/north-mini-code:free");
     }
 }

@@ -365,6 +365,32 @@ async fn handle_request(
                 Err(e) => Response::err(request.id, e.to_string()),
             }
         }
+        "model.list" => Response::ok(
+            request.id,
+            serde_json::json!({ "models": daemon_lock.models().await }),
+        ),
+        "model.set" => {
+            let query = request
+                .params
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            match daemon_lock.set_model(query).await {
+                Ok(chosen) => {
+                    let (provider, model, _) = daemon_lock.model_info().await;
+                    Response::ok(
+                        request.id,
+                        serde_json::json!({
+                            "tier": if chosen.remote { "remote" } else { "local" },
+                            "model": model,
+                            "provider": provider,
+                            "privacy": daemon_lock.privacy().await,
+                        }),
+                    )
+                }
+                Err(e) => Response::err(request.id, e.to_string()),
+            }
+        }
         "trust.list" => Response::ok(
             request.id,
             serde_json::json!({ "trusted": daemon_lock.trusted().await }),
@@ -391,7 +417,15 @@ async fn handle_request(
         }
         "session.current" => {
             let sid = daemon_lock.session_id().await;
-            Response::ok(request.id, serde_json::json!({"session_id": sid}))
+            let (_, model, _) = daemon_lock.model_info().await;
+            Response::ok(
+                request.id,
+                serde_json::json!({
+                    "session_id": sid,
+                    "model": model,
+                    "tier": if daemon_lock.uses_remote().await { "remote" } else { "local" },
+                }),
+            )
         }
         "session.delete" => {
             let sid = match request.params.get("session_id").and_then(|p| p.as_str()) {
