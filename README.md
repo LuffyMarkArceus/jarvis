@@ -246,7 +246,8 @@ models = ["cohere/north-mini-code:free", "recursive/flint-v1.0:free"]
 ```
 
 In the TUI, `/model` (or `Ctrl+P`) opens a picker - arrows, Enter - and
-`/model qwen` switches directly: an exact name or a part of exactly one. The
+`/model qwen` switches directly: an exact name or a part of exactly one.
+`/model qwen what is 2+2?` switches, then sends the rest as your message. The
 model's tier comes with it, so picking a remote model sends the conversation
 through the same privacy rules as `/remote`. The header and each answer's
 footer name the model that answered. The choice lasts across new sessions

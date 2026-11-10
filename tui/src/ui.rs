@@ -221,7 +221,10 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         ("/session", "show the current session id"),
         ("/recall <query>", "search memories across sessions"),
         ("/status, /tools", "daemon information"),
-        ("/model [name]", "pick the model, or switch to one by name"),
+        (
+            "/model [name] [msg]",
+            "pick a model; switch by name, then send msg",
+        ),
         (
             "/remote, /local",
             "answer with the remote or the local model",
