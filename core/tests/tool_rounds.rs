@@ -248,3 +248,30 @@ async fn a_command_runs_in_the_work_dir() {
         report.answer
     );
 }
+
+#[tokio::test]
+async fn a_call_without_its_required_arguments_is_not_put_to_the_owner() {
+    // Real use: llama sent shell.run its own schema instead of a command,
+    // and the owner was asked to approve a command that did not exist.
+    let dir = sandbox();
+    let echoed = json!({
+        "properties": {
+            "path": { "type": "string" },
+            "content": { "type": "string" }
+        },
+        "required": ["path", "content"]
+    });
+    let s = setup(
+        dir.clone(),
+        vec![
+            call("filesystem.write", echoed),
+            answer("I could not write it."),
+        ],
+        None,
+    );
+    let owner = Yes(Mutex::new(0));
+    let report = s.ask(&owner).await;
+    assert_eq!(*owner.0.lock().unwrap(), 0, "nobody is asked about nothing");
+    assert_eq!(report.calls[0].status, "failed", "{:?}", report.calls);
+    assert!(!dir.join("notes.md").exists());
+}
