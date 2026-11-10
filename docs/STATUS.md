@@ -14,7 +14,7 @@ Last updated: 2026-11-09, after Milestone 6.2 (main `f91104c`).
 | Tests | 469 (`cargo test --workspace`), CI on every push |
 | Evals | 53 cases (`jarvis eval`); qwen2.5:3b 90.6%, llama3.2:1b 82.4% ([BASELINES](../evals/BASELINES.md)) |
 | Models | local: Ollama (llama3.2:1b for development, qwen2.5:3b for verification); remote: OpenRouter free tier (nemotron-3-ultra) |
-| Lessons | 28 entries in the [learning log](learning/README.md) |
+| Lessons | 29 entries in the [learning log](learning/README.md) |
 
 ## Phases
 
@@ -34,6 +34,7 @@ earlier sessions and is not in the repository.
 | 6 | Prompt-injection gate, exfiltration rule, undo, marking, injection evals | 2026-11-02 | [injection-and-undo](design/injection-and-undo.md) |
 | 6.1 | Relay note, router fixes, a request never runs twice, orchestrator split | 2026-11-05 | learning #27-28 |
 | 6.2 | Earlier-turn marking, `filesystem.delete` with undo, large-file limits, eval sandbox (`work_dir`) and honesty fixes | 2026-11-09 | [ROADMAP](ROADMAP.md) |
+| 6.3 | OS sandbox for commands (bubblewrap), keys out of command environments, an always-asked way out | 2026-11-09 | [sandbox](design/sandbox.md) |
 
 ## Open items
 
@@ -46,6 +47,13 @@ The order they will be done in is in the roadmap.
   mentions gets the note too (`ctrl.research`, qwen 3/3): watch for noise in use.
 * Batch operations with a dry-run preview: later, with the operation itself.
 * Deletes through `shell.run` (`rm`) cannot be undone; `filesystem.delete` can.
+  In the sandbox, `rm` reaches only the workspace.
+
+**Sandbox (6.3)**
+
+* Reading is limited only by the hidden list; a command outside the sandbox has
+  full rights (it always asks). Typed file tools and MCP sidecars are not
+  sandboxed. Linux only. See [sandbox](design/sandbox.md), known gaps.
 
 **Carried over**
 
