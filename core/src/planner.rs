@@ -327,7 +327,8 @@ fn detect_intent(input: &str) -> Intent {
             "service", "shell", "terminal", "bash",
         ]
         .iter()
-        .any(|w| words.contains(*w)),
+        .any(|w| words.contains(*w))
+            || crate::router::about_disk_space(&lower),
         processes: ["process", "processes", "cpu", "ram", "memory", "top", "ps"]
             .iter()
             .any(|w| words.contains(*w)),
@@ -453,6 +454,24 @@ mod tests {
             &fetch_tools(),
         );
         assert!(!plan.web);
+    }
+
+    #[test]
+    fn a_disk_space_question_offers_the_shell() {
+        // Offered only the web, a 1B model searched Wikipedia and then
+        // invented a breakdown (session fe3f7d69).
+        for input in [
+            "what is using so much space on this machine right now?",
+            "how much free disk space do I have?",
+            "what is taking up storage in my home folder?",
+        ] {
+            let plan = plan(input, Route::Model, &native(), &fetch_tools());
+            assert!(plan.allows("shell.run"), "{}", input);
+            assert!(!plan.allows("mcp.fetch.fetch"), "{}", input);
+        }
+        // Outer space is not disk space.
+        let plan = plan("how big is space?", Route::Model, &native(), &fetch_tools());
+        assert!(!plan.allows("shell.run"));
     }
 
     #[test]
