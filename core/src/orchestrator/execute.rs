@@ -293,6 +293,25 @@ impl Orchestrator {
         untrusted: &[Source],
     ) -> ToolOutcome {
         let mut args = self.sanitize_args(&name, args);
+        // A call missing what it needs goes back to the model, which can
+        // fix it, instead of to the owner, who would be asked to approve
+        // nothing (a 1B sends its schema instead of a command).
+        let missing = self.missing_args(&name, &args);
+        if !missing.is_empty() {
+            return ToolOutcome {
+                output: format!(
+                    "Tool {} was not run: it needs {} and the call did not give {}. Call it again with the actual values.",
+                    name,
+                    missing.join(", "),
+                    if missing.len() == 1 { "it" } else { "them" }
+                ),
+                name,
+                args,
+                status: OutcomeStatus::Failed,
+                result: None,
+                pattern: None,
+            };
+        }
         let mut verdict = self.permissions.check_permission(&name, &args);
 
         // Outside the sandbox: asked every time, never on a page's say-so,
@@ -696,6 +715,22 @@ impl Orchestrator {
                 }
             }
         }
+    }
+
+    /// Required arguments that are absent, null, or a piece of schema
+    /// (`{"type": "string"}`) where a value should be.
+    pub(super) fn missing_args(&self, tool: &str, args: &Value) -> Vec<String> {
+        if tool.starts_with("mcp.") {
+            return Vec::new();
+        }
+        self.tools
+            .required_args(tool)
+            .into_iter()
+            .filter(|key| match args.get(key) {
+                None | Some(Value::Null) => true,
+                Some(v) => v.is_object() && v.get("type").is_some(),
+            })
+            .collect()
     }
 
     /// Some models echo the tool schema back as the arguments object, e.g.

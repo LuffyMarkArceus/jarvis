@@ -531,3 +531,15 @@ fn the_owner_is_told_how_to_get_past_the_sandbox() {
     fine.result = Some(json!({ "status": 1, "sandboxed": true }));
     assert!(!render_tool_output(&fine).contains("outside the sandbox"));
 }
+
+#[test]
+fn every_request_caps_the_answer_length() {
+    // Real use: llama looped for 9 minutes and ~3,900 tokens, holding the
+    // GPU; nothing told the server when to stop.
+    let (jarvis, dir) = web_jarvis();
+    let mut model = jarvis.config.model.clone();
+    assert_eq!(jarvis.model_options(&model)["num_predict"], 2048);
+    model.max_answer_tokens = 512;
+    assert_eq!(jarvis.model_options(&model)["num_predict"], 512);
+    let _ = std::fs::remove_dir_all(dir);
+}

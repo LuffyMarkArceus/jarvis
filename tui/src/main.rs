@@ -95,6 +95,15 @@ fn handle_input_event(app: &mut App, event: Event) -> Vec<Action> {
             app.on_paste(&text);
             Vec::new()
         }
+        Event::Mouse(mouse) => {
+            use crossterm::event::MouseEventKind;
+            match mouse.kind {
+                MouseEventKind::ScrollUp => app.on_wheel(true),
+                MouseEventKind::ScrollDown => app.on_wheel(false),
+                _ => {}
+            }
+            Vec::new()
+        }
         _ => Vec::new(),
     }
 }
@@ -237,7 +246,9 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     crossterm::execute!(
         out,
         EnterAlternateScreen,
-        crossterm::event::EnableBracketedPaste
+        crossterm::event::EnableBracketedPaste,
+        // Wheel events scroll the conversation; selecting text is Shift+drag.
+        crossterm::event::EnableMouseCapture
     )?;
     let terminal = Terminal::new(CrosstermBackend::new(out))?;
     Ok(terminal)
@@ -249,6 +260,7 @@ fn restore_terminal() {
         stdout(),
         LeaveAlternateScreen,
         crossterm::event::DisableBracketedPaste,
+        crossterm::event::DisableMouseCapture,
         crossterm::cursor::Show
     );
 }

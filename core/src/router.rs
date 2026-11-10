@@ -359,7 +359,8 @@ pub fn route(input: &str) -> Route {
     }
 
     // 11. Looks like a machine action the router cannot pin down, or MCP usage.
-    if lower.contains("mcp.") || has_action_word(&lower) {
+    //     "What is using space on this machine" is answered with `du`.
+    if lower.contains("mcp.") || has_action_word(&lower) || about_disk_space(&lower) {
         return Route::Model;
     }
 
@@ -439,10 +440,62 @@ const RECENCY_PHRASES: &[&str] = &[
 /// recency and live status instead of a list of subjects.
 pub fn needs_source(input: &str) -> bool {
     let lower = input.to_lowercase();
+    // "What is using space on this machine right now" is about here, not
+    // the world: no web page knows the answer.
+    if about_this_machine(&lower) {
+        return false;
+    }
     if has_recent_year(&lower) {
         return true;
     }
     RECENCY_PHRASES.iter().any(|phrase| lower.contains(phrase))
+}
+
+/// "What is using space", "free disk space", "taking up storage": a
+/// question `du` and `df` answer. Not outer space.
+pub fn about_disk_space(lower: &str) -> bool {
+    let tokens = words(lower);
+    let has = |w: &str| tokens.iter().any(|t| t == w);
+    has("storage")
+        || lower.contains("disk usage")
+        || (has("space")
+            && [
+                "disk",
+                "drive",
+                "using",
+                "used",
+                "free",
+                "taking",
+                "machine",
+                "computer",
+                "laptop",
+                "folder",
+                "folders",
+                "files",
+                "partition",
+            ]
+            .iter()
+            .any(|w| has(w)))
+}
+
+/// Does the request ask about this computer rather than the world?
+fn about_this_machine(lower: &str) -> bool {
+    [
+        "this machine",
+        "my machine",
+        "this computer",
+        "my computer",
+        "this laptop",
+        "my laptop",
+        "this pc",
+        "my pc",
+        "this system",
+        "my system",
+        "my disk",
+        "my drive",
+    ]
+    .iter()
+    .any(|p| lower.contains(p))
 }
 
 /// Does the text contain a year at or after [`RECENT_YEAR`]?
@@ -527,9 +580,11 @@ fn looks_like_a_search(lower: &str, raw: &str) -> bool {
         || lower.contains("inside")
         || lower.contains("search")
         || first_path(raw, lower).is_some()
-        || raw
-            .split_whitespace()
-            .any(|t| t.contains('*') || t.contains('?'))
+        || raw.split_whitespace().any(|t| {
+            // "now?" ends a question; "file?.txt" is a pattern.
+            let t = t.trim_end_matches(['?', '.', ',', '!', ':', ';']);
+            t.contains('*') || t.contains('?')
+        })
 }
 
 /// Whether a search should match file names or file contents.
@@ -585,6 +640,22 @@ fn parse_search(raw: &str) -> Option<SearchRequest> {
             None
         }
     })?;
+
+    // "find out", "find it out": an idiom for working something out.
+    if verb == "find" {
+        let next: Vec<String> = tokens[verb_index + 1..]
+            .iter()
+            .take(2)
+            .map(|t| clean_word(t))
+            .collect();
+        let out = next.first().is_some_and(|w| w == "out")
+            || (next.len() == 2
+                && ["it", "that", "this"].contains(&next[0].as_str())
+                && next[1] == "out");
+        if out {
+            return None;
+        }
+    }
 
     let mut mode = match verb.as_str() {
         "grep" | "contain" => Some(SearchMode::Content),
@@ -1500,5 +1571,40 @@ mod tests {
         let (name, args) = tool_of(&r).unwrap();
         assert_eq!(name, "filesystem.list_dir");
         assert_eq!(args["path"], ".");
+    }
+
+    // Found in real use (session fe3f7d69, 2026-11-10).
+
+    const DISK_QUESTION: &str = "WHat is using so much space on this machine right now? Give me a detailed breakdown and a consolidated report of what is thing using most space, you can also give a category wise report as well along with it? Go ahead, find it out for me.";
+
+    #[test]
+    fn a_question_mark_ending_a_word_is_not_a_wildcard() {
+        // "...right now?" made the whole question a file search for "it out".
+        assert_eq!(route(DISK_QUESTION), Route::Model);
+        // A real pattern still is one.
+        let r = route("find file?.txt in /tmp");
+        assert_eq!(tool_of(&r).unwrap().0, "filesystem.search");
+    }
+
+    #[test]
+    fn find_out_is_not_a_search() {
+        for input in [
+            "can you find out why my build is slow?",
+            "go ahead, find it out for me",
+        ] {
+            assert!(
+                !matches!(route(input), Route::Tool { ref name, .. } if name == "filesystem.search"),
+                "{}",
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn a_question_about_this_machine_needs_no_web_source() {
+        assert!(!needs_source(DISK_QUESTION));
+        assert!(!needs_source("what is my computer doing right now?"));
+        // Elsewhere "right now" still asks for a source.
+        assert!(needs_source("who is leading the race right now?"));
     }
 }

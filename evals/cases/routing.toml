@@ -69,3 +69,12 @@ tags = ["conversation"]
 [case.expect]
 tools = []
 contains = ["7.62"]
+
+[[case]]
+id = "route.disk_space"
+input = "What is using so much space on this machine right now? Give me a detailed breakdown. Go ahead, find it out for me."
+tags = ["routing", "real-use"]
+note = "Real use, 2026-11-10: the trailing '?' made it a file search for 'it out', then 'right now' offered only the web and the 1B invented a breakdown. It needs the shell (du, df)."
+[case.expect]
+route = "Model"
+tools_exclude = ["filesystem.search", "mcp.search.search", "mcp.fetch.fetch"]
