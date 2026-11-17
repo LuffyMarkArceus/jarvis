@@ -658,7 +658,7 @@ async fn main() -> anyhow::Result<()> {
                     // Fallback to direct mode
                     info!("Daemon not running, using direct mode");
                     let orch = Orchestrator::new()?;
-                    let (response, footer) = orch
+                    let (response, footer, _timing) = orch
                         .run_with_footer(&prompt, Some(&TerminalConfirmer), None, None)
                         .await?;
                     println!("{}", response);

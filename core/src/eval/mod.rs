@@ -548,6 +548,7 @@ impl Provider for ScriptedProvider {
             message: ChatMessage::text("assistant", SCRIPTED_REPLY),
             prompt_tokens: None,
             completion_tokens: None,
+            timing: Default::default(),
         })
     }
 
@@ -610,6 +611,7 @@ impl Provider for RecordingProvider {
             message: ChatMessage::text("assistant", &self.reply),
             prompt_tokens: Some(100),
             completion_tokens: Some(10),
+            timing: Default::default(),
         })
     }
 

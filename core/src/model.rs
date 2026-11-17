@@ -124,6 +124,31 @@ pub struct ChatTurn {
     pub prompt_tokens: Option<u64>,
     /// Tokens the model generated.
     pub completion_tokens: Option<u64>,
+    /// Where the provider says its time went, when it says (Ollama does).
+    pub timing: ProviderTiming,
+}
+
+/// The provider's own account of one request, in milliseconds.
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize)]
+pub struct ProviderTiming {
+    /// Loading the model into memory: large when it had been unloaded.
+    pub load_ms: Option<u64>,
+    /// Reading the prompt.
+    pub prompt_ms: Option<u64>,
+    /// Writing the answer.
+    pub gen_ms: Option<u64>,
+}
+
+impl ProviderTiming {
+    /// From Ollama's nanosecond durations.
+    fn from_ns(load: Option<u64>, prompt: Option<u64>, gen: Option<u64>) -> Self {
+        let ms = |ns: Option<u64>| ns.map(|n| n / 1_000_000);
+        ProviderTiming {
+            load_ms: ms(load),
+            prompt_ms: ms(prompt),
+            gen_ms: ms(gen),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -133,6 +158,12 @@ struct ChatResponse {
     prompt_eval_count: Option<u64>,
     #[serde(default)]
     eval_count: Option<u64>,
+    #[serde(default)]
+    load_duration: Option<u64>,
+    #[serde(default)]
+    prompt_eval_duration: Option<u64>,
+    #[serde(default)]
+    eval_duration: Option<u64>,
 }
 
 /// One newline-delimited event from Ollama's streaming `/api/chat`.
@@ -147,6 +178,12 @@ struct ChatStreamResponse {
     #[serde(default)]
     eval_count: Option<u64>,
     #[serde(default)]
+    load_duration: Option<u64>,
+    #[serde(default)]
+    prompt_eval_duration: Option<u64>,
+    #[serde(default)]
+    eval_duration: Option<u64>,
+    #[serde(default)]
     error: Option<String>,
 }
 
@@ -157,6 +194,7 @@ struct StreamState {
     tool_calls: Vec<ModelToolCall>,
     prompt_tokens: Option<u64>,
     completion_tokens: Option<u64>,
+    timing: ProviderTiming,
     done: bool,
 }
 
@@ -190,6 +228,14 @@ impl StreamState {
         if let Some(count) = chunk.eval_count {
             self.completion_tokens = Some(count);
         }
+        if chunk.done {
+            // Only the final event carries the durations.
+            self.timing = ProviderTiming::from_ns(
+                chunk.load_duration,
+                chunk.prompt_eval_duration,
+                chunk.eval_duration,
+            );
+        }
         self.done |= chunk.done;
         Ok(())
     }
@@ -209,6 +255,7 @@ impl StreamState {
             },
             prompt_tokens: self.prompt_tokens,
             completion_tokens: self.completion_tokens,
+            timing: self.timing,
         }
     }
 }
@@ -355,6 +402,11 @@ impl OllamaClient {
             message: chat_resp.message,
             prompt_tokens: chat_resp.prompt_eval_count,
             completion_tokens: chat_resp.eval_count,
+            timing: ProviderTiming::from_ns(
+                chat_resp.load_duration,
+                chat_resp.prompt_eval_duration,
+                chat_resp.eval_duration,
+            ),
         })
     }
 
@@ -522,6 +574,33 @@ mod tests {
         assert_eq!(turn.prompt_tokens, Some(12));
         assert_eq!(turn.completion_tokens, Some(2));
         assert!(turn.message.tool_calls.is_none());
+    }
+
+    #[test]
+    fn ollamas_durations_become_milliseconds() {
+        // Real use: an 88-second turn and no way to tell where it went.
+        // Ollama says, on the final event, in nanoseconds.
+        let mut state = StreamState::default();
+        state
+            .apply(
+                r#"{"message":{"role":"assistant","content":"hi"},"done":true,"prompt_eval_count":2375,"eval_count":30,"load_duration":41000000000,"prompt_eval_duration":45100000000,"eval_duration":1200000000}"#,
+                None,
+            )
+            .unwrap();
+        let turn = state.into_turn();
+        assert_eq!(
+            turn.timing,
+            ProviderTiming {
+                load_ms: Some(41_000),
+                prompt_ms: Some(45_100),
+                gen_ms: Some(1_200)
+            }
+        );
+        let whole: ChatResponse = serde_json::from_str(
+            r#"{"message":{"role":"assistant","content":"x"},"load_duration":5000000}"#,
+        )
+        .unwrap();
+        assert_eq!(whole.load_duration, Some(5_000_000));
     }
 
     #[test]

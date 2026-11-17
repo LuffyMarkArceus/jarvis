@@ -165,6 +165,8 @@ pub enum Pending {
     Models,
     /// `model.set`; then the message to send, if one followed the name.
     Model(Option<String>),
+    /// `/bad` or `/good`.
+    Feedback,
 }
 
 /// What `main` has to do after a key press or daemon event.
@@ -258,6 +260,10 @@ pub enum Command {
     Tier(bool),
     /// `/model` opens the picker; `/model <name>` switches to it.
     Model(String),
+    /// Where the last turn's time went.
+    Timing,
+    /// `/bad [note]` or `/good [note]` about the last turn.
+    Feedback(String, String),
     /// `/undo`, `/undo list`, `/undo yes`, `/undo <id>`.
     Undo(String),
     /// `/trust`, `/trust clear`.
@@ -267,6 +273,59 @@ pub enum Command {
     /// `/word` that is no command: shown as a mistake, not sent to the
     /// model.
     Unknown(String),
+}
+
+/// `/timing`: where a turn's time went, in plain words.
+pub fn format_timing(t: &Value) -> String {
+    let secs = |ms: u64| format!("{:.1} s", ms as f64 / 1000.0);
+    let num = |v: &Value| v.as_u64().unwrap_or(0);
+    let total = num(&t["total_ms"]);
+    let you = num(&t["you_ms"]);
+    let mut lines = vec![format!(
+        "Last turn {} (Jarvis {}, you {})",
+        secs(total),
+        secs(total.saturating_sub(you)),
+        secs(you)
+    )];
+    for m in t["model"].as_array().into_iter().flatten() {
+        let mut parts = Vec::new();
+        if !m["load_ms"].is_null() {
+            parts.push(format!("loading {}", secs(num(&m["load_ms"]))));
+        }
+        if !m["prompt_ms"].is_null() {
+            parts.push(format!(
+                "reading {} tokens {}",
+                num(&m["prompt_tokens"]),
+                secs(num(&m["prompt_ms"]))
+            ));
+        }
+        if !m["gen_ms"].is_null() {
+            parts.push(format!(
+                "writing {} tokens {}",
+                num(&m["gen_tokens"]),
+                secs(num(&m["gen_ms"]))
+            ));
+        }
+        let detail = if parts.is_empty() {
+            String::new()
+        } else {
+            format!(" - {}", parts.join(", "))
+        };
+        lines.push(format!(
+            "  {}: {}{}",
+            m["model"].as_str().unwrap_or("model"),
+            secs(num(&m["wall_ms"])),
+            detail
+        ));
+    }
+    for tool in t["tools"].as_array().into_iter().flatten() {
+        lines.push(format!(
+            "  {} {}",
+            tool["name"].as_str().unwrap_or("tool"),
+            secs(num(&tool["ms"]))
+        ));
+    }
+    lines.join("\n")
 }
 
 pub fn parse_command(text: &str) -> Option<Command> {
@@ -285,6 +344,9 @@ pub fn parse_command(text: &str) -> Option<Command> {
         "/remote" => Command::Tier(true),
         "/local" => Command::Tier(false),
         "/model" => Command::Model(rest),
+        "/timing" => Command::Timing,
+        "/bad" => Command::Feedback("bad".into(), rest),
+        "/good" => Command::Feedback("good".into(), rest),
         "/undo" => Command::Undo(rest),
         "/trust" => Command::Trust(rest),
         "/tools" => Command::Tools,
@@ -333,6 +395,8 @@ pub struct App {
     pub spinner: usize,
     history: Vec<String>,
     history_pos: Option<usize>,
+    /// The last answered turn's timing, for `/timing`.
+    last_timing: Option<Value>,
 }
 
 impl App {
@@ -357,6 +421,7 @@ impl App {
             spinner: 0,
             history: Vec::new(),
             history_pos: None,
+            last_timing: None,
         }
     }
 
@@ -509,7 +574,12 @@ impl App {
     fn run_command(&mut self, command: Command) -> Vec<Action> {
         let needs_daemon = !matches!(
             command,
-            Command::Help | Command::Quit | Command::Clear | Command::Session | Command::Unknown(_)
+            Command::Help
+                | Command::Quit
+                | Command::Clear
+                | Command::Session
+                | Command::Timing
+                | Command::Unknown(_)
         );
         if needs_daemon && self.pending.is_some() {
             self.note(Entry::system("Still waiting for the daemon."));
@@ -525,6 +595,19 @@ impl App {
                 self.should_quit = true;
                 vec![Action::Quit]
             }
+            Command::Timing => {
+                let text = match &self.last_timing {
+                    Some(timing) => format_timing(timing),
+                    None => "No turn has finished in this window yet.".to_string(),
+                };
+                self.note(Entry::system(text));
+                vec![]
+            }
+            Command::Feedback(kind, note) => vec![Action::Request {
+                method: "feedback",
+                params: json!({ "kind": kind, "note": note }),
+                pending: Pending::Feedback,
+            }],
             Command::Unknown(name) => {
                 self.note(Entry::error(format!(
                     "Unknown command {name}. /help lists the commands; nothing was sent."
@@ -694,7 +777,19 @@ impl App {
         }
         let result = response.result.unwrap_or(Value::Null);
 
+        if matches!(pending, Some(Pending::Turn)) {
+            if let Some(timing) = result.get("timing").filter(|t| !t.is_null()) {
+                self.last_timing = Some(timing.clone());
+            }
+        }
         match pending {
+            Some(Pending::Feedback) => {
+                let kind = result["kind"].as_str().unwrap_or("feedback");
+                self.note(Entry::system(format!(
+                    "Noted ({kind}) for the last turn. `jarvis report` lists it."
+                )));
+                vec![]
+            }
             Some(Pending::Turn) => {
                 self.scroll = 0;
                 let cancelled = result
@@ -1845,5 +1940,70 @@ mod tests {
         let actions = app.on_response(Response::err(request.id, "No model matches".into()));
         assert!(actions.is_empty());
         assert_eq!(app.input.text(), "my question", "not lost");
+    }
+
+    // ------------------------------------------------------- /timing, /bad
+
+    fn timing_reply() -> Value {
+        json!({ "response": "hi", "footer": "llama3.2:1b · local", "timing": {
+            "total_ms": 88200, "you_ms": 0,
+            "model": [{ "model": "llama3.2:1b", "wall_ms": 88100, "load_ms": 41000,
+                        "prompt_ms": 45100, "gen_ms": 1200, "prompt_tokens": 2375, "gen_tokens": 30 }],
+            "tools": [{ "name": "shell.run", "ms": 20 }]
+        }})
+    }
+
+    #[test]
+    fn timing_and_feedback_commands_parse() {
+        assert_eq!(parse_command("/timing"), Some(Command::Timing));
+        assert_eq!(
+            parse_command("/bad it is Canberra"),
+            Some(Command::Feedback("bad".into(), "it is Canberra".into()))
+        );
+        assert_eq!(
+            parse_command("/good"),
+            Some(Command::Feedback("good".into(), String::new()))
+        );
+    }
+
+    #[test]
+    fn timing_shows_where_the_last_turn_went() {
+        let mut app = App::new("llama3.2:1b".into());
+        app.run_command(Command::Timing);
+        assert!(app.entries.last().unwrap().text.contains("No turn"));
+        let request = Request::new("ask", json!({}));
+        app.begin_request(request.id, Pending::Turn);
+        app.on_response(Response::ok(request.id, timing_reply()));
+        app.run_command(Command::Timing);
+        let text = &app.entries.last().unwrap().text;
+        for part in [
+            "88.2 s",
+            "llama3.2:1b",
+            "loading 41.0 s",
+            "reading 2375 tokens 45.1 s",
+            "writing 30 tokens 1.2 s",
+            "shell.run 0.0 s",
+        ] {
+            assert!(text.contains(part), "missing {part:?} in:\n{text}");
+        }
+    }
+
+    #[test]
+    fn bad_sends_feedback_on_the_last_turn() {
+        let mut app = App::new("test".into());
+        let actions = app.run_command(Command::Feedback("bad".into(), "wrong".into()));
+        match actions.as_slice() {
+            [Action::Request {
+                method,
+                params,
+                pending,
+            }] => {
+                assert_eq!(*method, "feedback");
+                assert_eq!(params["kind"], "bad");
+                assert_eq!(params["note"], "wrong");
+                assert_eq!(*pending, Pending::Feedback);
+            }
+            other => panic!("unexpected actions: {other:?}"),
+        }
     }
 }

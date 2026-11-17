@@ -74,6 +74,7 @@ pub fn call(name: &str, args: Value) -> ChatTurn {
         ),
         prompt_tokens: None,
         completion_tokens: None,
+        timing: Default::default(),
     }
 }
 
@@ -82,6 +83,7 @@ pub fn answer(text: &str) -> ChatTurn {
         message: ChatMessage::text("assistant", text),
         prompt_tokens: None,
         completion_tokens: None,
+        timing: Default::default(),
     }
 }
 

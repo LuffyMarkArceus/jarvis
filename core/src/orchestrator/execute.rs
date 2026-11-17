@@ -267,7 +267,9 @@ impl Orchestrator {
         untrusted: &[Source],
         rec: &TurnRecorder,
     ) -> ToolOutcome {
+        let started = std::time::Instant::now();
         let outcome = self.gate_and_run(name, args, confirm, untrusted).await;
+        rec.tool_time(&outcome.name, started.elapsed());
         rec.tool(&outcome, status_label(&outcome.status));
         outcome
     }

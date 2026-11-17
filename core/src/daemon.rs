@@ -76,7 +76,7 @@ impl Daemon {
     ) -> Result<String> {
         self.ask_with_footer(prompt, confirm, cancel, sink)
             .await
-            .map(|(answer, _)| answer)
+            .map(|(answer, _, _)| answer)
     }
 
     /// A turn's answer and the footer line shown under it.
@@ -86,10 +86,10 @@ impl Daemon {
         confirm: Option<&dyn ConfirmationHandler>,
         cancel: Option<&Cancellation>,
         sink: Option<&UnboundedSender<String>>,
-    ) -> Result<(String, String)> {
+    ) -> Result<(String, String, crate::orchestrator::TurnTiming)> {
         let orch = self.orchestrator.lock().await;
         let session_id = orch.session_id().to_string();
-        let (result, footer) = orch.run_with_footer(prompt, confirm, cancel, sink).await?;
+        let (result, footer, timing) = orch.run_with_footer(prompt, confirm, cancel, sink).await?;
         // Auto-title if this is a new session with few messages
         if let Some(ref mem) = self.memory {
             if let Ok(count) = mem.get_message_count(&session_id) {
@@ -116,7 +116,7 @@ impl Daemon {
                 }
             }
         }
-        Ok((result, footer))
+        Ok((result, footer, timing))
     }
 
     pub async fn set_session(&self, session_id: &str) -> Result<()> {
@@ -231,6 +231,11 @@ impl Daemon {
     /// client of this daemon; the footer shows which tier answered.
     pub async fn set_remote(&self, on: bool) -> Result<()> {
         self.orchestrator.lock().await.set_remote(on)
+    }
+
+    /// `/bad` or `/good` about the last turn of the active conversation.
+    pub async fn feedback(&self, kind: &str, note: &str) -> Result<()> {
+        self.orchestrator.lock().await.feedback(kind, note)
     }
 
     /// The models `/model` can switch to.

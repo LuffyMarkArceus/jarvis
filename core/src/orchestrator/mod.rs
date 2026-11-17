@@ -85,14 +85,18 @@ mod outcome;
 mod prompt;
 mod render;
 mod turn;
+mod turnlog;
 
 use execute::*;
 use gateway::*;
 use render::*;
 use turn::*;
+use turnlog::*;
 
 use outcome::*;
-pub use outcome::{footer, route_label, ToolCallRecord, TurnReport};
+pub use outcome::{
+    footer, route_label, ModelTiming, ToolCallRecord, ToolTiming, TurnReport, TurnTiming,
+};
 pub use render::REPORT_OPENINGS;
 
 /// Asked when a tool call needs the user's approval before it runs.
@@ -149,6 +153,8 @@ pub struct Orchestrator {
     /// The model `/model` chose on each tier, `[local, remote]`; `None` is
     /// the tier's `default_model`.
     chosen: std::sync::Mutex<[Option<String>; 2]>,
+    /// The last logged turn, for `/bad` and spotting a rephrase.
+    last_turn: std::sync::Mutex<Option<LastTurn>>,
     tools: ToolRegistry,
     memory: Option<MemoryManager>,
     session_id: String,
@@ -237,6 +243,7 @@ impl Orchestrator {
             remote: None,
             use_remote: std::sync::atomic::AtomicBool::new(false),
             chosen: std::sync::Mutex::new([None, None]),
+            last_turn: std::sync::Mutex::new(None),
             tools,
             memory,
             session_id,
@@ -490,10 +497,10 @@ impl Orchestrator {
         confirm: Option<&dyn ConfirmationHandler>,
         cancel: Option<&Cancellation>,
         sink: Option<&UnboundedSender<String>>,
-    ) -> Result<(String, String)> {
+    ) -> Result<(String, String, TurnTiming)> {
         let report = self.run_turn(input, confirm, cancel, sink).await?;
         let footer = footer(&report);
-        Ok((report.answer, footer))
+        Ok((report.answer, footer, report.timing))
     }
 
     /// Handle one user turn and report what happened in it, not just the
@@ -505,10 +512,55 @@ impl Orchestrator {
         cancel: Option<&Cancellation>,
         sink: Option<&UnboundedSender<String>>,
     ) -> Result<TurnReport> {
+        // Measured here, around everything, so every way a turn ends -
+        // answered, cancelled, failed - is logged with its timing.
+        let started = std::time::Instant::now();
+        let timed = confirm.map(TimedConfirm::new);
+        let confirm = timed.as_ref().map(|t| t as &dyn ConfirmationHandler);
+        let rec = TurnRecorder::default();
+        let result = self
+            .run_turn_inner(input, confirm, cancel, sink, &rec)
+            .await;
+        let you_ms = timed.as_ref().map_or(0, TimedConfirm::waited_ms);
+        let total_ms = started.elapsed().as_millis() as u64;
+        match result {
+            Ok((answer, plan)) => {
+                let mut report = rec.finish(answer, &plan);
+                report.timing.total_ms = total_ms;
+                report.timing.you_ms = you_ms;
+                self.log_turn(input, &report, signals(&report));
+                Ok(report)
+            }
+            Err(e) => {
+                let planned = rec.planned.lock().unwrap().clone();
+                let mut report = rec.finish_unplanned(planned);
+                report.timing.total_ms = total_ms;
+                report.timing.you_ms = you_ms;
+                let mut found = signals(&report);
+                found.push(if matches!(e, JarvisError::Cancelled) {
+                    "cancelled"
+                } else {
+                    "error"
+                });
+                self.log_turn(input, &report, found);
+                Err(e)
+            }
+        }
+    }
+
+    /// One turn, from request to answer. [`Self::run_turn`] measures and
+    /// logs it.
+    async fn run_turn_inner(
+        &self,
+        input: &str,
+        confirm: Option<&dyn ConfirmationHandler>,
+        cancel: Option<&Cancellation>,
+        sink: Option<&UnboundedSender<String>>,
+        rec: &TurnRecorder,
+    ) -> Result<(String, TurnPlan)> {
         if cancel.is_some_and(Cancellation::is_cancelled) {
             return Err(JarvisError::Cancelled);
         }
-        let rec = TurnRecorder::default();
 
         // Bound the log line: a pasted document should not fill the log.
         info!("Processing: {}", context::truncate_with_marker(input, 200));
@@ -534,6 +586,10 @@ impl Orchestrator {
         // never be told about a tool it cannot call.
         let plan = planner::plan(input, route, &self.tools, &self.mcp.list_tools());
         info!("route: {:?} tools: {:?}", plan.route, plan.names());
+        *rec.planned.lock().unwrap() = Some((
+            route_label(&plan.route),
+            plan.names().into_iter().map(String::from).collect(),
+        ));
 
         let answer = match &plan.route {
             // Pure conversation: no tools involved at all.
@@ -571,7 +627,7 @@ impl Orchestrator {
         };
 
         self.persist_assistant(&answer, &rec.label());
-        Ok(rec.finish(answer, &plan))
+        Ok((answer, plan))
     }
 
     pub fn list_tools(&self) -> Vec<String> {

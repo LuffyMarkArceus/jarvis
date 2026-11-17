@@ -391,6 +391,21 @@ async fn handle_request(
                 Err(e) => Response::err(request.id, e.to_string()),
             }
         }
+        "feedback" => {
+            let kind = match request.params.get("kind").and_then(Value::as_str) {
+                Some(k @ ("bad" | "good")) => k.to_string(),
+                _ => return Response::err(request.id, "kind must be 'bad' or 'good'".into()),
+            };
+            let note = request
+                .params
+                .get("note")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            match daemon_lock.feedback(&kind, note).await {
+                Ok(()) => Response::ok(request.id, serde_json::json!({ "kind": kind })),
+                Err(e) => Response::err(request.id, e.to_string()),
+            }
+        }
         "trust.list" => Response::ok(
             request.id,
             serde_json::json!({ "trusted": daemon_lock.trusted().await }),
@@ -543,9 +558,9 @@ async fn handle_ask(
     let _ = chunk_task.await;
 
     match result {
-        Ok((response, footer)) => Response::ok(
+        Ok((response, footer, timing)) => Response::ok(
             id,
-            serde_json::json!({"response": response, "footer": footer}),
+            serde_json::json!({"response": response, "footer": footer, "timing": timing}),
         ),
         // Cancellation is a client action, not a failure of the request.
         Err(JarvisError::Cancelled) => {

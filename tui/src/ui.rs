@@ -225,6 +225,8 @@ fn draw_help(frame: &mut Frame, area: Rect) {
             "/model [name] [msg]",
             "pick a model; switch by name, then send msg",
         ),
+        ("/timing", "where the last turn's time went"),
+        ("/bad, /good [note]", "flag the last answer for review"),
         (
             "/remote, /local",
             "answer with the remote or the local model",

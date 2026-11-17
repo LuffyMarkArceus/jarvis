@@ -205,10 +205,12 @@ impl Orchestrator {
         // A placeholder can be split across streamed chunks and shown before
         // it is restored; a redacted remote answer is shown whole instead.
         let stream_to = sink.filter(|_| !redacted.as_ref().is_some_and(|r| r.2));
+        let started = std::time::Instant::now();
         let mut turn = match stream_to {
             Some(sink) => client.chat_turn_streaming(chat, cancel, sink).await?,
             None => client.chat_turn(chat, cancel).await?,
         };
+        rec.model_time(&cfg.default_model, started.elapsed(), &turn);
         // For a remote turn the footer names where the data went (the host),
         // not the wire format: "openai" for an OpenRouter model misleads.
         let provider = if remote {
