@@ -595,7 +595,7 @@ impl Orchestrator {
             // Pure conversation: no tools involved at all.
             Route::Direct if router::asks_to_undo(input) => UNDO_FROM_CHAT.to_string(),
             Route::Direct => {
-                self.converse(input, &history, confirm, cancel, sink, &rec)
+                self.converse(input, &history, confirm, cancel, sink, rec)
                     .await?
             }
 
@@ -608,7 +608,7 @@ impl Orchestrator {
                 // the answer even if the user has just cancelled. Dropping it
                 // would hide an action that really happened.
                 let outcome = self
-                    .execute_call(name.clone(), args.clone(), confirm, &[], &rec)
+                    .execute_call(name.clone(), args.clone(), confirm, &[], rec)
                     .await;
                 // A confirmation that was denied *because* the user cancelled
                 // is not a tool result worth persisting: the turn never ran.
@@ -621,7 +621,7 @@ impl Orchestrator {
 
             // Ambiguous: let the model pick from the tools this plan offers.
             Route::Model => {
-                self.model_with_tools(input, &history, &plan, confirm, cancel, &rec)
+                self.model_with_tools(input, &history, &plan, confirm, cancel, rec)
                     .await?
             }
         };

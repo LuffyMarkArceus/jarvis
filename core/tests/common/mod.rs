@@ -1,4 +1,7 @@
 //! Shared by integration tests: a model that plays a script.
+//!
+//! Each test file is its own crate and uses only some of these.
+#![allow(dead_code)]
 
 use jarvis_core::cancel::Cancellation;
 use jarvis_core::error::Result;

@@ -237,6 +237,12 @@ pub fn route(input: &str) -> Route {
     // 2. An explicit command; "run outside the sandbox: X" is the owner's
     //    own way out of the sandbox, and still asks.
     if let Some(cmd) = outside_command(raw) {
+        // "run outside the sandbox: what is taking space?" is a task, not a
+        // command: the model works out the command, and running it outside
+        // the sandbox still asks.
+        if reads_like_a_sentence(&cmd) {
+            return Route::Model;
+        }
         return Route::Tool {
             name: "shell.run".to_string(),
             args: json!({ "command": cmd, "outside_sandbox": true }),
@@ -1053,6 +1059,22 @@ fn outside_command(raw: &str) -> Option<String> {
     (!command.is_empty()).then(|| command.to_string())
 }
 
+/// A request in words rather than a command line.
+fn reads_like_a_sentence(text: &str) -> bool {
+    const STARTS: &[&str] = &[
+        "what", "whats", "how", "why", "which", "who", "where", "when", "is", "are", "can",
+        "could", "would", "should", "do", "does", "tell", "explain", "show", "list", "help",
+        "give", "please", "check", "figure", "work",
+    ];
+    if text.contains('?') {
+        return true;
+    }
+    let mut tokens = text.split_whitespace().map(clean_word);
+    let first = tokens.next().unwrap_or_default();
+    // `find` is a command too: only "find out" is a sentence.
+    STARTS.contains(&first.as_str()) || (first == "find" && tokens.next().as_deref() == Some("out"))
+}
+
 /// Polite openers removed from the start of a request.
 fn strip_openers(raw: &str) -> &str {
     let mut rest = raw.trim();
@@ -1606,5 +1628,25 @@ mod tests {
         assert!(!needs_source("what is my computer doing right now?"));
         // Elsewhere "right now" still asks for a source.
         assert!(needs_source("who is leading the race right now?"));
+    }
+
+    #[test]
+    fn a_sentence_after_run_outside_the_sandbox_goes_to_the_model() {
+        // Real use: the whole sentence was taken as a shell command.
+        for input in [
+            "run outside the sandbox: what is taking so much space on my disk? Explain please.",
+            "run outside the sandbox: how much space is left",
+            "please run outside the sandbox: find out which folder is biggest",
+        ] {
+            assert_eq!(route(input), Route::Model, "{}", input);
+        }
+        // A literal command still runs as one.
+        let (_, args) = tool_of(&route("run outside the sandbox: du -sh /mnt/storage")).unwrap();
+        assert_eq!(args["command"], "du -sh /mnt/storage");
+        assert_eq!(args["outside_sandbox"], true);
+        // `find` is a command as well as a word.
+        let (_, args) =
+            tool_of(&route("run outside the sandbox: find /tmp -name '*.log'")).unwrap();
+        assert_eq!(args["command"], "find /tmp -name '*.log'");
     }
 }

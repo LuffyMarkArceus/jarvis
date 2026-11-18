@@ -25,6 +25,7 @@ jarvis up                # start Ollama, load the keys, start the daemon, open t
 jarvis up --restart      # the same, restarting the daemon (new config or keys)
 jarvis ask "hello"       # one turn; falls back to direct mode if the daemon is down
 jarvis model [name]      # list the models, or switch to one
+jarvis report            # how slow, where the time went, what went wrong, what you flagged
 ```
 
 `jarvis up` starts only what is not running. It starts `ollama serve` when a
@@ -40,6 +41,17 @@ env_files = []          # default: every *.env in ~/.config/jarvis
 ```
 
 The pieces still work on their own: `jarvis daemon start`, `jarvis-tui`.
+
+### Measuring real use
+
+Every turn adds one line to `<data_dir>/turns.jsonl`: the route, the model,
+each tool call and how it ended, where the time went (loading the model,
+reading the prompt, writing the answer, tools, and the time spent waiting for
+you, which is not counted against Jarvis) and what went wrong - declined,
+refused by a rule, cancelled, an error, slower than 20 s, or asked again in
+other words within a minute. In the TUI, `/timing` shows the last turn and
+`/bad [note]` or `/good [note]` marks it. `jarvis report` summarises the log.
+It stays on this machine, in the data folder sandboxed commands cannot see.
 
 The TUI resumes the session you last used. Inside it, `F1` lists the keys and
 `/help` lists the session and daemon commands.

@@ -233,6 +233,9 @@ enum Commands {
     Tier { tier: Option<String> },
     /// List the models, or switch to one: its name or a unique part of it
     Model { name: Option<String> },
+    /// What real use looked like: how slow, where the time went, what went
+    /// wrong, what you flagged (from the turn log)
+    Report,
     /// Start Ollama, load the keys, start the daemon and open the TUI
     Up {
         /// Restart a running daemon, to reload its config and keys
@@ -1229,6 +1232,18 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Commands::Up { restart, no_tui } => up::run(restart, !no_tui).await?,
+        Commands::Report => {
+            // Read directly, so it works with the daemon stopped.
+            let data = jarvis_core::config::Config::load().general.data_dir;
+            let mut text = String::new();
+            for name in ["turns.1.jsonl", "turns.jsonl"] {
+                if let Ok(part) = std::fs::read_to_string(data.join(name)) {
+                    text.push_str(&part);
+                }
+            }
+            print!("{}", jarvis_core::turn_report::summarize(&text));
+            println!("\nLog: {}", data.join("turns.jsonl").display());
+        }
         Commands::Model { name } => {
             let Some(name) = name else {
                 let response = send_request(Request::new("model.list", json!({}))).await?;

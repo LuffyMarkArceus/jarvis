@@ -30,7 +30,8 @@ pub(super) fn destination_of(model: &ModelConfig) -> Destination {
 
 /// What came back from [`Orchestrator::ask_model`].
 pub(super) enum ModelReply {
-    Turn(ChatTurn),
+    /// Boxed: a turn is much larger than a refusal's text.
+    Turn(Box<ChatTurn>),
     /// The request was not sent; this explains why, as the answer.
     Withheld(String),
 }
@@ -229,7 +230,7 @@ impl Orchestrator {
                 }
             }
         }
-        Ok(ModelReply::Turn(turn))
+        Ok(ModelReply::Turn(Box::new(turn)))
     }
 
     /// The answer for a request that was not sent.
