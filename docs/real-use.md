@@ -51,3 +51,15 @@ minutes, the 940MX holds one at a time (picking qwen evicted llama), and the
 models load at about 50 MB/s from the NTFS drive. Warm, llama answers in 3.4 s.
 Second cost: long tool-turn prompts on qwen (817 tokens, 9.7 s).
 
+After keeping the model loaded (`keep_alive`, default 30 minutes) and loading
+it in the background on daemon start, TUI connect and `/model` - with the same
+context size as real requests, or Ollama loads it again:
+
+| | Before | After |
+| --- | --- | --- |
+| llama3.2:1b, first question | 29.9 s (25.8 s loading) | 3.6 s (0.0 s loading) |
+| qwen2.5:3b, first question after `/model` | 49.5 s (42.4 s loading) | 7.8 s (0.0 s loading) |
+
+What is left is the GPU reading the prompt (qwen: about 60 tokens a second):
+shorter prompts are the next lever.
+

@@ -431,6 +431,8 @@ async fn handle_request(
             }
         }
         "session.current" => {
+            // A client connecting is the moment someone is about to ask.
+            daemon_lock.warm_up().await;
             let sid = daemon_lock.session_id().await;
             let (_, model, _) = daemon_lock.model_info().await;
             Response::ok(

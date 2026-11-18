@@ -37,6 +37,7 @@ impl Orchestrator {
             "temperature": model.temperature,
             "num_ctx": self.config.context.num_ctx,
             "num_predict": model.max_answer_tokens,
+            "keep_alive": model.keep_alive,
         })
     }
 

@@ -272,6 +272,7 @@ impl Orchestrator {
         }
         self.use_remote
             .store(on, std::sync::atomic::Ordering::Relaxed);
+        self.warm_up();
         Ok(())
     }
 
@@ -308,6 +309,25 @@ impl Orchestrator {
                 self.client.clone(),
             )
         })
+    }
+
+    /// Load the local model this conversation uses, in the background, so
+    /// the next question does not wait for it (measured: 25-42 s). Nothing
+    /// on the remote tier; without a runtime (a plain test), nothing.
+    pub fn warm_up(&self) {
+        if self.uses_remote() {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let (cfg, client) = self.tier();
+        let options = self.model_options(&cfg);
+        runtime.spawn(async move {
+            if let Err(e) = client.warm(&cfg.default_model, &options).await {
+                warn!("could not load {} ahead of time: {}", cfg.default_model, e);
+            }
+        });
     }
 
     /// Every model `/model` can switch to: each tier's `default_model`, then

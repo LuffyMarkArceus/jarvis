@@ -53,6 +53,18 @@ other words within a minute. In the TUI, `/timing` shows the last turn and
 `/bad [note]` or `/good [note]` marks it. `jarvis report` summarises the log.
 It stays on this machine, in the data folder sandboxed commands cannot see.
 
+### Keeping the model loaded
+
+Loading a model from disk took 25-42 s here, and Ollama unloads one after 5
+idle minutes, so Jarvis keeps the local model loaded longer and loads it in
+the background when the daemon starts, when a TUI connects and when you switch
+with `/model` - the next question finds it ready:
+
+```toml
+[model]
+keep_alive = "30m"   # "2h", or "-1" for always; longer holds GPU memory (and battery)
+```
+
 The TUI resumes the session you last used. Inside it, `F1` lists the keys and
 `/help` lists the session and daemon commands.
 
