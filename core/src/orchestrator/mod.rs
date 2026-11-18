@@ -517,8 +517,11 @@ impl Orchestrator {
         confirm: Option<&dyn ConfirmationHandler>,
         cancel: Option<&Cancellation>,
         sink: Option<&UnboundedSender<String>>,
+        progress: Option<&UnboundedSender<String>>,
     ) -> Result<(String, String, TurnTiming)> {
-        let report = self.run_turn(input, confirm, cancel, sink).await?;
+        let report = self
+            .run_turn_observed(input, confirm, cancel, sink, progress)
+            .await?;
         let footer = footer(&report);
         Ok((report.answer, footer, report.timing))
     }
@@ -532,12 +535,30 @@ impl Orchestrator {
         cancel: Option<&Cancellation>,
         sink: Option<&UnboundedSender<String>>,
     ) -> Result<TurnReport> {
+        self.run_turn_observed(input, confirm, cancel, sink, None)
+            .await
+    }
+
+    /// [`Self::run_turn`], also saying on `progress` what the turn is doing
+    /// now - "asking nemotron (step 3)", "searching the web" - so a client
+    /// can tell a long turn from a stuck one.
+    pub async fn run_turn_observed(
+        &self,
+        input: &str,
+        confirm: Option<&dyn ConfirmationHandler>,
+        cancel: Option<&Cancellation>,
+        sink: Option<&UnboundedSender<String>>,
+        progress: Option<&UnboundedSender<String>>,
+    ) -> Result<TurnReport> {
         // Measured here, around everything, so every way a turn ends -
         // answered, cancelled, failed - is logged with its timing.
         let started = std::time::Instant::now();
         let timed = confirm.map(TimedConfirm::new);
         let confirm = timed.as_ref().map(|t| t as &dyn ConfirmationHandler);
-        let rec = TurnRecorder::default();
+        let rec = TurnRecorder {
+            progress: progress.cloned(),
+            ..TurnRecorder::default()
+        };
         let result = self
             .run_turn_inner(input, confirm, cancel, sink, &rec)
             .await;

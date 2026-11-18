@@ -191,6 +191,8 @@ pub(super) struct TurnRecorder {
     /// The route and tools, once planned: a turn that fails later is still
     /// logged with them.
     pub(super) planned: std::sync::Mutex<Option<(String, Vec<String>)>>,
+    /// Where to say what the turn is doing now, for a client to show.
+    pub(super) progress: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
 impl TurnRecorder {
@@ -242,6 +244,19 @@ impl TurnRecorder {
             args: outcome.args.clone(),
             status,
         });
+    }
+
+    /// Say what the turn is doing now. A client that went away is not an
+    /// error: the turn still finishes.
+    pub(super) fn step(&self, text: String) {
+        if let Some(progress) = &self.progress {
+            let _ = progress.send(text);
+        }
+    }
+
+    /// Model requests made so far.
+    pub(super) fn model_calls(&self) -> u32 {
+        self.model.lock().unwrap().0
     }
 
     /// One model request took `wall` and the provider reported `turn.timing`.

@@ -32,6 +32,11 @@ pub enum ClientEvent {
         id: Uuid,
         text: String,
     },
+    /// What a running request is doing now.
+    Progress {
+        id: Uuid,
+        text: String,
+    },
     /// The connection is gone, with a human-readable reason.
     Disconnected(String),
 }
@@ -132,6 +137,9 @@ async fn run(
                         }
                         Ok(Message::Chunk(chunk)) => {
                             let _ = events.send(ClientEvent::Chunk { id: chunk.id, text: chunk.text });
+                        }
+                        Ok(Message::Progress(p)) => {
+                            let _ = events.send(ClientEvent::Progress { id: p.id, text: p.text });
                         }
                         Ok(Message::Cancel(_)) | Ok(Message::Request(_)) | Ok(Message::ConfirmationReply(_)) => {}
                         Err(e) => {

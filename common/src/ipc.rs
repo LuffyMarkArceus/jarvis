@@ -102,6 +102,15 @@ pub struct Chunk {
     pub text: String,
 }
 
+/// What a running request is doing now ("asking nemotron (step 3)",
+/// "searching the web"), so a client can tell a long turn from a stuck one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Progress {
+    /// The id of the [`Request`] this describes.
+    pub id: Uuid,
+    pub text: String,
+}
+
 /// Ask the daemon to stop a running request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Cancel {
@@ -119,6 +128,7 @@ pub enum Message {
     ConfirmationReply(ConfirmationReply),
     Chunk(Chunk),
     Cancel(Cancel),
+    Progress(Progress),
 }
 
 impl Message {
