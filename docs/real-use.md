@@ -27,3 +27,27 @@ Each finding says whose problem it is - **ours** (Jarvis's code) or the
 | Finding | Whose | Done |
 | --- | --- | --- |
 | `/model qwen <message>` failed: everything after `/model` was taken as the model's name, so nothing matched and nothing was sent. The owner wrote it this way twice | ours | `/model <name> <message>` switches, then sends the message; if the switch fails, the message stays in the box |
+
+## 2026-11-17, a week of light use
+
+| Finding | Whose | Done |
+| --- | --- | --- |
+| Both disk-space questions were "blocked by the permission policy" and never reached the owner: `permissions.toml` still had `shell.run = deny` from early development, so the sandbox never ran | ours (config) | Owner: `ask` |
+| "run outside the sandbox: what is taking so much space?" ran the whole sentence as a shell command | ours | A sentence after the phrase goes to the model; a literal command still runs (Milestone 6.4) |
+| One turn took 88 s (2,375 prompt tokens, 30 written) and nothing said why | ours | Per-turn timing, `/timing`, `jarvis report` (Milestone 6.4) |
+| Two conversations at once: the quick one waits for the long one | ours | Milestone 6.5 |
+
+### First measurements (2026-11-17, Milestone 6.4)
+
+| Turn | Total | Loading | Reading | Writing |
+| --- | --- | --- | --- | --- |
+| llama3.2:1b, cold | 29.9 s | 25.8 s | 336 tok, 1.9 s | 31 tok, 2.1 s |
+| llama3.2:1b, warm | 3.4 s | 0.1 s | 332 tok, 0.7 s | 38 tok, 2.6 s |
+| qwen2.5:3b, cold | 49.5 s | 42.4 s | 300 tok, 5.3 s | 13 tok, 1.8 s |
+| qwen2.5:3b, warm, tool turn | 14.7 s | 0.0 s | 817 tok, 9.7 s | 31 tok, 4.9 s |
+
+70% of Jarvis's time was loading models. Ollama unloads one after 5 idle
+minutes, the 940MX holds one at a time (picking qwen evicted llama), and the
+models load at about 50 MB/s from the NTFS drive. Warm, llama answers in 3.4 s.
+Second cost: long tool-turn prompts on qwen (817 tokens, 9.7 s).
+

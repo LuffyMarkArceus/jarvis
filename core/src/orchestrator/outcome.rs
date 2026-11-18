@@ -102,6 +102,47 @@ pub struct TurnReport {
     pub provider: String,
     /// Distinct values replaced by placeholders before sending.
     pub redacted: usize,
+    /// Where this turn's time went.
+    pub timing: TurnTiming,
+}
+
+/// Where one turn's time went, in milliseconds.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct TurnTiming {
+    /// From the request arriving to the answer.
+    pub total_ms: u64,
+    /// Spent waiting for the owner to answer prompts: their time, not Jarvis's.
+    pub you_ms: u64,
+    pub model: Vec<ModelTiming>,
+    /// Each tool call, including any prompt it asked.
+    pub tools: Vec<ToolTiming>,
+}
+
+impl TurnTiming {
+    /// The turn without the owner's time: what "slow" is judged on.
+    pub fn jarvis_ms(&self) -> u64 {
+        self.total_ms.saturating_sub(self.you_ms)
+    }
+}
+
+/// One request to a model.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct ModelTiming {
+    pub model: String,
+    /// Our clock, around the whole request.
+    pub wall_ms: u64,
+    /// The provider's account, when it gives one (Ollama does).
+    pub load_ms: Option<u64>,
+    pub prompt_ms: Option<u64>,
+    pub gen_ms: Option<u64>,
+    pub prompt_tokens: Option<u64>,
+    pub gen_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct ToolTiming {
+    pub name: String,
+    pub ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -145,6 +186,11 @@ pub(super) struct TurnRecorder {
     pub(super) withheld: std::sync::atomic::AtomicBool,
     /// Why the model gave no answer, when it did not.
     pub(super) model_error: std::sync::Mutex<Option<String>>,
+    /// Where the time went so far.
+    pub(super) timing: std::sync::Mutex<TurnTiming>,
+    /// The route and tools, once planned: a turn that fails later is still
+    /// logged with them.
+    pub(super) planned: std::sync::Mutex<Option<(String, Vec<String>)>>,
 }
 
 impl TurnRecorder {
@@ -198,6 +244,26 @@ impl TurnRecorder {
         });
     }
 
+    /// One model request took `wall` and the provider reported `turn.timing`.
+    pub(super) fn model_time(&self, model: &str, wall: std::time::Duration, turn: &ChatTurn) {
+        self.timing.lock().unwrap().model.push(ModelTiming {
+            model: model.to_string(),
+            wall_ms: wall.as_millis() as u64,
+            load_ms: turn.timing.load_ms,
+            prompt_ms: turn.timing.prompt_ms,
+            gen_ms: turn.timing.gen_ms,
+            prompt_tokens: turn.prompt_tokens,
+            gen_tokens: turn.completion_tokens,
+        });
+    }
+
+    pub(super) fn tool_time(&self, name: &str, took: std::time::Duration) {
+        self.timing.lock().unwrap().tools.push(ToolTiming {
+            name: name.to_string(),
+            ms: took.as_millis() as u64,
+        });
+    }
+
     pub(super) fn model_turn(&self, turn: &ChatTurn) {
         let mut model = self.model.lock().unwrap();
         model.0 += 1;
@@ -206,6 +272,30 @@ impl TurnRecorder {
         }
         if let Some(n) = turn.completion_tokens {
             model.2 = Some(model.2.unwrap_or(0) + n);
+        }
+    }
+
+    /// The report for a turn that ended without an answer, with the route
+    /// if it got that far.
+    pub(super) fn finish_unplanned(self, planned: Option<(String, Vec<String>)>) -> TurnReport {
+        let (route, offered) = planned.unwrap_or_default();
+        let (model_calls, prompt_tokens, completion_tokens) = *self.model.lock().unwrap();
+        let (model, provider) = self.used.lock().unwrap().clone().unwrap_or_default();
+        TurnReport {
+            model_error: self.model_error.lock().unwrap().take(),
+            withheld: self.withheld.load(std::sync::atomic::Ordering::Relaxed),
+            model,
+            provider,
+            remote: self.remote.load(std::sync::atomic::Ordering::Relaxed),
+            redacted: 0,
+            answer: String::new(),
+            route,
+            offered,
+            calls: self.calls.into_inner().unwrap(),
+            model_calls,
+            prompt_tokens,
+            completion_tokens,
+            timing: self.timing.into_inner().unwrap(),
         }
     }
 
@@ -227,6 +317,7 @@ impl TurnRecorder {
             model_calls,
             prompt_tokens,
             completion_tokens,
+            timing: self.timing.into_inner().unwrap(),
         }
     }
 }

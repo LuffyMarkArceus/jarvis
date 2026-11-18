@@ -129,7 +129,7 @@ impl Orchestrator {
             )
             .await;
         let turn = match reply {
-            Ok(ModelReply::Turn(turn)) => turn,
+            Ok(ModelReply::Turn(turn)) => *turn,
             Ok(ModelReply::Withheld(answer)) => return Ok(answer),
             // A provider failure has a deterministic fallback; a user
             // cancelling the turn must not turn into one.
@@ -245,7 +245,7 @@ impl Orchestrator {
                 )
                 .await;
             let turn = match reply {
-                Ok(ModelReply::Turn(t)) => t,
+                Ok(ModelReply::Turn(t)) => *t,
                 Ok(ModelReply::Withheld(answer)) => return Ok(answer),
                 Err(JarvisError::Cancelled) => return self.cancelled_result(&trace),
                 Err(e) => {

@@ -413,6 +413,7 @@ impl OpenAiStream {
             },
             prompt_tokens: self.prompt_tokens,
             completion_tokens: self.completion_tokens,
+            timing: Default::default(),
         }
     }
 }
@@ -616,6 +617,9 @@ pub fn parse_completion(json: &Value) -> Result<ChatTurn> {
         completion_tokens: usage
             .and_then(|u| u.get("completion_tokens"))
             .and_then(Value::as_u64),
+        // OpenAI-style servers do not say where their time went; our own
+        // clock around the request still measures it.
+        timing: Default::default(),
     })
 }
 

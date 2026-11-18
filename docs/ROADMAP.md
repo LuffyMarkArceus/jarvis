@@ -54,6 +54,34 @@ machines) 11.
 * The two memory cases failing on small models are not a Jarvis bug: the
   history reaches the model and nemotron passes them.
 
+## Milestone 6.4 - measure, and the obvious fixes (2026-11-17)
+
+Real use (`docs/real-use.md`): the shell was denied, "run outside the
+sandbox: <sentence>" became a command, and an 88-second turn could not be
+explained.
+
+* `shell.run` is `ask` for the owner (was a leftover `deny`).
+* Per-turn timing from the provider and our own clock; the owner's time at
+  prompts kept apart. `/timing`.
+* `turns.jsonl`: one line per turn with friction signals; `/bad`, `/good`;
+  `jarvis report`.
+* A sentence after "run outside the sandbox:" goes to the model.
+
+## Milestone 6.5 - concurrency (next)
+
+Two conversations at once: a quick question must not wait for a long one.
+Per-conversation state (history, trust, model, mode), shared services behind
+short locks, one GPU queue that says it is waiting. Spec first.
+
+## Milestone 6.6 - modes
+
+Autonomy (Plan / Interactive / Autopilot), approval (Manual / Assisted /
+Allow all) and the sandbox, per conversation. Assisted approves what can be
+undone or is contained, and asks the rest. Fixed whatever the mode: nothing
+runs outside the sandbox after untrusted content, deny rules win, Jarvis's
+files stay hidden, everything is audited. A Phase 7 job runs at a mode as its
+ceiling. Spec first.
+
 ## Milestone 6.3 - OS sandbox (done, 2026-11-09)
 
 Before Phase 7, because an unattended job needs a boundary that does not

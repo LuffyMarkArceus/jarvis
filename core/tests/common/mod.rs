@@ -1,4 +1,7 @@
 //! Shared by integration tests: a model that plays a script.
+//!
+//! Each test file is its own crate and uses only some of these.
+#![allow(dead_code)]
 
 use jarvis_core::cancel::Cancellation;
 use jarvis_core::error::Result;
@@ -74,6 +77,7 @@ pub fn call(name: &str, args: Value) -> ChatTurn {
         ),
         prompt_tokens: None,
         completion_tokens: None,
+        timing: Default::default(),
     }
 }
 
@@ -82,6 +86,7 @@ pub fn answer(text: &str) -> ChatTurn {
         message: ChatMessage::text("assistant", text),
         prompt_tokens: None,
         completion_tokens: None,
+        timing: Default::default(),
     }
 }
 
