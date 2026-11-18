@@ -13,3 +13,4 @@ crossterm = "0.28"
 anyhow.workspace = true
 uuid = { version = "1.10", features = ["v4"] }
 unicode-width = "0.1"
+chrono = "0.4"

@@ -63,3 +63,12 @@ context size as real requests, or Ollama loads it again:
 What is left is the GPU reading the prompt (qwen: about 60 tokens a second):
 shorter prompts are the next lever.
 
+## 2026-11-18, "it does not respond" (session 4c35cbf3)
+
+| Finding | Whose | Done |
+| --- | --- | --- |
+| After opening Firefox, a question "did not respond". The daemon was healthy throughout: the next question was a remote turn of five model rounds, 50.6 s and 36k tokens, and the TUI showed only a spinner - working and stuck looked the same | ours | Live progress in the header: what it is doing, for how long, "Ctrl+C cancels" after 20 s |
+| A request that never got an answer would leave the window "still waiting" forever | ours | Non-turn requests are given up after 30 s; a turn is only ever cancelled by the owner |
+| Nothing on the TUI's side recorded what it sent, so the incident could not be reconstructed | ours | `tui.log` per window |
+| `jarvis daemon start` left the daemon in the starting terminal's process group with the terminal as input; SIGHUP (closing that terminal) stopped it; SIGTERM left the socket and PID file behind | ours | Own process group, no input, SIGHUP ignored, clean SIGTERM/SIGINT; tested with the real binary |
+

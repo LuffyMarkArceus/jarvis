@@ -662,7 +662,7 @@ async fn main() -> anyhow::Result<()> {
                     info!("Daemon not running, using direct mode");
                     let orch = Orchestrator::new()?;
                     let (response, footer, _timing) = orch
-                        .run_with_footer(&prompt, Some(&TerminalConfirmer), None, None)
+                        .run_with_footer(&prompt, Some(&TerminalConfirmer), None, None, None)
                         .await?;
                     println!("{}", response);
                     print_footer(&footer, std::io::stdout().is_terminal());
@@ -689,22 +689,38 @@ async fn main() -> anyhow::Result<()> {
                 let daemon_arc = std::sync::Arc::new(tokio::sync::Mutex::new(daemon.clone()));
                 let server =
                     jarvis_core::ipc::server::IpcServer::new(daemon_arc, daemon.get_socket_path());
-                tokio::select! {
-                    result = server.start() => {
-                        if let Err(e) = result {
-                            // The daemon is useless without a listener, so
-                            // say why and exit instead of appearing alive.
-                            error!("IPC server stopped: {}", e);
-                            let _ = daemon.remove_pid().await;
-                            std::process::exit(1);
+                use tokio::signal::unix::{signal, SignalKind};
+                let mut terminate = signal(SignalKind::terminate())?;
+                let mut interrupt = signal(SignalKind::interrupt())?;
+                let mut hangup = signal(SignalKind::hangup())?;
+                let serving = server.start();
+                tokio::pin!(serving);
+                let why = loop {
+                    tokio::select! {
+                        result = &mut serving => {
+                            if let Err(e) = result {
+                                // The daemon is useless without a listener, so
+                                // say why and exit instead of appearing alive.
+                                error!("IPC server stopped: {}", e);
+                                let _ = daemon.remove_pid().await;
+                                std::process::exit(1);
+                            }
+                            break "the listener closed";
                         }
+                        // `jarvis daemon stop`, the system shutting down.
+                        _ = terminate.recv() => break "SIGTERM",
+                        _ = interrupt.recv() => break "SIGINT",
+                        // A terminal closing. The daemon belongs to no
+                        // terminal, so it is not a reason to stop.
+                        _ = hangup.recv() => info!("SIGHUP ignored: the daemon keeps running"),
                     }
-                    _ = tokio::signal::ctrl_c() => {
-                        info!("Shutting down daemon...");
-                        let _ = daemon.remove_pid().await;
-                        let _ = std::fs::remove_file(daemon.get_socket_path());
-                    }
-                }
+                };
+                info!("Shutting down daemon ({})", why);
+                let _ = daemon.remove_pid().await;
+                let _ = std::fs::remove_file(daemon.get_socket_path());
+                // The MCP sidecars read their stdin until it closes, which
+                // it does when this process exits: they stop with it.
+                std::process::exit(0);
             }
             DaemonCommands::Start => {
                 // A second daemon would unlink the live one's socket and
@@ -721,11 +737,16 @@ async fn main() -> anyhow::Result<()> {
                         std::process::exit(1);
                     }
                     println!("Starting daemon in background...");
+                    // Its own process group and no terminal: Ctrl+C or closing
+                    // the terminal it was started from must not reach it.
+                    use std::os::unix::process::CommandExt as _;
                     std::process::Command::new(std::env::current_exe()?)
                         .arg("daemon")
                         .arg("run")
+                        .stdin(std::process::Stdio::null())
                         .stdout(std::process::Stdio::null())
                         .stderr(std::process::Stdio::null())
+                        .process_group(0)
                         .spawn()?;
 
                     // "Started" has to mean the socket answers. Reporting

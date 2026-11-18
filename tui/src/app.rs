@@ -9,6 +9,7 @@ use crate::client::ClientEvent;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use jarvis_common::ipc::{ConfirmationRequest, Response};
 use serde_json::{json, Value};
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -397,6 +398,12 @@ pub struct App {
     history_pos: Option<usize>,
     /// The last answered turn's timing, for `/timing`.
     last_timing: Option<Value>,
+    /// When the pending request was sent.
+    busy_since: Option<Instant>,
+    /// What the pending turn says it is doing now.
+    progress: Option<String>,
+    /// Lines for `tui.log` about decisions the app made on its own.
+    diag: Vec<String>,
 }
 
 impl App {
@@ -422,6 +429,9 @@ impl App {
             history: Vec::new(),
             history_pos: None,
             last_timing: None,
+            busy_since: None,
+            progress: None,
+            diag: Vec::new(),
         }
     }
 
@@ -439,6 +449,61 @@ impl App {
 
     pub fn tick(&mut self) {
         self.spinner = (self.spinner + 1) % 10;
+        if let Some(since) = self.busy_since {
+            self.check_stuck(since.elapsed());
+        }
+    }
+
+    /// Lines for `tui.log`, once each.
+    pub fn take_diag(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.diag)
+    }
+
+    /// How long the pending request has been running.
+    pub fn busy_for(&self) -> Duration {
+        self.busy_since.map(|s| s.elapsed()).unwrap_or_default()
+    }
+
+    /// The header text while busy: what the turn is doing and for how long,
+    /// so a long turn does not look like a stuck one. Empty for the first
+    /// few seconds.
+    pub fn busy_label(&self, elapsed: Duration) -> String {
+        let secs = elapsed.as_secs();
+        if self.progress.is_none() && secs < 3 {
+            return String::new();
+        }
+        let mut label = format!(
+            "{} · {} s",
+            self.progress.as_deref().unwrap_or("working"),
+            secs
+        );
+        if matches!(self.pending, Some(Pending::Turn)) && secs >= 20 {
+            label.push_str(" · Ctrl+C cancels");
+        }
+        label
+    }
+
+    /// Give up on a request that is not a turn and has had no answer for 30
+    /// seconds, so the window is never stuck saying "still waiting". A turn
+    /// can rightly take minutes; only the owner cancels it.
+    pub fn check_stuck(&mut self, elapsed: Duration) {
+        if self.pending.is_none()
+            || matches!(self.pending, Some(Pending::Turn))
+            || elapsed <= Duration::from_secs(30)
+        {
+            return;
+        }
+        self.diag.push(format!(
+            "gave up on {:?} after {} s",
+            self.pending,
+            elapsed.as_secs()
+        ));
+        self.pending = None;
+        self.pending_id = None;
+        self.busy_since = None;
+        self.note(Entry::error(
+            "The daemon did not answer that request in 30 s, so the window is free again. If it keeps happening, Ctrl+R reconnects.",
+        ));
     }
 
     pub fn note(&mut self, entry: Entry) {
@@ -464,6 +529,8 @@ impl App {
         self.state = DaemonState::Offline(reason.clone());
         self.pending = None;
         self.pending_id = None;
+        self.busy_since = None;
+        self.progress = None;
         self.streaming = None;
         self.cancelling = false;
         // A confirmation can no longer be answered; the daemon will deny the
@@ -486,6 +553,12 @@ impl App {
                 vec![]
             }
             ClientEvent::Chunk { id, text } => self.on_chunk(id, text),
+            ClientEvent::Progress { id, text } => {
+                if self.pending_id == Some(id) {
+                    self.progress = Some(text);
+                }
+                vec![]
+            }
             ClientEvent::Response(response) => self.on_response(response),
         }
     }
@@ -525,6 +598,8 @@ impl App {
     pub fn begin_request(&mut self, id: Uuid, pending: Pending) {
         self.pending_id = Some(id);
         self.pending = Some(pending);
+        self.busy_since = Some(Instant::now());
+        self.progress = None;
         self.streaming = None;
         self.cancelling = false;
     }
@@ -533,6 +608,8 @@ impl App {
     pub fn request_failed(&mut self, reason: impl Into<String>) {
         self.pending = None;
         self.pending_id = None;
+        self.busy_since = None;
+        self.progress = None;
         self.streaming = None;
         self.cancelling = false;
         self.note(Entry::error(reason));
@@ -760,6 +837,8 @@ impl App {
         }
         self.pending_id = None;
         self.cancelling = false;
+        self.busy_since = None;
+        self.progress = None;
         let pending = self.pending.take();
         let streaming_id = self.streaming.as_ref().map(|s| s.request_id);
         let streaming_index = self.streaming.take().map(|s| s.index);
@@ -2005,5 +2084,65 @@ mod tests {
             }
             other => panic!("unexpected actions: {other:?}"),
         }
+    }
+
+    // ------------------------------------------------- progress, no hangs
+
+    #[test]
+    fn a_long_turn_says_what_it_is_doing_and_for_how_long() {
+        // Real use: a 50 s remote turn of five rounds showed only a spinner.
+        let mut app = App::new("nemotron".into());
+        let id = Uuid::new_v4();
+        app.begin_request(id, Pending::Turn);
+        assert_eq!(app.busy_label(Duration::from_secs(1)), "");
+        app.on_client_event(ClientEvent::Progress {
+            id,
+            text: "asking nemotron-3-ultra (step 3)".into(),
+        });
+        assert_eq!(
+            app.busy_label(Duration::from_secs(12)),
+            "asking nemotron-3-ultra (step 3) · 12 s"
+        );
+        assert_eq!(
+            app.busy_label(Duration::from_secs(25)),
+            "asking nemotron-3-ultra (step 3) · 25 s · Ctrl+C cancels"
+        );
+        // Another request's progress is not this one's.
+        app.on_client_event(ClientEvent::Progress {
+            id: Uuid::new_v4(),
+            text: "something else".into(),
+        });
+        assert!(app.busy_label(Duration::from_secs(5)).starts_with("asking"));
+    }
+
+    #[test]
+    fn a_request_that_never_answers_is_given_up_after_30_seconds() {
+        let mut app = App::new("test".into());
+        app.begin_request(Uuid::new_v4(), Pending::Status);
+        app.check_stuck(Duration::from_secs(29));
+        assert!(app.is_busy());
+        app.check_stuck(Duration::from_secs(31));
+        assert!(!app.is_busy(), "the window is usable again");
+        assert!(app.entries.last().unwrap().text.contains("did not answer"));
+    }
+
+    #[test]
+    fn a_long_turn_is_never_given_up_on_by_itself() {
+        // A remote turn of minutes is real work; only the owner cancels it.
+        let mut app = App::new("test".into());
+        app.begin_request(Uuid::new_v4(), Pending::Turn);
+        app.check_stuck(Duration::from_secs(600));
+        assert!(app.is_busy());
+    }
+
+    #[test]
+    fn giving_up_on_a_request_is_noted_for_the_diagnostics_log() {
+        let mut app = App::new("test".into());
+        app.begin_request(Uuid::new_v4(), Pending::Status);
+        app.check_stuck(Duration::from_secs(31));
+        let notes = app.take_diag();
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("gave up"), "{notes:?}");
+        assert!(app.take_diag().is_empty(), "taken once");
     }
 }

@@ -269,3 +269,30 @@ async fn feedback_before_any_turn_says_so() {
     let err = s.jarvis.feedback("bad", "").unwrap_err().to_string();
     assert!(err.contains("no turn"), "{}", err);
 }
+
+#[tokio::test]
+async fn a_long_turn_reports_what_it_is_doing() {
+    // Real use: a 50-second remote turn of five model rounds looked hung -
+    // only a spinner, nothing to tell working from stuck.
+    let s = setup(vec![]);
+    let jarvis = rebuild(&s, s.write_turn());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let yes = Slow {
+        delay: std::time::Duration::ZERO,
+        yes: true,
+    };
+    jarvis
+        .run_turn_observed(WRITE, Some(&yes), None, None, Some(&tx))
+        .await
+        .unwrap();
+    drop(tx);
+    let mut steps = Vec::new();
+    while let Some(step) = rx.recv().await {
+        steps.push(step);
+    }
+    assert_eq!(steps.len(), 3, "{steps:?}");
+    assert!(steps[0].starts_with("asking llama3.2:1b"), "{steps:?}");
+    assert!(steps[0].contains("step 1"), "{steps:?}");
+    assert_eq!(steps[1], "writing notes.md");
+    assert!(steps[2].contains("step 2"), "{steps:?}");
+}

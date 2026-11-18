@@ -74,7 +74,7 @@ impl Daemon {
         cancel: Option<&Cancellation>,
         sink: Option<&UnboundedSender<String>>,
     ) -> Result<String> {
-        self.ask_with_footer(prompt, confirm, cancel, sink)
+        self.ask_with_footer(prompt, confirm, cancel, sink, None)
             .await
             .map(|(answer, _, _)| answer)
     }
@@ -86,10 +86,13 @@ impl Daemon {
         confirm: Option<&dyn ConfirmationHandler>,
         cancel: Option<&Cancellation>,
         sink: Option<&UnboundedSender<String>>,
+        progress: Option<&UnboundedSender<String>>,
     ) -> Result<(String, String, crate::orchestrator::TurnTiming)> {
         let orch = self.orchestrator.lock().await;
         let session_id = orch.session_id().to_string();
-        let (result, footer, timing) = orch.run_with_footer(prompt, confirm, cancel, sink).await?;
+        let (result, footer, timing) = orch
+            .run_with_footer(prompt, confirm, cancel, sink, progress)
+            .await?;
         // Auto-title if this is a new session with few messages
         if let Some(ref mem) = self.memory {
             if let Ok(count) = mem.get_message_count(&session_id) {

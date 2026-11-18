@@ -6,6 +6,7 @@
 
 mod app;
 mod client;
+mod diag;
 mod ui;
 mod wrap;
 
@@ -32,6 +33,8 @@ async fn main() -> Result<()> {
     let config = Config::load();
     let socket = config.general.data_dir.join("jarvis.sock");
     let mut app = App::new(config.model.default_model.clone());
+    let mut diag = diag::Diag::new(&config.general.data_dir);
+    diag.line("started");
 
     let mut terminal = setup_terminal()?;
     let _guard = TerminalGuard;
@@ -64,6 +67,7 @@ async fn main() -> Result<()> {
             }
             event = event_rx.recv() => {
                 if let Some(event) = event {
+                    diag.event(&event);
                     actions = app.on_client_event(event);
                 }
             }
@@ -80,9 +84,14 @@ async fn main() -> Result<()> {
             &socket,
             &event_tx,
             &config,
+            &mut diag,
         );
+        for note in app.take_diag() {
+            diag.line(&note);
+        }
     }
 
+    diag.line("quit");
     Ok(())
 }
 
@@ -163,6 +172,7 @@ fn perform(
     socket: &Path,
     event_tx: &mpsc::UnboundedSender<ClientEvent>,
     config: &Config,
+    diag: &mut diag::Diag,
 ) {
     for action in actions {
         match action {
@@ -171,6 +181,7 @@ fn perform(
                 undo(action, app, config)
             }
             Action::Reconnect => {
+                diag.line("reconnect");
                 // Dropping the old client aborts its socket task.
                 *client = None;
                 app.state = DaemonState::Connecting;
@@ -185,12 +196,19 @@ fn perform(
                 approved,
                 choice,
             } => match client.as_ref() {
-                Some(client) => client.confirm(id, approved, choice),
+                Some(client) => {
+                    diag.line(&format!(
+                        "prompt answered: {}",
+                        if approved { "yes" } else { "no" }
+                    ));
+                    client.confirm(id, approved, choice)
+                }
                 None => app.note(Entry::error(
                     "Cannot answer: the daemon is not connected.".to_string(),
                 )),
             },
             Action::Cancel { id } => {
+                diag.line("cancel");
                 if let Some(client) = client.as_ref() {
                     client.cancel(id);
                 }
@@ -201,14 +219,19 @@ fn perform(
                 pending,
             } => {
                 if app.pending.is_some() {
+                    diag.line(&format!(
+                        "not sent {method}: still waiting for the last request"
+                    ));
                     app.note(Entry::system("Still waiting for the daemon."));
                     continue;
                 }
                 let Some(client) = client.as_ref() else {
+                    diag.line(&format!("not sent {method}: no daemon connection"));
                     app.request_failed(offline_message(socket));
                     continue;
                 };
                 let request = Request::new(method, params);
+                diag.sent(request.id, method);
                 app.begin_request(request.id, pending);
                 client.request(request);
             }

@@ -27,6 +27,47 @@ pub(super) fn unwrap_echoed_schema(args: Value, required: &[String]) -> Value {
     args
 }
 
+/// What a tool call is doing, for the progress line: short, and never the
+/// whole arguments (a written file's content is not a status).
+pub(super) fn describe_step(tool: &str, args: &Value) -> String {
+    let file = || {
+        args["path"]
+            .as_str()
+            .map(|p| {
+                std::path::Path::new(p)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| p.to_string())
+            })
+            .unwrap_or_else(|| "a file".to_string())
+    };
+    match tool {
+        "filesystem.write" => format!("writing {}", file()),
+        "filesystem.edit" => format!("editing {}", file()),
+        "filesystem.delete" => format!("deleting {}", file()),
+        "filesystem.read" => format!("reading {}", file()),
+        "filesystem.list_dir" | "filesystem.search" | "filesystem.stat" => {
+            "looking through files".to_string()
+        }
+        "shell.run" => {
+            let command: String = args["command"]
+                .as_str()
+                .unwrap_or("")
+                .chars()
+                .take(40)
+                .collect();
+            format!("running: {}", command)
+        }
+        "system.info" | "process.list" => "checking the system".to_string(),
+        t if t.starts_with("mcp.search.") => "searching the web".to_string(),
+        t if t.starts_with("mcp.fetch.") => match args["url"].as_str() {
+            Some(url) => format!("reading {}", host_of(url)),
+            None => "reading a web page".to_string(),
+        },
+        other => format!("using {}", other),
+    }
+}
+
 /// Tool arguments sometimes arrive as a JSON-encoded string.
 pub(super) fn normalize_arguments(args: Value) -> Value {
     match &args {
@@ -267,6 +308,7 @@ impl Orchestrator {
         untrusted: &[Source],
         rec: &TurnRecorder,
     ) -> ToolOutcome {
+        rec.step(describe_step(&name, &args));
         let started = std::time::Instant::now();
         let outcome = self.gate_and_run(name, args, confirm, untrusted).await;
         rec.tool_time(&outcome.name, started.elapsed());

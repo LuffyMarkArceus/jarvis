@@ -73,6 +73,10 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
             format!("{label}{}", SPINNER[app.spinner % SPINNER.len()]),
             style,
         ));
+        let doing = app.busy_label(app.busy_for());
+        if !doing.is_empty() {
+            spans.push(Span::styled(format!(" {doing}"), style));
+        }
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);

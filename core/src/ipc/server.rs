@@ -16,7 +16,7 @@ use crate::daemon::Daemon;
 use crate::error::{JarvisError, Result};
 use crate::orchestrator::ConfirmationHandler;
 use jarvis_common::ipc::{
-    Choice, Chunk, ConfirmationReply, ConfirmationRequest, Message, Request, Response,
+    Choice, Chunk, ConfirmationReply, ConfirmationRequest, Message, Progress, Request, Response,
 };
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -534,10 +534,18 @@ async fn handle_ask(
     // never blocks on socket I/O. The response is sent only after this task
     // has drained, which keeps the wire order: chunks, then the answer.
     let (sink, mut chunks) = mpsc::unbounded_channel::<String>();
+    // Progress ("asking nemotron (step 3)") goes out through the same task,
+    // so it is written in order with the chunks.
+    let (progress, mut steps) = mpsc::unbounded_channel::<String>();
     let writer = conn.clone();
     let chunk_task = tokio::spawn(async move {
-        while let Some(text) = chunks.recv().await {
-            if let Err(e) = writer.send(&Message::Chunk(Chunk { id, text })).await {
+        loop {
+            let message = tokio::select! {
+                Some(text) = chunks.recv() => Message::Chunk(Chunk { id, text }),
+                Some(text) = steps.recv() => Message::Progress(Progress { id, text }),
+                else => break,
+            };
+            if let Err(e) = writer.send(&message).await {
                 error!("Failed to send chunk: {}", e);
                 // Keep draining: the turn still has to finish and its answer
                 // must not be lost because a chunk could not be written.
@@ -552,11 +560,18 @@ async fn handle_ask(
             cancel: cancel.clone(),
         };
         daemon_lock
-            .ask_with_footer(&prompt, Some(&confirmer), Some(&cancel), Some(&sink))
+            .ask_with_footer(
+                &prompt,
+                Some(&confirmer),
+                Some(&cancel),
+                Some(&sink),
+                Some(&progress),
+            )
             .await
     };
 
     drop(sink);
+    drop(progress);
     let _ = chunk_task.await;
 
     match result {

@@ -28,6 +28,13 @@ pub(super) fn destination_of(model: &ModelConfig) -> Destination {
     })
 }
 
+/// A model's name without its vendor or ":free": "nvidia/nemotron-3-ultra:free"
+/// is "nemotron-3-ultra".
+pub(super) fn short_model(name: &str) -> &str {
+    let name = name.rsplit('/').next().unwrap_or(name);
+    name.strip_suffix(":free").unwrap_or(name)
+}
+
 /// What came back from [`Orchestrator::ask_model`].
 pub(super) enum ModelReply {
     /// Boxed: a turn is much larger than a refusal's text.
@@ -206,6 +213,11 @@ impl Orchestrator {
         // A placeholder can be split across streamed chunks and shown before
         // it is restored; a redacted remote answer is shown whole instead.
         let stream_to = sink.filter(|_| !redacted.as_ref().is_some_and(|r| r.2));
+        rec.step(format!(
+            "asking {} (step {})",
+            short_model(&cfg.default_model),
+            rec.model_calls() + 1
+        ));
         let started = std::time::Instant::now();
         let mut turn = match stream_to {
             Some(sink) => client.chat_turn_streaming(chat, cancel, sink).await?,
