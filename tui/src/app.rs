@@ -402,6 +402,8 @@ pub struct App {
     busy_since: Option<Instant>,
     /// What the pending turn says it is doing now.
     progress: Option<String>,
+    /// Lines for `tui.log` about decisions the app made on its own.
+    diag: Vec<String>,
 }
 
 impl App {
@@ -429,6 +431,7 @@ impl App {
             last_timing: None,
             busy_since: None,
             progress: None,
+            diag: Vec::new(),
         }
     }
 
@@ -449,6 +452,11 @@ impl App {
         if let Some(since) = self.busy_since {
             self.check_stuck(since.elapsed());
         }
+    }
+
+    /// Lines for `tui.log`, once each.
+    pub fn take_diag(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.diag)
     }
 
     /// How long the pending request has been running.
@@ -485,6 +493,11 @@ impl App {
         {
             return;
         }
+        self.diag.push(format!(
+            "gave up on {:?} after {} s",
+            self.pending,
+            elapsed.as_secs()
+        ));
         self.pending = None;
         self.pending_id = None;
         self.busy_since = None;
@@ -2120,5 +2133,16 @@ mod tests {
         app.begin_request(Uuid::new_v4(), Pending::Turn);
         app.check_stuck(Duration::from_secs(600));
         assert!(app.is_busy());
+    }
+
+    #[test]
+    fn giving_up_on_a_request_is_noted_for_the_diagnostics_log() {
+        let mut app = App::new("test".into());
+        app.begin_request(Uuid::new_v4(), Pending::Status);
+        app.check_stuck(Duration::from_secs(31));
+        let notes = app.take_diag();
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("gave up"), "{notes:?}");
+        assert!(app.take_diag().is_empty(), "taken once");
     }
 }
