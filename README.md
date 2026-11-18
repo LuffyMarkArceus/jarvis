@@ -53,6 +53,18 @@ other words within a minute. In the TUI, `/timing` shows the last turn and
 `/bad [note]` or `/good [note]` marks it. `jarvis report` summarises the log.
 It stays on this machine, in the data folder sandboxed commands cannot see.
 
+While a turn runs, the TUI's header says what it is doing and for how long -
+`asking nemotron-3-ultra (step 3) · 25 s · Ctrl+C cancels` - so a long turn
+does not look like a stuck one. A request other than a turn that gets no
+answer in 30 s is given up, so the window is never left waiting. Each window
+also keeps `<data_dir>/tui.log`: when it connected, what it sent, how long each
+answer took, prompts shown and answered, anything it could not send (never
+what you typed).
+
+The daemon belongs to no terminal: `jarvis daemon start` gives it its own
+process group and no input, it ignores SIGHUP (a terminal closing), and on
+SIGTERM or Ctrl+C it removes its socket and PID file before it stops.
+
 ### Keeping the model loaded
 
 Loading a model from disk took 25-42 s here, and Ollama unloads one after 5
