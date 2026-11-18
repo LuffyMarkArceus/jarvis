@@ -684,6 +684,8 @@ async fn main() -> anyhow::Result<()> {
                     }
                 };
                 daemon.write_pid().await?;
+                // Load the model now, not when the first question arrives.
+                daemon.warm_up().await;
                 let daemon_arc = std::sync::Arc::new(tokio::sync::Mutex::new(daemon.clone()));
                 let server =
                     jarvis_core::ipc::server::IpcServer::new(daemon_arc, daemon.get_socket_path());

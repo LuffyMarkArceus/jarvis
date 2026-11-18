@@ -181,3 +181,32 @@ fn without_a_remote_tier_only_local_models_are_listed() {
     assert!(jarvis.models().iter().all(|m| !m.remote));
     assert_eq!(jarvis.models().len(), 2);
 }
+
+/// Lets the background warm-up task run.
+async fn settle() {
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+}
+
+#[tokio::test]
+async fn picking_a_local_model_loads_it_in_the_background() {
+    // So the first question after /model does not wait 25-42 s for a load.
+    let s = setup();
+    s.jarvis.set_model("qwen").unwrap();
+    settle().await;
+    assert_eq!(*s.local.warmed.lock().unwrap(), vec!["qwen2.5:3b"]);
+    s.jarvis.set_model("north").unwrap();
+    settle().await;
+    assert!(
+        s.remote.warmed.lock().unwrap().is_empty(),
+        "nothing to load remotely"
+    );
+    s.jarvis.warm_up();
+    settle().await;
+    assert_eq!(
+        s.local.warmed.lock().unwrap().len(),
+        1,
+        "on the remote tier, no local load"
+    );
+}

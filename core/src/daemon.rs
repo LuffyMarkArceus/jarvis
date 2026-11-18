@@ -238,6 +238,12 @@ impl Daemon {
         self.orchestrator.lock().await.feedback(kind, note)
     }
 
+    /// Load the active local model in the background (on start, and when a
+    /// client connects after a pause).
+    pub async fn warm_up(&self) {
+        self.orchestrator.lock().await.warm_up();
+    }
+
     /// The models `/model` can switch to.
     pub async fn models(&self) -> Vec<crate::orchestrator::ModelChoice> {
         self.orchestrator.lock().await.models()

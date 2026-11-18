@@ -179,6 +179,10 @@ pub struct ModelConfig {
     /// The longest answer a request may produce, in tokens. A small model
     /// that loops would otherwise generate for minutes and hold the GPU.
     pub max_answer_tokens: usize,
+    /// How long Ollama keeps the model loaded after a request ("30m", "2h",
+    /// "-1" for always). Loading took 25-42 s; Ollama's default is 5 minutes.
+    /// Longer is faster but holds GPU memory (and on a laptop, battery).
+    pub keep_alive: String,
     pub routing_model: String,
     pub embedding_model: String,
     /// Use the provider's native function-calling interface when available.
@@ -227,6 +231,7 @@ impl Default for ModelConfig {
             default_model: "llama3.2:1b".to_string(),
             models: Vec::new(),
             max_answer_tokens: 2048,
+            keep_alive: "30m".to_string(),
             routing_model: "llama3.2:1b".to_string(),
             embedding_model: "nomic-embed-text".to_string(),
             native_tool_calling: true,

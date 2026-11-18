@@ -574,6 +574,8 @@ pub struct RecordingProvider {
     pub reply: String,
     /// The model each request named.
     pub models: std::sync::Mutex<Vec<String>>,
+    /// Each model it was asked to load ahead of time.
+    pub warmed: std::sync::Mutex<Vec<String>>,
 }
 
 impl RecordingProvider {
@@ -582,6 +584,7 @@ impl RecordingProvider {
             sent: Default::default(),
             reply: reply.to_string(),
             models: Default::default(),
+            warmed: Default::default(),
         }
     }
 
@@ -594,6 +597,11 @@ impl RecordingProvider {
 impl Provider for RecordingProvider {
     fn name(&self) -> &'static str {
         "recording"
+    }
+
+    async fn warm(&self, model: &str, _options: &Value) -> Result<()> {
+        self.warmed.lock().unwrap().push(model.to_string());
+        Ok(())
     }
 
     async fn chat_turn(

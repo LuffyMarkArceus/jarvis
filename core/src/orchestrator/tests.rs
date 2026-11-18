@@ -562,3 +562,13 @@ fn jarvis_has_a_voice_in_chat_and_none_in_facts_or_actions() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn every_request_says_how_long_to_keep_the_model_loaded() {
+    let (jarvis, dir) = web_jarvis();
+    let mut model = jarvis.config.model.clone();
+    assert_eq!(jarvis.model_options(&model)["keep_alive"], "30m");
+    model.keep_alive = "-1".into();
+    assert_eq!(jarvis.model_options(&model)["keep_alive"], "-1");
+    let _ = std::fs::remove_dir_all(dir);
+}

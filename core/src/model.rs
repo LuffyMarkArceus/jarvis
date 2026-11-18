@@ -110,6 +110,10 @@ struct ChatRequest {
     /// Provider tuning options (temperature, top_p, ...).
     #[serde(skip_serializing_if = "Option::is_none")]
     options: Option<Value>,
+    /// How long to keep the model loaded afterwards. A top-level field in
+    /// Ollama's API, carried to here inside `options`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    keep_alive: Option<Value>,
 }
 
 /// One model turn plus the token accounting the provider reports.
@@ -278,12 +282,18 @@ fn build_request(
     }
     all_messages.extend(messages.iter().cloned());
 
+    let mut options = options;
+    let keep_alive = options
+        .as_mut()
+        .and_then(Value::as_object_mut)
+        .and_then(|o| o.remove("keep_alive"));
     ChatRequest {
         model: model.to_string(),
         messages: all_messages,
         stream,
         tools: tools.map(|tools| tools.to_vec()),
         options,
+        keep_alive,
     }
 }
 
@@ -480,6 +490,27 @@ impl OllamaClient {
         Ok(state.into_turn())
     }
 
+    /// Load `model` now, so the next question does not wait for it: a
+    /// generate request without a prompt loads and returns.
+    pub async fn warm(&self, model: &str, options: &Value) -> Result<()> {
+        let mut options = options.clone();
+        let keep_alive = options
+            .as_object_mut()
+            .and_then(|o| o.remove("keep_alive"))
+            .unwrap_or(Value::Null);
+        let resp = self
+            .client
+            .post(format!("{}/api/generate", self.base_url))
+            .json(&serde_json::json!({ "model": model, "keep_alive": keep_alive, "options": options }))
+            .send()
+            .await
+            .map_err(|e| JarvisError::Model(format!("Request failed: {}", e)))?;
+        if !resp.status().is_success() {
+            return Err(JarvisError::Model(format!("HTTP {}", resp.status())));
+        }
+        Ok(())
+    }
+
     pub async fn list_models(&self) -> Result<Vec<String>> {
         let resp = self
             .client
@@ -574,6 +605,24 @@ mod tests {
         assert_eq!(turn.prompt_tokens, Some(12));
         assert_eq!(turn.completion_tokens, Some(2));
         assert!(turn.message.tool_calls.is_none());
+    }
+
+    #[test]
+    fn keep_alive_is_sent_at_the_top_of_the_request() {
+        // Measured: 70% of the time was loading models Ollama had unloaded
+        // after its default 5 idle minutes.
+        let request = build_request(
+            "llama3.2:1b",
+            None,
+            &[],
+            None,
+            Some(serde_json::json!({ "temperature": 0.0, "keep_alive": "30m" })),
+            false,
+        );
+        let body = serde_json::to_value(&request).unwrap();
+        assert_eq!(body["keep_alive"], "30m");
+        assert!(body["options"].get("keep_alive").is_none(), "{body}");
+        assert_eq!(body["options"]["temperature"], 0.0);
     }
 
     #[test]

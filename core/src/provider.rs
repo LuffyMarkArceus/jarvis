@@ -57,6 +57,14 @@ pub trait Provider: Send + Sync {
         cancel: Option<&Cancellation>,
         sink: &UnboundedSender<String>,
     ) -> Result<ChatTurn>;
+
+    /// Load `model` ahead of the next request, with the `options` real
+    /// requests will use: a different context size makes Ollama load it
+    /// again. Only a local server has anything to load; the default does
+    /// nothing.
+    async fn warm(&self, _model: &str, _options: &Value) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Ollama's native API, which the project is developed against.
@@ -76,6 +84,10 @@ impl OllamaProvider {
 impl Provider for OllamaProvider {
     fn name(&self) -> &'static str {
         "ollama"
+    }
+
+    async fn warm(&self, model: &str, options: &Value) -> Result<()> {
+        self.inner.warm(model, options).await
     }
 
     async fn chat_turn(
