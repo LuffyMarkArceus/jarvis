@@ -16,7 +16,6 @@ struct Setup {
     dir: PathBuf,
     config: Config,
     jarvis: Orchestrator,
-    local: Arc<RecordingProvider>,
     remote: Arc<RecordingProvider>,
 }
 
@@ -56,13 +55,12 @@ fn setup() -> Setup {
         PermissionManager::with_paths(dir.join("permissions.toml"), dir.join("audit.db")).unwrap();
     let local = Arc::new(RecordingProvider::replying("local answer"));
     let remote = Arc::new(RecordingProvider::replying("remote answer"));
-    let jarvis = Orchestrator::with_parts(config.clone(), local.clone(), permissions)
+    let jarvis = Orchestrator::with_parts(config.clone(), local, permissions)
         .with_remote(Some(remote.clone()));
     Setup {
         dir,
         config,
         jarvis,
-        local,
         remote,
     }
 }
