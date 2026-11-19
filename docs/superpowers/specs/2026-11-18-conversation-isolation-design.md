@@ -78,12 +78,14 @@ Unknown session id: an error naming it.
 * `core/src/conversation.rs` - `Conversation { id, remote, chosen, last_turn }`
   and `Conversations`, the daemon's registry: get or load by id (model and
   tier from `memory.db`), create, persist a switch, the last-used preference.
-* `Orchestrator` - loses `session_id`, `use_remote`, `chosen`, `last_turn`.
-  Turn and setting methods take a `&Conversation`; `TurnRecorder` carries it,
-  so internal code reads `rec.conversation` instead of `self`. It keeps one
-  conversation of its own for **single-conversation embeddings** - tests,
-  each eval attempt, `jarvis ask` in direct mode - used by the existing
-  `run_turn`; the daemon never uses it.
+* `Orchestrator` - loses `session_id`, `use_remote`, `chosen`, `last_turn`
+  and holds no conversation at all. **Every caller passes one**: turn and
+  setting methods take a `&Conversation`, and `TurnRecorder` carries it, so
+  internal code reads `rec.conversation` instead of `self`. Callers with a
+  single conversation by nature make their own, visibly: each eval attempt,
+  each direct-mode `jarvis ask`, each test. One path, the one production
+  uses - tests do not exercise a convenience the daemon never takes (owner,
+  2026-11-18).
 * `memory.db` - additive migrations, tested by starting twice: `sessions.model`,
   `sessions.remote`, `messages.model`, and a `settings` table for the
   last-used model.
