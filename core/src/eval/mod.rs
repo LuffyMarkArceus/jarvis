@@ -280,12 +280,14 @@ async fn run_in(sandbox: &Sandbox, case: &Case, options: &RunOptions) -> Result<
             .map_err(|_| JarvisError::Tool("MCP tape servers did not start".into()))??;
     }
 
-    // Setup turns build the conversation the graded turn happens in.
+    // One conversation per attempt: setup turns build it, the graded turn
+    // happens in it.
+    let conv = orchestrator.new_conversation();
     for turn in &case.setup {
         let user = ScriptedUser::new(case.approve);
         tokio::time::timeout(
             options.timeout,
-            orchestrator.run_turn(turn, Some(&user), None, None),
+            orchestrator.run_turn(&conv, turn, Some(&user), None, None),
         )
         .await
         .map_err(|_| JarvisError::Tool(format!("setup turn timed out: {}", turn)))??;
@@ -297,7 +299,7 @@ async fn run_in(sandbox: &Sandbox, case: &Case, options: &RunOptions) -> Result<
     let started = Instant::now();
     let outcome = tokio::time::timeout(
         options.timeout,
-        orchestrator.run_turn(&case.input, Some(&user), None, None),
+        orchestrator.run_turn(&conv, &case.input, Some(&user), None, None),
     )
     .await;
     let latency = started.elapsed();

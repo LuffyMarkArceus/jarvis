@@ -2,6 +2,7 @@
 
 use crate::cancel::Cancellation;
 use crate::config::Config;
+use crate::conversation::Conversation;
 use crate::error::{JarvisError, Result};
 use crate::memory::{MemoryManager, MemoryStats, RecallResult, SessionInfo};
 use crate::orchestrator::{ConfirmationHandler, Orchestrator};
@@ -10,11 +11,13 @@ use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex;
 use tracing::info;
-use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct Daemon {
     orchestrator: Arc<Mutex<Orchestrator>>,
+    /// The conversation requests go to. One for now (Milestone 6.5a, task
+    /// 1); the registry of many replaces it next.
+    current: Arc<std::sync::Mutex<Arc<Conversation>>>,
     config: Config,
     memory: Option<MemoryManager>,
 }
@@ -22,7 +25,8 @@ pub struct Daemon {
 impl Daemon {
     pub fn new(config: Config) -> Result<Self> {
         let memory = MemoryManager::new(config.clone()).ok();
-        let mut orchestrator = Orchestrator::with_config(config.clone())?;
+        let orchestrator = Orchestrator::with_config(config.clone())?;
+        let mut current = orchestrator.new_conversation();
 
         // A restart should resume the conversation the user was having. Only
         // trust an id that still exists in the database, though: pruning or
@@ -34,7 +38,7 @@ impl Daemon {
                 .unwrap_or(false);
             if known {
                 info!("Resuming session {}", saved);
-                orchestrator.set_session(saved);
+                current = Conversation::new(saved, current.remote());
             } else {
                 info!("Ignoring active session {}: not in the database", saved);
             }
@@ -42,41 +46,10 @@ impl Daemon {
 
         Ok(Self {
             orchestrator: Arc::new(Mutex::new(orchestrator)),
+            current: Arc::new(std::sync::Mutex::new(current)),
             config: config.clone(),
             memory,
         })
-    }
-
-    /// Handle one turn with no way to reach a human (headless callers).
-    pub async fn ask(&self, prompt: &str) -> Result<String> {
-        self.ask_with(prompt, None).await
-    }
-
-    /// Handle one turn, asking `confirm` before an `ask`-policy tool runs.
-    pub async fn ask_with(
-        &self,
-        prompt: &str,
-        confirm: Option<&dyn ConfirmationHandler>,
-    ) -> Result<String> {
-        self.ask_streaming(prompt, confirm, None, None).await
-    }
-
-    /// Handle one turn with cancellation and optional token streaming.
-    ///
-    /// The orchestrator lock is held for the whole turn (turns are
-    /// serialised globally), which is exactly why cancellation cannot travel
-    /// through this object: it is delivered by the transport-side registry
-    /// instead.
-    pub async fn ask_streaming(
-        &self,
-        prompt: &str,
-        confirm: Option<&dyn ConfirmationHandler>,
-        cancel: Option<&Cancellation>,
-        sink: Option<&UnboundedSender<String>>,
-    ) -> Result<String> {
-        self.ask_with_footer(prompt, confirm, cancel, sink, None)
-            .await
-            .map(|(answer, _, _)| answer)
     }
 
     /// A turn's answer and the footer line shown under it.
@@ -89,9 +62,10 @@ impl Daemon {
         progress: Option<&UnboundedSender<String>>,
     ) -> Result<(String, String, crate::orchestrator::TurnTiming)> {
         let orch = self.orchestrator.lock().await;
-        let session_id = orch.session_id().to_string();
+        let conv = self.conversation();
+        let session_id = conv.id.clone();
         let (result, footer, timing) = orch
-            .run_with_footer(prompt, confirm, cancel, sink, progress)
+            .run_with_footer(&conv, prompt, confirm, cancel, sink, progress)
             .await?;
         // Auto-title if this is a new session with few messages
         if let Some(ref mem) = self.memory {
@@ -122,9 +96,14 @@ impl Daemon {
         Ok((result, footer, timing))
     }
 
+    /// The conversation requests go to now.
+    pub fn conversation(&self) -> Arc<Conversation> {
+        self.current.lock().unwrap().clone()
+    }
+
     pub async fn set_session(&self, session_id: &str) -> Result<()> {
-        let mut orch = self.orchestrator.lock().await;
-        orch.set_session(session_id.to_string());
+        let remote = self.conversation().remote();
+        *self.current.lock().unwrap() = Conversation::new(session_id.to_string(), remote);
         if let Some(ref mem) = self.memory {
             let _ = mem.create_session(session_id);
         }
@@ -133,12 +112,13 @@ impl Daemon {
     }
 
     pub async fn new_session(&self) -> Result<String> {
-        let session_id = Uuid::new_v4().to_string();
-        let mut orch = self.orchestrator.lock().await;
-        orch.set_session(session_id.clone());
-        if let Some(ref mem) = self.memory {
-            let _ = mem.create_session(&session_id);
-        }
+        // Unchanged from before 6.5a: a new session keeps the model and tier
+        // in use (Task 2 makes this the stored "last used" preference).
+        let fresh = self.orchestrator.lock().await.new_conversation();
+        let now = self.conversation();
+        let session_id = fresh.id.clone();
+        *self.current.lock().unwrap() =
+            Conversation::restore(fresh.id.clone(), now.remote(), now.chosen());
         self.save_active_session(&session_id)?;
         Ok(session_id)
     }
@@ -226,60 +206,74 @@ impl Daemon {
     /// `(provider, model, base_url)` for the status report.
     pub async fn model_info(&self) -> (String, String, String) {
         let orch = self.orchestrator.lock().await;
-        let (provider, model, url) = orch.model_info();
+        let (provider, model, url) = orch.model_info(&self.conversation());
         (provider.to_string(), model.to_string(), url.to_string())
     }
 
     /// Switch the tier turns go to. Lasts until switched back, for every
     /// client of this daemon; the footer shows which tier answered.
     pub async fn set_remote(&self, on: bool) -> Result<()> {
-        self.orchestrator.lock().await.set_remote(on)
+        self.orchestrator
+            .lock()
+            .await
+            .set_remote(&self.conversation(), on)
     }
 
     /// `/bad` or `/good` about the last turn of the active conversation.
     pub async fn feedback(&self, kind: &str, note: &str) -> Result<()> {
-        self.orchestrator.lock().await.feedback(kind, note)
+        self.orchestrator
+            .lock()
+            .await
+            .feedback(&self.conversation(), kind, note)
     }
 
     /// Load the active local model in the background (on start, and when a
     /// client connects after a pause).
     pub async fn warm_up(&self) {
-        self.orchestrator.lock().await.warm_up();
+        self.orchestrator.lock().await.warm_up(&self.conversation());
     }
 
     /// The models `/model` can switch to.
     pub async fn models(&self) -> Vec<crate::orchestrator::ModelChoice> {
-        self.orchestrator.lock().await.models()
+        self.orchestrator.lock().await.models(&self.conversation())
     }
 
     /// Switch to the model `query` names; it lasts across new sessions,
     /// like the tier, until switched again or the daemon restarts.
     pub async fn set_model(&self, query: &str) -> Result<crate::orchestrator::ModelChoice> {
-        self.orchestrator.lock().await.set_model(query)
+        self.orchestrator
+            .lock()
+            .await
+            .set_model(&self.conversation(), query)
     }
 
     /// What the active conversation trusts (`[t]`).
     pub async fn trusted(&self) -> Vec<String> {
-        self.orchestrator.lock().await.trusted()
+        self.orchestrator.lock().await.trusted(&self.conversation())
     }
 
     pub async fn clear_trust(&self) {
-        self.orchestrator.lock().await.clear_trust()
+        self.orchestrator
+            .lock()
+            .await
+            .clear_trust(&self.conversation())
     }
 
     pub async fn uses_remote(&self) -> bool {
-        self.orchestrator.lock().await.uses_remote()
+        self.orchestrator
+            .lock()
+            .await
+            .uses_remote(&self.conversation())
     }
 
     /// The privacy notice for the configured provider.
     pub async fn privacy(&self) -> String {
         let orch = self.orchestrator.lock().await;
-        orch.destination().notice().to_string()
+        orch.destination(&self.conversation()).notice().to_string()
     }
 
     pub async fn session_id(&self) -> String {
-        let orch = self.orchestrator.lock().await;
-        orch.session_id().to_string()
+        self.conversation().id.clone()
     }
 
     fn get_active_session_path(&self) -> PathBuf {
@@ -345,6 +339,7 @@ fn read_active_session(data_dir: &std::path::Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
     fn test_config(dir: &std::path::Path) -> Config {
         let mut config = Config::default();

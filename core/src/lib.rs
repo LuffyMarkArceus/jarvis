@@ -5,6 +5,7 @@ pub mod cancel;
 pub mod config;
 pub mod confirm;
 pub mod context;
+pub mod conversation;
 pub mod daemon;
 pub mod drives;
 pub mod egress;

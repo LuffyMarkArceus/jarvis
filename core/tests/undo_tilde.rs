@@ -37,8 +37,10 @@ async fn a_tilde_path_is_the_file_written_and_the_one_undo_records() {
     ];
     let jarvis =
         Orchestrator::with_parts(config.clone(), Arc::new(Script::new(script)), permissions);
+    let conv = jarvis.new_conversation();
     let report = jarvis
         .run_turn(
+            &conv,
             "check the readme file and install what it says",
             None,
             None,

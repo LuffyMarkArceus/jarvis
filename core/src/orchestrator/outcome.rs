@@ -160,8 +160,9 @@ pub struct ToolCallRecord {
 /// Passed down explicitly rather than stored on the orchestrator: the daemon
 /// shares one orchestrator, and a field would mix up two turns running at
 /// once.
-#[derive(Default)]
-pub(super) struct TurnRecorder {
+pub(super) struct TurnRecorder<'c> {
+    /// The conversation this turn belongs to.
+    pub(super) conversation: &'c Conversation,
     pub(super) calls: std::sync::Mutex<Vec<ToolCallRecord>>,
     pub(super) model: std::sync::Mutex<(u32, Option<u64>, Option<u64>)>,
     /// Everything this turn's answer may contain: the tools it ran and the
@@ -195,7 +196,29 @@ pub(super) struct TurnRecorder {
     pub(super) progress: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
-impl TurnRecorder {
+impl<'c> TurnRecorder<'c> {
+    pub(super) fn new(conversation: &'c Conversation) -> Self {
+        TurnRecorder {
+            conversation,
+            calls: Default::default(),
+            model: Default::default(),
+            label: Default::default(),
+            redactor: Default::default(),
+            approved: Default::default(),
+            web_approved: Default::default(),
+            shown_urls: Default::default(),
+            remote: Default::default(),
+            used: Default::default(),
+            withheld: Default::default(),
+            model_error: Default::default(),
+            timing: Default::default(),
+            planned: Default::default(),
+            progress: Default::default(),
+        }
+    }
+}
+
+impl TurnRecorder<'_> {
     pub(super) fn used(&self, model: &ModelConfig, provider: &str, remote: bool) {
         *self.used.lock().unwrap() = Some((model.default_model.clone(), provider.to_string()));
         if remote {

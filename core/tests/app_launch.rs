@@ -26,6 +26,7 @@ impl ConfirmationHandler for Yes {
 struct Setup {
     dir: PathBuf,
     jarvis: Orchestrator,
+    conv: std::sync::Arc<jarvis_core::conversation::Conversation>,
 }
 
 impl Drop for Setup {
@@ -55,7 +56,8 @@ fn setup() -> Setup {
         Arc::new(Script::new(vec![answer("I looked for it.")])),
         permissions,
     );
-    Setup { dir, jarvis }
+    let conv = jarvis.new_conversation();
+    Setup { dir, conv, jarvis }
 }
 
 #[tokio::test]
@@ -64,7 +66,7 @@ async fn an_installed_app_is_launched_as_its_own_command() {
     let owner = Yes(Mutex::new(Vec::new()));
     let report = s
         .jarvis
-        .run_turn("open vscode for me", Some(&owner), None, None)
+        .run_turn(&s.conv, "open vscode for me", Some(&owner), None, None)
         .await
         .unwrap();
     assert_eq!(report.route, "Tool(shell.run)");
@@ -86,6 +88,7 @@ async fn something_that_is_not_an_app_goes_to_the_model() {
     let report = s
         .jarvis
         .run_turn(
+            &s.conv,
             "Can you open the episode 001 of BleaCH on my DATA drive?",
             None,
             None,

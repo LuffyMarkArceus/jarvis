@@ -661,8 +661,10 @@ async fn main() -> anyhow::Result<()> {
                     // Fallback to direct mode
                     info!("Daemon not running, using direct mode");
                     let orch = Orchestrator::new()?;
+                    // A one-off ask is its own conversation.
+                    let conv = orch.new_conversation();
                     let (response, footer, _timing) = orch
-                        .run_with_footer(&prompt, Some(&TerminalConfirmer), None, None, None)
+                        .run_with_footer(&conv, &prompt, Some(&TerminalConfirmer), None, None, None)
                         .await?;
                     println!("{}", response);
                     print_footer(&footer, std::io::stdout().is_terminal());

@@ -19,6 +19,7 @@ struct Setup {
     dir: PathBuf,
     config: Config,
     jarvis: Orchestrator,
+    conv: std::sync::Arc<jarvis_core::conversation::Conversation>,
 }
 
 impl Drop for Setup {
@@ -51,9 +52,11 @@ fn setup_with(config: Config, dir: PathBuf, script: Vec<ChatTurn>) -> Setup {
         .unwrap();
     let jarvis =
         Orchestrator::with_parts(config.clone(), Arc::new(Script::new(script)), permissions);
+    let conv = jarvis.new_conversation();
     Setup {
         dir,
         config,
+        conv,
         jarvis,
     }
 }
@@ -95,7 +98,10 @@ async fn a_write_through_the_orchestrator_can_be_undone() {
         answer("done"),
     ];
     let s = setup_with(config_in(&dir), dir, script);
-    s.jarvis.run_turn(ASK, None, None, None).await.unwrap();
+    s.jarvis
+        .run_turn(&s.conv, ASK, None, None, None)
+        .await
+        .unwrap();
     assert_eq!(std::fs::read_to_string(&notes).unwrap(), "jarvis");
 
     let store = UndoStore::for_config(&s.config).unwrap();
@@ -121,7 +127,10 @@ async fn a_failed_edit_leaves_nothing_to_undo() {
         answer("done"),
     ];
     let s = setup_with(config_in(&dir), dir, script);
-    s.jarvis.run_turn(ASK, None, None, None).await.unwrap();
+    s.jarvis
+        .run_turn(&s.conv, ASK, None, None, None)
+        .await
+        .unwrap();
 
     assert!(UndoStore::for_config(&s.config)
         .unwrap()
@@ -153,7 +162,13 @@ async fn the_prompt_says_a_large_file_cannot_be_undone() {
     let s = setup_with(config, dir, script);
     let owner = Yes(Mutex::new(Vec::new()));
     s.jarvis
-        .run_turn(ASK, Some(&owner as &dyn ConfirmationHandler), None, None)
+        .run_turn(
+            &s.conv,
+            ASK,
+            Some(&owner as &dyn ConfirmationHandler),
+            None,
+            None,
+        )
         .await
         .unwrap();
 
@@ -176,7 +191,10 @@ async fn an_undo_is_in_the_audit_log() {
         answer("done"),
     ];
     let s = setup_with(config_in(&dir), dir.clone(), script);
-    s.jarvis.run_turn(ASK, None, None, None).await.unwrap();
+    s.jarvis
+        .run_turn(&s.conv, ASK, None, None, None)
+        .await
+        .unwrap();
 
     let store = UndoStore::for_config(&s.config).unwrap();
     let audit =
@@ -211,12 +229,16 @@ async fn the_chat_says_how_to_undo_instead_of_trying() {
         PermissionManager::with_paths(dir.join("data/permissions.toml"), dir.join("data/audit.db"))
             .unwrap();
     let jarvis = Orchestrator::with_parts(config, Arc::new(ScriptedProvider), permissions);
+    let conv = jarvis.new_conversation();
     for input in [
         "undo that",
         "please undo the last change",
         "can you undo what you just did?",
     ] {
-        let report = jarvis.run_turn(input, None, None, None).await.unwrap();
+        let report = jarvis
+            .run_turn(&conv, input, None, None, None)
+            .await
+            .unwrap();
         assert_eq!(report.route, "Direct", "{}", input);
         assert_eq!(report.model_calls, 0, "{}", input);
         assert!(
@@ -228,7 +250,7 @@ async fn the_chat_says_how_to_undo_instead_of_trying() {
     }
     // Undoing something else is not Jarvis's undo.
     let report = jarvis
-        .run_turn("how do I undo the last git commit", None, None, None)
+        .run_turn(&conv, "how do I undo the last git commit", None, None, None)
         .await
         .unwrap();
     assert!(!report.answer.contains("jarvis undo"), "{}", report.answer);
@@ -259,7 +281,11 @@ async fn a_deleted_file_comes_back_with_undo() {
     config.memory.recall_enabled = false;
     let s = setup_with(config, dir.clone(), script);
     let input = format!("please delete {}", old.display());
-    let report = s.jarvis.run_turn(&input, None, None, None).await.unwrap();
+    let report = s
+        .jarvis
+        .run_turn(&s.conv, &input, None, None, None)
+        .await
+        .unwrap();
     assert_eq!(report.route, "Model");
     assert!(
         report.offered.iter().any(|t| t == "filesystem.delete"),

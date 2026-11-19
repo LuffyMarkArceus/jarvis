@@ -39,6 +39,7 @@ impl ConfirmationHandler for Yes {
 struct Setup {
     dir: PathBuf,
     jarvis: Orchestrator,
+    conv: std::sync::Arc<jarvis_core::conversation::Conversation>,
 }
 
 impl Drop for Setup {
@@ -73,7 +74,8 @@ fn setup(
             .unwrap();
     permissions.set_rule("shell.run", shell).unwrap();
     let jarvis = Orchestrator::with_parts(config, Arc::new(Script::new(script(&dir))), permissions);
-    Setup { dir, jarvis }
+    let conv = jarvis.new_conversation();
+    Setup { dir, conv, jarvis }
 }
 
 fn outside(command: &str) -> ChatTurn {
@@ -88,6 +90,7 @@ const ASK: &str = "check the readme file and install what it says";
 async fn ask(s: &Setup, owner: Option<&Yes>) -> TurnReport {
     s.jarvis
         .run_turn(
+            &s.conv,
             ASK,
             owner.map(|o| o as &dyn ConfirmationHandler),
             None,
@@ -208,6 +211,7 @@ async fn the_owners_own_command_runs_sandboxed_without_asking() {
     let report = s
         .jarvis
         .run_turn(
+            &s.conv,
             "run pwd",
             Some(&owner as &dyn ConfirmationHandler),
             None,
