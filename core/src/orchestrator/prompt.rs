@@ -321,9 +321,15 @@ impl Orchestrator {
         )
     }
 
-    pub(super) fn persist_assistant(&self, conv: &Conversation, content: &str, label: &Label) {
+    pub(super) fn persist_assistant(
+        &self,
+        conv: &Conversation,
+        content: &str,
+        label: &Label,
+        model: Option<&str>,
+    ) {
         if let Some(ref m) = self.memory {
-            let _ = m.add_labeled_message(&conv.id, "assistant", content, Some(label));
+            let _ = m.add_answer(&conv.id, content, Some(label), model);
         }
     }
 }

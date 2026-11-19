@@ -361,6 +361,7 @@ mod tests {
             content: content.to_string(),
             created_at: Utc::now(),
             label: None,
+            model: None,
         }
     }
 

@@ -649,7 +649,13 @@ impl Orchestrator {
             .iter()
             .any(|c| c.status == "executed");
         let answer = taint::scrub_markers(&answer, ran);
-        self.persist_assistant(conv, &answer, &rec.label());
+        let model = rec
+            .used
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|(model, _)| model.clone());
+        self.persist_assistant(conv, &answer, &rec.label(), model.as_deref());
         Ok((answer, plan))
     }
 

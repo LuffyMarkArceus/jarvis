@@ -20,6 +20,10 @@ pub struct Message {
     /// labels existed (see `Label::unknown`).
     #[serde(default)]
     pub label: Option<Label>,
+    /// The model that wrote an answer; `None` for user messages, answers
+    /// no model wrote, and messages stored before models were recorded.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -87,7 +91,8 @@ impl MemoryManager {
             ",
         )
         .map_err(|e| JarvisError::Memory(format!("Schema init failed: {}", e)))?;
-        Self::add_label_column(&conn)
+        Self::add_label_column(&conn)?;
+        Self::add_conversation_columns(&conn)
     }
 
     /// Databases created before message labels lack the column. Adding it is
@@ -105,6 +110,103 @@ impl MemoryManager {
                 .map_err(|e| JarvisError::Memory(format!("Migration failed: {}", e)))?;
         }
         Ok(())
+    }
+
+    /// Milestone 6.5a: each conversation's model and tier, each answer's
+    /// model, and small settings ("last used"). Additive, and a no-op on a
+    /// database that already has them.
+    fn add_conversation_columns(conn: &Connection) -> Result<()> {
+        let has = |table: &str, column: &str| -> Result<bool> {
+            conn.query_row(
+                &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"),
+                params![column],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|n| n > 0)
+            .map_err(|e| JarvisError::Memory(format!("Schema check failed: {}", e)))
+        };
+        let migrate = |sql: &str| {
+            conn.execute(sql, [])
+                .map(|_| ())
+                .map_err(|e| JarvisError::Memory(format!("Migration failed: {}", e)))
+        };
+        if !has("sessions", "model")? {
+            migrate("ALTER TABLE sessions ADD COLUMN model TEXT")?;
+        }
+        if !has("sessions", "remote")? {
+            migrate("ALTER TABLE sessions ADD COLUMN remote INTEGER NOT NULL DEFAULT 0")?;
+        }
+        if !has("messages", "model")? {
+            migrate("ALTER TABLE messages ADD COLUMN model TEXT")?;
+        }
+        migrate("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    }
+
+    /// A conversation's model (on its tier) and tier; `None` if there is no
+    /// such conversation.
+    pub fn session_settings(&self, session_id: &str) -> Result<Option<(Option<String>, bool)>> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn.query_row(
+            "SELECT model, remote FROM sessions WHERE id = ?1",
+            params![session_id],
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)? != 0)),
+        );
+        match row {
+            Ok(found) => Ok(Some(found)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(JarvisError::Memory(format!("Query failed: {}", e))),
+        }
+    }
+
+    pub fn save_session_settings(
+        &self,
+        session_id: &str,
+        model: Option<&str>,
+        remote: bool,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sessions SET model = ?2, remote = ?3 WHERE id = ?1",
+            params![session_id, model, remote as i64],
+        )
+        .map(|_| ())
+        .map_err(|e| JarvisError::Memory(format!("Failed to save session settings: {}", e)))
+    }
+
+    pub fn setting(&self, key: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        match conn.query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            params![key],
+            |row| row.get(0),
+        ) {
+            Ok(value) => Ok(Some(value)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(JarvisError::Memory(format!("Query failed: {}", e))),
+        }
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )
+        .map(|_| ())
+        .map_err(|e| JarvisError::Memory(format!("Failed to save setting: {}", e)))
+    }
+
+    /// An answer, with the model that wrote it - in the same insert, so an
+    /// answer never exists without its model.
+    pub fn add_answer(
+        &self,
+        session_id: &str,
+        content: &str,
+        label: Option<&Label>,
+        model: Option<&str>,
+    ) -> Result<i64> {
+        self.insert_message(session_id, "assistant", content, label, model)
     }
 
     pub fn create_session(&self, session_id: &str) -> Result<()> {
@@ -144,12 +246,23 @@ impl MemoryManager {
         content: &str,
         label: Option<&Label>,
     ) -> Result<i64> {
+        self.insert_message(session_id, role, content, label, None)
+    }
+
+    fn insert_message(
+        &self,
+        session_id: &str,
+        role: &str,
+        content: &str,
+        label: Option<&Label>,
+        model: Option<&str>,
+    ) -> Result<i64> {
         self.create_session(session_id)?;
         let label = label.and_then(|l| serde_json::to_string(l).ok());
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO messages (session_id, role, content, label) VALUES (?1, ?2, ?3, ?4)",
-            params![session_id, role, content, label],
+            "INSERT INTO messages (session_id, role, content, label, model) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![session_id, role, content, label, model],
         )
         .map_err(|e| JarvisError::Memory(format!("Failed to add message: {}", e)))?;
 
@@ -166,7 +279,7 @@ impl MemoryManager {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
-                "SELECT id, session_id, role, content, created_at, label
+                "SELECT id, session_id, role, content, created_at, label, model
                  FROM messages 
                  WHERE session_id = ?1 
                  ORDER BY created_at DESC, id DESC
@@ -185,6 +298,7 @@ impl MemoryManager {
                     content: row.get(3)?,
                     created_at,
                     label: parse_label(row.get(5)?),
+                    model: row.get(6)?,
                 })
             })
             .map_err(|e| JarvisError::Memory(format!("Query map failed: {}", e)))?;
@@ -278,7 +392,7 @@ impl MemoryManager {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
-                "SELECT id, session_id, role, content, created_at, label
+                "SELECT id, session_id, role, content, created_at, label, model
                  FROM messages 
                  WHERE session_id = ?1 
                  ORDER BY created_at ASC, id ASC",
@@ -296,6 +410,7 @@ impl MemoryManager {
                     content: row.get(3)?,
                     created_at,
                     label: parse_label(row.get(5)?),
+                    model: row.get(6)?,
                 })
             })
             .map_err(|e| JarvisError::Memory(format!("Query map failed: {}", e)))?;
