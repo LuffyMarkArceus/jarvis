@@ -156,6 +156,23 @@ impl Conversations {
             .then_some(id)
     }
 
+    /// The settings a new conversation would start with - for `status` and
+    /// for loading that model on start. Not a conversation: never stored,
+    /// never sent a turn.
+    pub fn preferred(&self) -> Arc<Conversation> {
+        let model = self.memory.setting(LAST_MODEL).ok().flatten();
+        let remote = self.memory.setting(LAST_REMOTE).ok().flatten().as_deref() == Some("1");
+        let mut chosen = [None, None];
+        chosen[remote as usize] = model;
+        Conversation::restore(String::new(), remote, chosen)
+    }
+
+    /// The conversations in use since the daemon started: `/prune` leaves
+    /// them alone, since a window just opened is an empty one.
+    pub fn open(&self) -> Vec<String> {
+        self.loaded.lock().unwrap().keys().cloned().collect()
+    }
+
     /// Forget a deleted conversation.
     pub fn forget(&self, id: &str) {
         self.loaded.lock().unwrap().remove(id);

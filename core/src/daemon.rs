@@ -2,8 +2,8 @@
 
 use crate::cancel::Cancellation;
 use crate::config::Config;
-use crate::conversation::Conversation;
-use crate::error::{JarvisError, Result};
+use crate::conversation::{Conversation, Conversations};
+use crate::error::Result;
 use crate::memory::{MemoryManager, MemoryStats, RecallResult, SessionInfo};
 use crate::orchestrator::{ConfirmationHandler, Orchestrator};
 use std::path::PathBuf;
@@ -15,55 +15,50 @@ use tracing::info;
 #[derive(Clone)]
 pub struct Daemon {
     orchestrator: Arc<Mutex<Orchestrator>>,
-    /// The conversation requests go to. One for now (Milestone 6.5a, task
-    /// 1); the registry of many replaces it next.
-    current: Arc<std::sync::Mutex<Arc<Conversation>>>,
+    /// Every conversation, by id. Each request names the one it is for.
+    conversations: Arc<Conversations>,
     config: Config,
     memory: Option<MemoryManager>,
 }
 
 impl Daemon {
     pub fn new(config: Config) -> Result<Self> {
-        let memory = MemoryManager::new(config.clone()).ok();
         let orchestrator = Orchestrator::with_config(config.clone())?;
-        let mut current = orchestrator.new_conversation();
+        Self::with_orchestrator(config, orchestrator)
+    }
 
-        // A restart should resume the conversation the user was having. Only
-        // trust an id that still exists in the database, though: pruning or
-        // `session delete` can remove a session and leave this file behind.
-        if let Some(saved) = read_active_session(&config.general.data_dir) {
-            let known = memory
-                .as_ref()
-                .map(|m| m.session_exists(&saved).unwrap_or(false))
-                .unwrap_or(false);
-            if known {
-                info!("Resuming session {}", saved);
-                current = Conversation::new(saved, current.remote());
-            } else {
-                info!("Ignoring active session {}: not in the database", saved);
-            }
-        }
-
+    /// A daemon around `orchestrator` - real providers from [`Daemon::new`],
+    /// scripted ones in tests. Fails without its memory database: with no
+    /// conversations there is nothing to serve.
+    pub fn with_orchestrator(config: Config, orchestrator: Orchestrator) -> Result<Self> {
+        let memory = MemoryManager::new(config.clone())?;
         Ok(Self {
             orchestrator: Arc::new(Mutex::new(orchestrator)),
-            current: Arc::new(std::sync::Mutex::new(current)),
-            config: config.clone(),
-            memory,
+            conversations: Arc::new(Conversations::new(memory.clone())),
+            config,
+            memory: Some(memory),
         })
+    }
+
+    /// The conversation `session` names, or an error naming it.
+    pub fn conversation(&self, session: &str) -> Result<Arc<Conversation>> {
+        self.conversations.get(session)
     }
 
     /// A turn's answer and the footer line shown under it.
     pub async fn ask_with_footer(
         &self,
+        session: &str,
         prompt: &str,
         confirm: Option<&dyn ConfirmationHandler>,
         cancel: Option<&Cancellation>,
         sink: Option<&UnboundedSender<String>>,
         progress: Option<&UnboundedSender<String>>,
     ) -> Result<(String, String, crate::orchestrator::TurnTiming)> {
+        let conv = self.conversation(session)?;
         let orch = self.orchestrator.lock().await;
-        let conv = self.conversation();
         let session_id = conv.id.clone();
+        self.conversations.used(&conv);
         let (result, footer, timing) = orch
             .run_with_footer(&conv, prompt, confirm, cancel, sink, progress)
             .await?;
@@ -97,30 +92,17 @@ impl Daemon {
     }
 
     /// The conversation requests go to now.
-    pub fn conversation(&self) -> Arc<Conversation> {
-        self.current.lock().unwrap().clone()
+    /// A new conversation, on the model used last: `(id, model, remote)`.
+    pub async fn new_session(&self) -> Result<(String, String, bool)> {
+        let orch = self.orchestrator.lock().await;
+        let conv = self.conversations.create(&orch);
+        let (_, model, _) = orch.model_info(&conv);
+        Ok((conv.id.clone(), model, conv.remote()))
     }
 
-    pub async fn set_session(&self, session_id: &str) -> Result<()> {
-        let remote = self.conversation().remote();
-        *self.current.lock().unwrap() = Conversation::new(session_id.to_string(), remote);
-        if let Some(ref mem) = self.memory {
-            let _ = mem.create_session(session_id);
-        }
-        self.save_active_session(session_id)?;
-        Ok(())
-    }
-
-    pub async fn new_session(&self) -> Result<String> {
-        // Unchanged from before 6.5a: a new session keeps the model and tier
-        // in use (Task 2 makes this the stored "last used" preference).
-        let fresh = self.orchestrator.lock().await.new_conversation();
-        let now = self.conversation();
-        let session_id = fresh.id.clone();
-        *self.current.lock().unwrap() =
-            Conversation::restore(fresh.id.clone(), now.remote(), now.chosen());
-        self.save_active_session(&session_id)?;
-        Ok(session_id)
+    /// The conversation used most recently, for `--continue`.
+    pub fn last_session(&self) -> Option<String> {
+        self.conversations.last()
     }
 
     pub async fn list_sessions(&self, limit: usize) -> Result<Vec<SessionInfo>> {
@@ -135,12 +117,9 @@ impl Daemon {
         if let Some(ref mem) = self.memory {
             mem.delete_session(session_id)?;
         }
-        // Deleting the session in use would leave the daemon writing new
-        // messages into an id that `sessions` no longer contains, and the
-        // next restart would try to resume a conversation that is gone.
-        if self.session_id().await == session_id {
-            self.new_session().await?;
-        }
+        // A window still showing it gets "no conversation" on its next
+        // request, not a silently recreated one.
+        self.conversations.forget(session_id);
         Ok(())
     }
 
@@ -164,7 +143,7 @@ impl Daemon {
 
     pub async fn prune_empty_sessions(&self) -> Result<usize> {
         if let Some(ref mem) = self.memory {
-            mem.prune_empty_sessions()
+            mem.prune_empty_sessions(&self.conversations.open())
         } else {
             Ok(0)
         }
@@ -203,91 +182,98 @@ impl Daemon {
         orch.list_tools()
     }
 
-    /// `(provider, model, base_url)` for the status report.
-    pub async fn model_info(&self) -> (String, String, String) {
+    /// `(provider, model, base_url)` a conversation's turns go to.
+    pub async fn model_info(&self, session: &str) -> Result<(String, String, String)> {
+        let conv = self.conversation(session)?;
         let orch = self.orchestrator.lock().await;
-        let (provider, model, url) = orch.model_info(&self.conversation());
-        (provider.to_string(), model.to_string(), url.to_string())
+        let (provider, model, url) = orch.model_info(&conv);
+        Ok((provider.to_string(), model, url))
     }
 
-    /// Switch the tier turns go to. Lasts until switched back, for every
-    /// client of this daemon; the footer shows which tier answered.
-    pub async fn set_remote(&self, on: bool) -> Result<()> {
-        self.orchestrator
-            .lock()
-            .await
-            .set_remote(&self.conversation(), on)
-    }
-
-    /// `/bad` or `/good` about the last turn of the active conversation.
-    pub async fn feedback(&self, kind: &str, note: &str) -> Result<()> {
-        self.orchestrator
-            .lock()
-            .await
-            .feedback(&self.conversation(), kind, note)
-    }
-
-    /// Load the active local model in the background (on start, and when a
-    /// client connects after a pause).
-    pub async fn warm_up(&self) {
-        self.orchestrator.lock().await.warm_up(&self.conversation());
-    }
-
-    /// The models `/model` can switch to.
-    pub async fn models(&self) -> Vec<crate::orchestrator::ModelChoice> {
-        self.orchestrator.lock().await.models(&self.conversation())
-    }
-
-    /// Switch to the model `query` names; it lasts across new sessions,
-    /// like the tier, until switched again or the daemon restarts.
-    pub async fn set_model(&self, query: &str) -> Result<crate::orchestrator::ModelChoice> {
-        self.orchestrator
-            .lock()
-            .await
-            .set_model(&self.conversation(), query)
-    }
-
-    /// What the active conversation trusts (`[t]`).
-    pub async fn trusted(&self) -> Vec<String> {
-        self.orchestrator.lock().await.trusted(&self.conversation())
-    }
-
-    pub async fn clear_trust(&self) {
-        self.orchestrator
-            .lock()
-            .await
-            .clear_trust(&self.conversation())
-    }
-
-    pub async fn uses_remote(&self) -> bool {
-        self.orchestrator
-            .lock()
-            .await
-            .uses_remote(&self.conversation())
-    }
-
-    /// The privacy notice for the configured provider.
-    pub async fn privacy(&self) -> String {
+    /// What a new conversation would start with, for `status`.
+    pub async fn default_model(&self) -> (String, String, String) {
         let orch = self.orchestrator.lock().await;
-        orch.destination(&self.conversation()).notice().to_string()
+        let preferred = self.conversations.preferred();
+        let (provider, model, url) = orch.model_info(&preferred);
+        (provider.to_string(), model, url)
     }
 
-    pub async fn session_id(&self) -> String {
-        self.conversation().id.clone()
-    }
-
-    fn get_active_session_path(&self) -> PathBuf {
-        active_session_path(&self.config.general.data_dir)
-    }
-
-    pub fn save_active_session(&self, session_id: &str) -> Result<()> {
-        std::fs::create_dir_all(&self.config.general.data_dir)?;
-        std::fs::write(self.get_active_session_path(), session_id).map_err(JarvisError::Io)?;
+    /// Switch a conversation's tier; only that conversation changes.
+    pub async fn set_remote(&self, session: &str, on: bool) -> Result<()> {
+        let conv = self.conversation(session)?;
+        self.orchestrator.lock().await.set_remote(&conv, on)?;
+        self.conversations.saved(&conv);
         Ok(())
     }
 
-    pub fn load_active_session(&self) -> Option<String> {
-        read_active_session(&self.config.general.data_dir)
+    /// `/bad` or `/good` about a conversation's last turn.
+    pub async fn feedback(&self, session: &str, kind: &str, note: &str) -> Result<()> {
+        let conv = self.conversation(session)?;
+        self.orchestrator.lock().await.feedback(&conv, kind, note)
+    }
+
+    /// Load a conversation's local model in the background (a window
+    /// opening it is about to ask).
+    pub async fn warm_up(&self, session: &str) {
+        if let Ok(conv) = self.conversation(session) {
+            self.orchestrator.lock().await.warm_up(&conv);
+        }
+    }
+
+    /// Load the model a new conversation would use (on start).
+    pub async fn warm_up_default(&self) {
+        let preferred = self.conversations.preferred();
+        self.orchestrator.lock().await.warm_up(&preferred);
+    }
+
+    /// The models a conversation can switch to.
+    pub async fn models(&self, session: &str) -> Result<Vec<crate::orchestrator::ModelChoice>> {
+        let conv = self.conversation(session)?;
+        Ok(self.orchestrator.lock().await.models(&conv))
+    }
+
+    /// Switch a conversation's model; only that conversation changes, and
+    /// new conversations start with it.
+    pub async fn set_model(
+        &self,
+        session: &str,
+        query: &str,
+    ) -> Result<crate::orchestrator::ModelChoice> {
+        let conv = self.conversation(session)?;
+        let chosen = self.orchestrator.lock().await.set_model(&conv, query)?;
+        self.conversations.saved(&conv);
+        Ok(chosen)
+    }
+
+    /// What a conversation trusts (`[t]`).
+    pub async fn trusted(&self, session: &str) -> Result<Vec<String>> {
+        let conv = self.conversation(session)?;
+        Ok(self.orchestrator.lock().await.trusted(&conv))
+    }
+
+    pub async fn clear_trust(&self, session: &str) -> Result<()> {
+        let conv = self.conversation(session)?;
+        self.orchestrator.lock().await.clear_trust(&conv);
+        Ok(())
+    }
+
+    pub async fn uses_remote(&self, session: &str) -> Result<bool> {
+        let conv = self.conversation(session)?;
+        Ok(self.orchestrator.lock().await.uses_remote(&conv))
+    }
+
+    /// The privacy notice for a conversation's tier.
+    pub async fn privacy(&self, session: &str) -> Result<String> {
+        let conv = self.conversation(session)?;
+        let orch = self.orchestrator.lock().await;
+        Ok(orch.destination(&conv).notice().to_string())
+    }
+
+    /// The privacy notice for a new conversation's tier, for `status`.
+    pub async fn default_privacy(&self) -> String {
+        let preferred = self.conversations.preferred();
+        let orch = self.orchestrator.lock().await;
+        orch.destination(&preferred).notice().to_string()
     }
 
     pub fn get_socket_path(&self) -> PathBuf {
@@ -318,24 +304,6 @@ impl Daemon {
     }
 }
 
-fn active_session_path(data_dir: &std::path::Path) -> PathBuf {
-    data_dir.join("active_session")
-}
-
-/// Read the session id saved by the last `session.new` / `session.switch`.
-///
-/// Returns `None` for a missing, empty, or whitespace-only file; a corrupt
-/// file must not turn into a session id containing newlines.
-fn read_active_session(data_dir: &std::path::Path) -> Option<String> {
-    let content = std::fs::read_to_string(active_session_path(data_dir)).ok()?;
-    let trimmed = content.trim().to_string();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,84 +313,54 @@ mod tests {
         let mut config = Config::default();
         config.general.data_dir = dir.to_path_buf();
         config.memory.db_path = dir.join("memory.db");
+        config.memory.recall_enabled = false;
+        // Nothing listens here: no test loads a model on the owner's GPU.
+        config.model.base_url = "http://127.0.0.1:9".into();
+        config.model.models = vec!["qwen2.5:3b".into()];
         config
     }
 
     #[tokio::test]
-    async fn a_chosen_model_lasts_into_a_new_session() {
-        let dir = std::env::temp_dir().join(format!("jarvis-daemon-test-{}", Uuid::new_v4()));
-        let mut config = test_config(&dir);
-        config.model.models = vec!["qwen2.5:3b".into()];
-        let daemon = Daemon::new(config).expect("daemon");
-        assert_eq!(daemon.set_model("qwen").await.unwrap().name, "qwen2.5:3b");
-        daemon.new_session().await.unwrap();
-        assert_eq!(daemon.model_info().await.1, "qwen2.5:3b");
-        let current: Vec<String> = daemon
-            .models()
-            .await
-            .into_iter()
-            .filter(|m| m.current)
-            .map(|m| m.name)
-            .collect();
-        assert_eq!(current, vec!["qwen2.5:3b"]);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn restart_resumes_the_saved_session() {
-        let dir = std::env::temp_dir().join(format!("jarvis-daemon-test-{}", Uuid::new_v4()));
-        let config = test_config(&dir);
-
-        let first = Daemon::new(config.clone()).expect("daemon");
-        let saved = first.new_session().await.expect("new session");
-        first
-            .memory
-            .as_ref()
-            .expect("memory")
-            .add_message(&saved, "user", "remember this")
-            .expect("add message");
-
-        let second = Daemon::new(config).expect("daemon");
-        assert_eq!(second.session_id().await, saved);
-        assert_eq!(
-            second.load_active_session().as_deref(),
-            Some(saved.as_str())
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn a_saved_session_missing_from_the_database_is_ignored() {
-        let dir = std::env::temp_dir().join(format!("jarvis-daemon-test-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        std::fs::write(active_session_path(&dir), Uuid::new_v4().to_string()).expect("save id");
-
-        let daemon = Daemon::new(test_config(&dir)).expect("daemon");
-        assert_ne!(
-            Some(daemon.session_id().await),
-            daemon.load_active_session(),
-            "a stale id must not become the running session"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn deleting_the_current_session_starts_a_new_one() {
+    async fn a_new_conversation_starts_on_the_model_used_last() {
         let dir = std::env::temp_dir().join(format!("jarvis-daemon-test-{}", Uuid::new_v4()));
         let daemon = Daemon::new(test_config(&dir)).expect("daemon");
+        let (first, _, _) = daemon.new_session().await.unwrap();
+        daemon.set_model(&first, "qwen").await.unwrap();
+        let (_, model, remote) = daemon.new_session().await.unwrap();
+        assert_eq!(model, "qwen2.5:3b");
+        assert!(!remote);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
-        let current = daemon.session_id().await;
-        daemon.delete_session(&current).await.expect("delete");
+    #[tokio::test]
+    async fn the_last_session_is_the_one_last_asked_in_and_survives_a_restart() {
+        let dir = std::env::temp_dir().join(format!("jarvis-daemon-test-{}", Uuid::new_v4()));
+        let daemon = Daemon::new(test_config(&dir)).expect("daemon");
+        assert_eq!(daemon.last_session(), None, "a fresh install has none");
+        let (a, _, _) = daemon.new_session().await.unwrap();
+        let (b, _, _) = daemon.new_session().await.unwrap();
+        // The model cannot be reached; the turn still happened in `b`.
+        let _ = daemon
+            .ask_with_footer(&b, "hello", None, None, None, None)
+            .await;
+        assert_eq!(daemon.last_session().as_deref(), Some(b.as_str()));
+        let again = Daemon::new(test_config(&dir)).expect("daemon");
+        assert_eq!(again.last_session().as_deref(), Some(b.as_str()));
+        let _ = a;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
-        let after = daemon.session_id().await;
-        assert_ne!(after, current);
-        assert_eq!(
-            daemon.load_active_session().as_deref(),
-            Some(after.as_str())
-        );
-
+    #[tokio::test]
+    async fn a_deleted_conversation_is_never_the_last_one() {
+        let dir = std::env::temp_dir().join(format!("jarvis-daemon-test-{}", Uuid::new_v4()));
+        let daemon = Daemon::new(test_config(&dir)).expect("daemon");
+        let (a, _, _) = daemon.new_session().await.unwrap();
+        let _ = daemon
+            .ask_with_footer(&a, "hello", None, None, None, None)
+            .await;
+        daemon.delete_session(&a).await.unwrap();
+        assert_eq!(daemon.last_session(), None);
+        assert!(daemon.conversation(&a).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

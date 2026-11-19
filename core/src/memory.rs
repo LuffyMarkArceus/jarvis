@@ -78,21 +78,13 @@ impl MemoryManager {
                 INSERT INTO messages_fts(rowid, session_id, role, content)
                 VALUES (new.id, new.session_id, new.role, new.content);
             END;
-            CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
-                INSERT INTO messages_fts(messages_fts, rowid, session_id, role, content)
-                VALUES('delete', old.id, old.session_id, old.role, old.content);
-            END;
-            CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
-                INSERT INTO messages_fts(messages_fts, rowid, session_id, role, content)
-                VALUES('delete', old.id, old.session_id, old.role, old.content);
-                INSERT INTO messages_fts(rowid, session_id, role, content)
-                VALUES (new.id, new.session_id, new.role, new.content);
-            END;
+
             ",
         )
         .map_err(|e| JarvisError::Memory(format!("Schema init failed: {}", e)))?;
         Self::add_label_column(&conn)?;
-        Self::add_conversation_columns(&conn)
+        Self::add_conversation_columns(&conn)?;
+        Self::repair_fts_triggers(&conn)
     }
 
     /// Databases created before message labels lack the column. Adding it is
@@ -140,6 +132,27 @@ impl MemoryManager {
             migrate("ALTER TABLE messages ADD COLUMN model TEXT")?;
         }
         migrate("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    }
+
+    /// The delete and update triggers keep the search index in step with
+    /// `messages`. They once used FTS5's 'delete' command, which only an
+    /// external-content table accepts - ours stores its own copy - so every
+    /// delete or update of a message failed. Recreated on every start, which
+    /// also repairs databases made with the old ones.
+    fn repair_fts_triggers(conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "DROP TRIGGER IF EXISTS messages_ad;
+             DROP TRIGGER IF EXISTS messages_au;
+             CREATE TRIGGER messages_ad AFTER DELETE ON messages BEGIN
+                 DELETE FROM messages_fts WHERE rowid = old.id;
+             END;
+             CREATE TRIGGER messages_au AFTER UPDATE ON messages BEGIN
+                 DELETE FROM messages_fts WHERE rowid = old.id;
+                 INSERT INTO messages_fts(rowid, session_id, role, content)
+                 VALUES (new.id, new.session_id, new.role, new.content);
+             END;",
+        )
+        .map_err(|e| JarvisError::Memory(format!("Migration failed: {}", e)))
     }
 
     /// A conversation's model (on its tier) and tier; `None` if there is no
@@ -422,7 +435,8 @@ impl MemoryManager {
         Ok(messages)
     }
 
-    pub fn prune_empty_sessions(&self) -> Result<usize> {
+    /// Delete conversations with no messages, except those in `keep`.
+    pub fn prune_empty_sessions(&self, keep: &[String]) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
@@ -436,7 +450,9 @@ impl MemoryManager {
 
         let mut to_delete: Vec<String> = Vec::new();
         for r in rows.flatten() {
-            to_delete.push(r);
+            if !keep.contains(&r) {
+                to_delete.push(r);
+            }
         }
         let count = to_delete.len();
         for id in to_delete {
@@ -1225,6 +1241,82 @@ mod tests {
         assert_eq!(found.len(), 1);
 
         drop(manager);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // Real use, found 2026-11-18: the delete and update triggers used FTS5's
+    // 'delete' command, which only external-content tables accept, so
+    // deleting a conversation with messages always failed ("SQL logic
+    // error"), and so did any update of a message.
+
+    fn fts_test_config() -> (Config, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("jarvis-fts-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut config = Config::default();
+        config.general.data_dir = dir.clone();
+        config.memory.db_path = dir.join("memory.db");
+        (config, dir)
+    }
+
+    #[test]
+    fn deleting_a_conversation_with_messages_works_and_leaves_search() {
+        let (config, dir) = fts_test_config();
+        let memory = MemoryManager::new(config).unwrap();
+        memory
+            .add_message("a", "user", "remember the kumquat")
+            .unwrap();
+        memory
+            .add_message("b", "user", "a kumquat elsewhere")
+            .unwrap();
+        memory.delete_session("a").unwrap();
+        let found: Vec<String> = memory
+            .recall("kumquat", 10)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.session_id)
+            .collect();
+        assert_eq!(found, vec!["b".to_string()]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn updating_a_message_keeps_search_in_step() {
+        let (config, dir) = fts_test_config();
+        let memory = MemoryManager::new(config).unwrap();
+        let id = memory
+            .add_message("a", "user", "the old word persimmon")
+            .unwrap();
+        {
+            let conn = memory.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE messages SET content = 'the new word lychee' WHERE id = ?1",
+                params![id],
+            )
+            .unwrap();
+        }
+        assert!(memory.recall("persimmon", 10).unwrap().is_empty());
+        assert_eq!(memory.recall("lychee", 10).unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_database_with_the_old_triggers_is_repaired() {
+        let (config, dir) = fts_test_config();
+        {
+            let memory = MemoryManager::new(config.clone()).unwrap();
+            let conn = memory.conn.lock().unwrap();
+            conn.execute_batch(
+                "DROP TRIGGER messages_ad;
+                 CREATE TRIGGER messages_ad AFTER DELETE ON messages BEGIN
+                     INSERT INTO messages_fts(messages_fts, rowid, session_id, role, content)
+                     VALUES('delete', old.id, old.session_id, old.role, old.content);
+                 END;",
+            )
+            .unwrap();
+        }
+        let memory = MemoryManager::new(config).unwrap();
+        memory.add_message("a", "user", "hello").unwrap();
+        memory.delete_session("a").unwrap();
         let _ = std::fs::remove_dir_all(dir);
     }
 }
