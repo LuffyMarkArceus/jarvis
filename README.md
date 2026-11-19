@@ -266,6 +266,17 @@ default = false               # sessions start local
 `jarvis tier remote` (or `/remote` in the TUI) switches to it and `jarvis
 tier local` back.
 
+### Windows and conversations
+
+Each TUI window is its own conversation: its own history, model, tier, trust
+and `/bad`. A new window starts a new conversation; `jarvis up --continue`
+(or `jarvis-tui --continue`) opens the one used last, and Ctrl+S / `/sessions`
+resumes any other. A window keeps its conversation across reconnects and
+daemon restarts. Nothing one window does - `/new`, `/model`, `/remote`, `[t]` -
+changes another. `jarvis ask` asks in a new conversation each time;
+`jarvis model` and `jarvis tier` act on the conversation used last, and say
+which. `jarvis session last` shows it.
+
 ### Switching models
 
 List more models per tier with `models`, then switch at any point in a
@@ -286,9 +297,9 @@ In the TUI, `/model` (or `Ctrl+P`) opens a picker - arrows, Enter - and
 `/model qwen what is 2+2?` switches, then sends the rest as your message. The
 model's tier comes with it, so picking a remote model sends the conversation
 through the same privacy rules as `/remote`. The header and each answer's
-footer name the model that answered. The choice lasts across new sessions
-until you switch again or the daemon restarts; `jarvis model` does the same
-from the shell. When a remote request is not sent, Jarvis asks whether the
+footer name the model that answered. The choice belongs to that conversation and
+survives a restart; switch as often as you like - each answer records the
+model that wrote it. New conversations start with the model you used last. When a remote request is not sent, Jarvis asks whether the
 local model should answer instead. "Always allow" answers and `jarvis egress
 allow <folder>` add a folder to the allow-list; `jarvis egress list` shows
 it.
