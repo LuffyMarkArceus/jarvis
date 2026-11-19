@@ -72,3 +72,21 @@ shorter prompts are the next lever.
 | Nothing on the TUI's side recorded what it sent, so the incident could not be reconstructed | ours | `tui.log` per window |
 | `jarvis daemon start` left the daemon in the starting terminal's process group with the terminal as input; SIGHUP (closing that terminal) stopped it; SIGTERM left the socket and PID file behind | ours | Own process group, no input, SIGHUP ignored, clean SIGTERM/SIGINT; tested with the real binary |
 
+## 2026-11-18, three /bad (session 08ff9130; the window showed 313a8d0c)
+
+The window's header said 313a8d0c, but a test of two windows run against the
+live daemon had moved every window to 08ff9130 - the shared-session bug that
+Milestone 6.5a fixes. The feedback was recorded, against the session the
+turns were really in.
+
+| Finding | Whose | Done |
+| --- | --- | --- |
+| "open the episode 001 of BleaCH on my DATA drive" ran `episode 001` and said "Started in the background" | ours | "open X" launches X only if it is an installed app (from the `.desktop` files); otherwise the model finds and opens it, with files and the shell |
+| "open vscode" ran `vscode` and said it had started; the program is `code` | ours | Resolved through the app list: VS Code's keyword is vscode, its Exec is `code` |
+| A background launch of a missing program reported success (`setsid X &` always does) | ours | The program is checked first; missing, it fails and says so |
+| "watch these episodes on my DATA drive in mpv" was offered no tools; nemotron made up a `find` result inside a copy of our `<untrusted>` marker | ours, then the model's | Media and drive words offer files and the shell; the marker is scrubbed from answers, and a copy with no tool run is called out |
+| The model did not know "DATA drive" is /mnt/storage and guessed /mnt/DATA | ours | Drive labels and their folders go to the model when it can act on files |
+
+Re-run on nemotron: both requests now search /mnt/storage, then ask before
+sending its listing to the remote model ("always allow" stops that).
+
