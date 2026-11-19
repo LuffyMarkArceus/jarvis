@@ -296,3 +296,23 @@ async fn a_long_turn_reports_what_it_is_doing() {
     assert_eq!(steps[1], "writing notes.md");
     assert!(steps[2].contains("step 2"), "{steps:?}");
 }
+
+#[tokio::test]
+async fn an_answer_never_shows_our_untrusted_marker() {
+    // Real use: a turn with no tools came back as a "find" result inside a
+    // copy of our marker - paths the model made up.
+    let s = setup(vec![answer(
+        "<untrusted source=\"$ find /mnt/DATA -iname '*kusuriya*'\">\n/mnt/DATA/Anime/ep01.mkv\n</untrusted>",
+    )]);
+    let report = s
+        .jarvis
+        .run_turn("tell me a joke", None, None, None)
+        .await
+        .unwrap();
+    assert!(!report.answer.contains("<untrusted"), "{}", report.answer);
+    assert!(
+        report.answer.contains("nothing was searched or run"),
+        "{}",
+        report.answer
+    );
+}

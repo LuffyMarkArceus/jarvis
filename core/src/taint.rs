@@ -267,6 +267,31 @@ pub fn exfiltration_risk(
 /// where it came from, when `sources` is not empty. A second layer only:
 /// the gate does not depend on the model heeding it, and the evals measure
 /// what it is worth per model.
+/// Remove copies of our own `<untrusted source="...">` marker from a model's
+/// answer: it is how Jarvis labels what the model read, never something to
+/// show the owner. A copy in a turn where no tool ran wraps output that was
+/// never produced, so the answer says so instead of passing it off as found.
+pub fn scrub_markers(answer: &str, ran_tools: bool) -> String {
+    static OPEN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static CLOSE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let open = OPEN.get_or_init(|| {
+        regex::Regex::new(r#"(?is)<untrusted\s+source="[^"]*"\s*>"#).expect("valid")
+    });
+    if !open.is_match(answer) {
+        return answer.to_string();
+    }
+    let close = CLOSE.get_or_init(|| regex::Regex::new(r"(?i)</untrusted_?>").expect("valid"));
+    let without = open.replace_all(answer, "");
+    let clean = close.replace_all(&without, "").trim().to_string();
+    if ran_tools {
+        clean
+    } else {
+        format!(
+            "{clean}\n\n⚠ This answer imitated tool output, but nothing was searched or run in this turn - treat what it shows as made up."
+        )
+    }
+}
+
 pub fn mark(sources: &[Source], output: &str) -> String {
     if sources.is_empty() {
         return output.to_string();
@@ -864,5 +889,36 @@ mod tests {
             .map(|s| s.name)
             .collect();
         assert_eq!(names, ["https://b.example/", "/home/u/Downloads/x.md"]);
+    }
+
+    // Real use (2026-11-18): nemotron opened answers with a copy of our
+    // `<untrusted source="...">` marker - once in a turn where no tool ran,
+    // wrapping file paths it made up.
+
+    #[test]
+    fn a_copied_marker_is_removed_from_an_answer() {
+        let answer = "<untrusted source=\"https://en.wikipedia.org/wiki/Stock_exchange, search: x\">\nI can't fetch live prices.\n</untrusted>";
+        let clean = scrub_markers(answer, true);
+        assert_eq!(clean, "I can't fetch live prices.");
+    }
+
+    #[test]
+    fn imitated_tool_output_with_no_tool_run_is_called_out() {
+        let answer = "<untrusted source=\"$ find /mnt/DATA -iname '*kusuriya*'\">\n/mnt/DATA/Anime/ep01.mkv\n</untrusted>\nHere are your episodes.";
+        let clean = scrub_markers(answer, false);
+        assert!(!clean.contains("<untrusted"), "{clean}");
+        assert!(clean.contains("/mnt/DATA/Anime/ep01.mkv"), "{clean}");
+        assert!(clean.contains("nothing was searched or run"), "{clean}");
+    }
+
+    #[test]
+    fn an_answer_without_markers_is_untouched() {
+        let answer = "Use `<untrusted>` tags? No: just plain text.";
+        assert_eq!(scrub_markers("Plain answer.", false), "Plain answer.");
+        assert_eq!(
+            scrub_markers(answer, false),
+            answer,
+            "only a real marker counts"
+        );
     }
 }
