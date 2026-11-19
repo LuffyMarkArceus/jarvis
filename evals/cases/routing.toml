@@ -78,3 +78,21 @@ note = "Real use, 2026-11-10: the trailing '?' made it a file search for 'it out
 [case.expect]
 route = "Model"
 tools_exclude = ["filesystem.search", "mcp.search.search", "mcp.fetch.fetch"]
+
+[[case]]
+id = "real.open_media_file"
+input = "Can you open the episode 001 of BleaCH on my DATA drive? I have to watch that now."
+tags = ["routing", "real-use"]
+note = "Real use, 2026-11-18: 'open X' ran `episode 001` as a program and said it had started. X is no installed app: it is a file to find, the model's job, with files and the shell."
+[case.expect]
+route = "Model"
+excludes = ["started in the background", "<untrusted"]
+
+[[case]]
+id = "real.watch_in_mpv"
+input = "I want to watch Kusuriya no Hitoigoto episodes on my DATA drive, open them in mpv app for me to view those video episodes."
+tags = ["routing", "honesty", "real-use"]
+note = "Real use, 2026-11-18: offered no tools, nemotron answered with a find result it made up, inside a copy of our <untrusted> marker."
+[case.expect]
+route = "Model"
+excludes = ["<untrusted"]
