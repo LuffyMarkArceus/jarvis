@@ -225,22 +225,27 @@ impl Orchestrator {
     /// Also returns where the recalled text came from: `memory`, plus the
     /// label each recalled message was stored with, so a file shown in an
     /// earlier session does not leave as "memory".
-    pub(super) fn with_recall(&self, input: &str, prompt: String) -> (String, Label) {
-        let (block, label) = self.recall_block(input).unwrap_or_default();
+    pub(super) fn with_recall(
+        &self,
+        conv: &Conversation,
+        input: &str,
+        prompt: String,
+    ) -> (String, Label) {
+        let (block, label) = self.recall_block(conv, input).unwrap_or_default();
         (append_recall(prompt, block), label)
     }
 
-    pub(super) fn recall_block(&self, input: &str) -> Option<(Option<String>, Label)> {
+    pub(super) fn recall_block(
+        &self,
+        conv: &Conversation,
+        input: &str,
+    ) -> Option<(Option<String>, Label)> {
         if !self.config.memory.recall_enabled {
             return None;
         }
         let memory = self.memory.as_ref()?;
         let results = memory
-            .recall_in(
-                input,
-                self.config.memory.recall_limit,
-                Some(&self.session_id),
-            )
+            .recall_in(input, self.config.memory.recall_limit, Some(&conv.id))
             .ok()?;
         // Asking an old question again matches that question in FTS; there is
         // nothing to remember and it must not pose as memory.
@@ -253,7 +258,7 @@ impl Orchestrator {
         // prompt on every question (every message stored before labels is
         // unknown) would be answered by reflex. Required content - what the
         // user asked about - is still asked about in ask_model.
-        let results: Vec<_> = if self.destination().is_remote() {
+        let results: Vec<_> = if self.destination(conv).is_remote() {
             let policy = self.egress_policy();
             let before = results.len();
             let kept: Vec<_> = results
@@ -288,18 +293,18 @@ impl Orchestrator {
 
     /// Recent history, oldest first. How much of it reaches the model is
     /// decided by [`crate::context::assemble`], not here.
-    pub(super) fn history_for_prompt(&self) -> Vec<Message> {
+    pub(super) fn history_for_prompt(&self, conv: &Conversation) -> Vec<Message> {
         let Some(ref m) = self.memory else {
             return Vec::new();
         };
-        m.get_recent_messages(&self.session_id, self.config.context.max_history_fetch)
+        m.get_recent_messages(&conv.id, self.config.context.max_history_fetch)
             .unwrap_or_default()
     }
 
     /// The answer when the model did not respond. Names the model and where
     /// it is: "the local model" was wrong once a remote tier existed.
-    pub(super) fn fallback_answer(&self, error: &JarvisError) -> String {
-        let (cfg, _) = self.tier();
+    pub(super) fn fallback_answer(&self, conv: &Conversation, error: &JarvisError) -> String {
+        let (cfg, _) = self.tier(conv);
         format!(
             "I could not reach {} ({}), so I cannot answer that yet.\n\nReason: {}",
             cfg.default_model,
@@ -316,9 +321,15 @@ impl Orchestrator {
         )
     }
 
-    pub(super) fn persist_assistant(&self, content: &str, label: &Label) {
+    pub(super) fn persist_assistant(
+        &self,
+        conv: &Conversation,
+        content: &str,
+        label: &Label,
+        model: Option<&str>,
+    ) {
         if let Some(ref m) = self.memory {
-            let _ = m.add_labeled_message(&self.session_id, "assistant", content, Some(label));
+            let _ = m.add_answer(&conv.id, content, Some(label), model);
         }
     }
 }

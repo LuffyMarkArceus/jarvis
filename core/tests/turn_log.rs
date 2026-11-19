@@ -67,6 +67,7 @@ impl ConfirmationHandler for Slow {
 struct Setup {
     dir: PathBuf,
     jarvis: Orchestrator,
+    conv: std::sync::Arc<jarvis_core::conversation::Conversation>,
 }
 
 impl Drop for Setup {
@@ -93,7 +94,8 @@ fn setup(replies: Vec<ChatTurn>) -> Setup {
         next: Mutex::new(0),
     });
     let jarvis = Orchestrator::with_parts(config, provider, permissions);
-    Setup { dir, jarvis }
+    let conv = jarvis.new_conversation();
+    Setup { dir, conv, jarvis }
 }
 
 impl Setup {
@@ -123,7 +125,7 @@ async fn the_providers_breakdown_reaches_the_report() {
     let s = setup(vec![answer("hello there")]);
     let report = s
         .jarvis
-        .run_turn("tell me a joke", None, None, None)
+        .run_turn(&s.conv, "tell me a joke", None, None, None)
         .await
         .unwrap();
     let model = &report.timing.model[0];
@@ -140,8 +142,10 @@ async fn the_providers_breakdown_reaches_the_report() {
 #[tokio::test]
 async fn time_spent_on_a_prompt_is_the_owners_not_jarvis() {
     let s = setup(vec![]);
+    let jarvis = rebuild(&s, s.write_turn());
     let s = Setup {
-        jarvis: rebuild(&s, s.write_turn()),
+        conv: jarvis.new_conversation(),
+        jarvis,
         dir: s.dir.clone(),
     };
     let owner = Slow {
@@ -150,7 +154,7 @@ async fn time_spent_on_a_prompt_is_the_owners_not_jarvis() {
     };
     let report = s
         .jarvis
-        .run_turn(WRITE, Some(&owner), None, None)
+        .run_turn(&s.conv, WRITE, Some(&owner), None, None)
         .await
         .unwrap();
     assert!(report.timing.you_ms >= 120, "{:?}", report.timing);
@@ -186,14 +190,19 @@ fn rebuild(s: &Setup, replies: Vec<ChatTurn>) -> Orchestrator {
 async fn every_turn_is_logged_with_its_friction() {
     let s = setup(vec![]);
     let jarvis = rebuild(&s, s.write_turn());
+    let conv = jarvis.new_conversation();
     let no = Slow {
         delay: std::time::Duration::ZERO,
         yes: false,
     };
-    jarvis.run_turn(WRITE, Some(&no), None, None).await.unwrap();
+    jarvis
+        .run_turn(&conv, WRITE, Some(&no), None, None)
+        .await
+        .unwrap();
     // Asked again in other words, straight away: a sign the first failed.
     jarvis
         .run_turn(
+            &conv,
             "please create notes.md with the word hi in it",
             Some(&no),
             None,
@@ -236,7 +245,7 @@ async fn a_cancelled_turn_is_logged_too() {
     registry.cancel(id);
     let result = s
         .jarvis
-        .run_turn("tell me a joke", None, Some(&cancel), None)
+        .run_turn(&s.conv, "tell me a joke", None, Some(&cancel), None)
         .await;
     assert!(result.is_err());
     let lines = s.lines();
@@ -251,10 +260,16 @@ async fn a_cancelled_turn_is_logged_too() {
 async fn bad_and_good_point_at_the_last_turn() {
     let s = setup(vec![answer("the capital of Australia is Sydney")]);
     s.jarvis
-        .run_turn("what is the capital of australia?", None, None, None)
+        .run_turn(
+            &s.conv,
+            "what is the capital of australia?",
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
-    s.jarvis.feedback("bad", "it is Canberra").unwrap();
+    s.jarvis.feedback(&s.conv, "bad", "it is Canberra").unwrap();
     let lines = s.lines();
     assert_eq!(lines.len(), 2);
     assert_eq!(lines[1]["type"], "feedback");
@@ -266,7 +281,11 @@ async fn bad_and_good_point_at_the_last_turn() {
 #[tokio::test]
 async fn feedback_before_any_turn_says_so() {
     let s = setup(vec![]);
-    let err = s.jarvis.feedback("bad", "").unwrap_err().to_string();
+    let err = s
+        .jarvis
+        .feedback(&s.conv, "bad", "")
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("no turn"), "{}", err);
 }
 
@@ -276,13 +295,14 @@ async fn a_long_turn_reports_what_it_is_doing() {
     // only a spinner, nothing to tell working from stuck.
     let s = setup(vec![]);
     let jarvis = rebuild(&s, s.write_turn());
+    let conv = jarvis.new_conversation();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let yes = Slow {
         delay: std::time::Duration::ZERO,
         yes: true,
     };
     jarvis
-        .run_turn_observed(WRITE, Some(&yes), None, None, Some(&tx))
+        .run_turn_observed(&conv, WRITE, Some(&yes), None, None, Some(&tx))
         .await
         .unwrap();
     drop(tx);
@@ -306,7 +326,7 @@ async fn an_answer_never_shows_our_untrusted_marker() {
     )]);
     let report = s
         .jarvis
-        .run_turn("tell me a joke", None, None, None)
+        .run_turn(&s.conv, "tell me a joke", None, None, None)
         .await
         .unwrap();
     assert!(!report.answer.contains("<untrusted"), "{}", report.answer);

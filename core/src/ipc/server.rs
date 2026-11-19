@@ -297,6 +297,36 @@ async fn handle_client(
     Ok(())
 }
 
+/// The conversation a request is for. Conversation requests must say: a
+/// default would be shared state under another name (Milestone 6.5a).
+fn session_of(request: &Request) -> std::result::Result<String, Response> {
+    match request.params.get("session").and_then(Value::as_str) {
+        Some(s) if !s.is_empty() => Ok(s.to_string()),
+        _ => Err(Response::err(
+            request.id,
+            format!(
+                "'{}' needs a \"session\": the conversation it is for",
+                request.method
+            ),
+        )),
+    }
+}
+
+/// The reply to a model or tier switch: what the conversation uses now.
+async fn switched(id: Uuid, daemon: &Daemon, session: &str) -> Response {
+    let (provider, model, _) = daemon.model_info(session).await.unwrap_or_default();
+    let remote = daemon.uses_remote(session).await.unwrap_or(false);
+    Response::ok(
+        id,
+        serde_json::json!({
+            "tier": if remote { "remote" } else { "local" },
+            "model": model,
+            "provider": provider,
+            "privacy": daemon.privacy(session).await.unwrap_or_default(),
+        }),
+    )
+}
+
 async fn handle_request(
     request: Request,
     daemon: &Arc<Mutex<Daemon>>,
@@ -314,8 +344,7 @@ async fn handle_request(
 
     match request.method.as_str() {
         "status" => {
-            let sid = daemon_lock.session_id().await;
-            let (provider, model, base_url) = daemon_lock.model_info().await;
+            let (provider, model, base_url) = daemon_lock.default_model().await;
             Response::ok(
                 request.id,
                 serde_json::json!({
@@ -323,10 +352,10 @@ async fn handle_request(
                     "provider": provider,
                     "model": model,
                     "base_url": base_url,
-                    "privacy": daemon_lock.privacy().await,
-                    "tier": if daemon_lock.uses_remote().await { "remote" } else { "local" },
+                    "tier": if daemon_lock.default_remote() { "remote" } else { "local" },
+                    "privacy": daemon_lock.default_privacy().await,
                     "tools": daemon_lock.list_tools().await,
-                    "session_id": sid,
+                    "last_session": daemon_lock.last_session(),
                 }),
             )
         }
@@ -347,51 +376,62 @@ async fn handle_request(
                 Err(e) => Response::err(request.id, e.to_string()),
             }
         }
+        "session.new" => match daemon_lock.new_session().await {
+            Ok((id, model, remote)) => Response::ok(
+                request.id,
+                serde_json::json!({
+                    "session_id": id,
+                    "model": model,
+                    "tier": if remote { "remote" } else { "local" },
+                }),
+            ),
+            Err(e) => Response::err(request.id, e.to_string()),
+        },
+        "session.last" => Response::ok(
+            request.id,
+            serde_json::json!({ "session_id": daemon_lock.last_session() }),
+        ),
         "tier.set" => {
+            let session = match session_of(&request) {
+                Ok(s) => s,
+                Err(r) => return r,
+            };
             let remote = request.params.get("tier").and_then(Value::as_str) == Some("remote");
-            match daemon_lock.set_remote(remote).await {
-                Ok(()) => {
-                    let (provider, model, _) = daemon_lock.model_info().await;
-                    Response::ok(
-                        request.id,
-                        serde_json::json!({
-                            "tier": if remote { "remote" } else { "local" },
-                            "model": model,
-                            "provider": provider,
-                            "privacy": daemon_lock.privacy().await,
-                        }),
-                    )
-                }
+            match daemon_lock.set_remote(&session, remote).await {
+                Ok(()) => switched(request.id, &daemon_lock, &session).await,
                 Err(e) => Response::err(request.id, e.to_string()),
             }
         }
-        "model.list" => Response::ok(
-            request.id,
-            serde_json::json!({ "models": daemon_lock.models().await }),
-        ),
+        "model.list" => {
+            let session = match session_of(&request) {
+                Ok(s) => s,
+                Err(r) => return r,
+            };
+            match daemon_lock.models(&session).await {
+                Ok(models) => Response::ok(request.id, serde_json::json!({ "models": models })),
+                Err(e) => Response::err(request.id, e.to_string()),
+            }
+        }
         "model.set" => {
+            let session = match session_of(&request) {
+                Ok(s) => s,
+                Err(r) => return r,
+            };
             let query = request
                 .params
                 .get("model")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            match daemon_lock.set_model(query).await {
-                Ok(chosen) => {
-                    let (provider, model, _) = daemon_lock.model_info().await;
-                    Response::ok(
-                        request.id,
-                        serde_json::json!({
-                            "tier": if chosen.remote { "remote" } else { "local" },
-                            "model": model,
-                            "provider": provider,
-                            "privacy": daemon_lock.privacy().await,
-                        }),
-                    )
-                }
+            match daemon_lock.set_model(&session, query).await {
+                Ok(_) => switched(request.id, &daemon_lock, &session).await,
                 Err(e) => Response::err(request.id, e.to_string()),
             }
         }
         "feedback" => {
+            let session = match session_of(&request) {
+                Ok(s) => s,
+                Err(r) => return r,
+            };
             let kind = match request.params.get("kind").and_then(Value::as_str) {
                 Some(k @ ("bad" | "good")) => k.to_string(),
                 _ => return Response::err(request.id, "kind must be 'bad' or 'good'".into()),
@@ -401,48 +441,30 @@ async fn handle_request(
                 .get("note")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            match daemon_lock.feedback(&kind, note).await {
+            match daemon_lock.feedback(&session, &kind, note).await {
                 Ok(()) => Response::ok(request.id, serde_json::json!({ "kind": kind })),
                 Err(e) => Response::err(request.id, e.to_string()),
             }
         }
-        "trust.list" => Response::ok(
-            request.id,
-            serde_json::json!({ "trusted": daemon_lock.trusted().await }),
-        ),
-        "trust.clear" => {
-            daemon_lock.clear_trust().await;
-            Response::ok(request.id, serde_json::json!({ "trusted": [] }))
-        }
-        "session.new" => match daemon_lock.new_session().await {
-            Ok(sid) => Response::ok(request.id, serde_json::json!({"session_id": sid})),
-            Err(e) => Response::err(request.id, e.to_string()),
-        },
-        "session.switch" => {
-            let sid = match request.params.get("session_id").and_then(|p| p.as_str()) {
-                Some(p) => p.to_string(),
-                None => {
-                    return Response::err(request.id, "Missing 'session_id' parameter".to_string())
-                }
+        "trust.list" => {
+            let session = match session_of(&request) {
+                Ok(s) => s,
+                Err(r) => return r,
             };
-            match daemon_lock.set_session(&sid).await {
-                Ok(_) => Response::ok(request.id, serde_json::json!({"session_id": sid})),
+            match daemon_lock.trusted(&session).await {
+                Ok(trusted) => Response::ok(request.id, serde_json::json!({ "trusted": trusted })),
                 Err(e) => Response::err(request.id, e.to_string()),
             }
         }
-        "session.current" => {
-            // A client connecting is the moment someone is about to ask.
-            daemon_lock.warm_up().await;
-            let sid = daemon_lock.session_id().await;
-            let (_, model, _) = daemon_lock.model_info().await;
-            Response::ok(
-                request.id,
-                serde_json::json!({
-                    "session_id": sid,
-                    "model": model,
-                    "tier": if daemon_lock.uses_remote().await { "remote" } else { "local" },
-                }),
-            )
+        "trust.clear" => {
+            let session = match session_of(&request) {
+                Ok(s) => s,
+                Err(r) => return r,
+            };
+            match daemon_lock.clear_trust(&session).await {
+                Ok(()) => Response::ok(request.id, serde_json::json!({ "trusted": [] })),
+                Err(e) => Response::err(request.id, e.to_string()),
+            }
         }
         "session.delete" => {
             let sid = match request.params.get("session_id").and_then(|p| p.as_str()) {
@@ -463,8 +485,32 @@ async fn handle_request(
                     return Response::err(request.id, "Missing 'session_id' parameter".to_string())
                 }
             };
+            if let Err(e) = daemon_lock.conversation(&sid) {
+                return Response::err(request.id, e.to_string());
+            }
+            // A window opening a conversation is about to ask in it.
+            daemon_lock.warm_up(&sid).await;
             match daemon_lock.get_session_messages(&sid).await {
-                Ok(messages) => Response::ok(request.id, serde_json::json!({"messages": messages})),
+                Ok(messages) => {
+                    let messages: Vec<serde_json::Value> = messages
+                        .iter()
+                        .map(|m| {
+                            let mut v = serde_json::to_value(m).unwrap_or_default();
+                            if let Some(model) = &m.model {
+                                v["footer"] = daemon_lock.answer_footer(model).into();
+                            }
+                            v
+                        })
+                        .collect();
+                    Response::ok(
+                        request.id,
+                        serde_json::json!({
+                            "messages": messages,
+                            "model": daemon_lock.model_info(&sid).await.map(|m| m.1).unwrap_or_default(),
+                            "tier": if daemon_lock.uses_remote(&sid).await.unwrap_or(false) { "remote" } else { "local" },
+                        }),
+                    )
+                }
                 Err(e) => Response::err(request.id, e.to_string()),
             }
         }
@@ -521,6 +567,10 @@ async fn handle_ask(
         Some(p) => p.to_string(),
         None => return Response::err(request.id, "Missing 'prompt' parameter".to_string()),
     };
+    let session = match session_of(&request) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
 
     let id = request.id;
     // Normally registered by the reader loop. The fallback keeps the function
@@ -561,6 +611,7 @@ async fn handle_ask(
         };
         daemon_lock
             .ask_with_footer(
+                &session,
                 &prompt,
                 Some(&confirmer),
                 Some(&cancel),

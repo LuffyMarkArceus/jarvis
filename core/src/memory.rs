@@ -20,6 +20,10 @@ pub struct Message {
     /// labels existed (see `Label::unknown`).
     #[serde(default)]
     pub label: Option<Label>,
+    /// The model that wrote an answer; `None` for user messages, answers
+    /// no model wrote, and messages stored before models were recorded.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -74,20 +78,13 @@ impl MemoryManager {
                 INSERT INTO messages_fts(rowid, session_id, role, content)
                 VALUES (new.id, new.session_id, new.role, new.content);
             END;
-            CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
-                INSERT INTO messages_fts(messages_fts, rowid, session_id, role, content)
-                VALUES('delete', old.id, old.session_id, old.role, old.content);
-            END;
-            CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
-                INSERT INTO messages_fts(messages_fts, rowid, session_id, role, content)
-                VALUES('delete', old.id, old.session_id, old.role, old.content);
-                INSERT INTO messages_fts(rowid, session_id, role, content)
-                VALUES (new.id, new.session_id, new.role, new.content);
-            END;
+
             ",
         )
         .map_err(|e| JarvisError::Memory(format!("Schema init failed: {}", e)))?;
-        Self::add_label_column(&conn)
+        Self::add_label_column(&conn)?;
+        Self::add_conversation_columns(&conn)?;
+        Self::repair_fts_triggers(&conn)
     }
 
     /// Databases created before message labels lack the column. Adding it is
@@ -105,6 +102,140 @@ impl MemoryManager {
                 .map_err(|e| JarvisError::Memory(format!("Migration failed: {}", e)))?;
         }
         Ok(())
+    }
+
+    /// Milestone 6.5a: each conversation's model and tier, each answer's
+    /// model, and small settings ("last used"). Additive, and a no-op on a
+    /// database that already has them.
+    fn add_conversation_columns(conn: &Connection) -> Result<()> {
+        let has = |table: &str, column: &str| -> Result<bool> {
+            conn.query_row(
+                &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"),
+                params![column],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|n| n > 0)
+            .map_err(|e| JarvisError::Memory(format!("Schema check failed: {}", e)))
+        };
+        let migrate = |sql: &str| {
+            conn.execute(sql, [])
+                .map(|_| ())
+                .map_err(|e| JarvisError::Memory(format!("Migration failed: {}", e)))
+        };
+        if !has("sessions", "model")? {
+            migrate("ALTER TABLE sessions ADD COLUMN model TEXT")?;
+        }
+        if !has("sessions", "remote")? {
+            migrate("ALTER TABLE sessions ADD COLUMN remote INTEGER NOT NULL DEFAULT 0")?;
+        }
+        if !has("messages", "model")? {
+            migrate("ALTER TABLE messages ADD COLUMN model TEXT")?;
+        }
+        migrate("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    }
+
+    /// The delete and update triggers keep the search index in step with
+    /// `messages`. They once used FTS5's 'delete' command, which only an
+    /// external-content table accepts - ours stores its own copy - so every
+    /// delete or update of a message failed. Recreated on every start, which
+    /// also repairs databases made with the old ones.
+    fn repair_fts_triggers(conn: &Connection) -> Result<()> {
+        // Only once, and atomically: a message deleted between a DROP and
+        // its CREATE would leave its text searchable.
+        let repaired: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'trigger'
+                 AND name IN ('messages_ad', 'messages_au')
+                 AND sql LIKE '%WHERE rowid = old.id%'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| JarvisError::Memory(format!("Migration failed: {}", e)))?;
+        if repaired == 2 {
+            return Ok(());
+        }
+        conn.execute_batch(
+            "BEGIN IMMEDIATE;
+             DROP TRIGGER IF EXISTS messages_ad;
+             DROP TRIGGER IF EXISTS messages_au;
+             CREATE TRIGGER messages_ad AFTER DELETE ON messages BEGIN
+                 DELETE FROM messages_fts WHERE rowid = old.id;
+             END;
+             CREATE TRIGGER messages_au AFTER UPDATE ON messages BEGIN
+                 DELETE FROM messages_fts WHERE rowid = old.id;
+                 INSERT INTO messages_fts(rowid, session_id, role, content)
+                 VALUES (new.id, new.session_id, new.role, new.content);
+             END;
+             COMMIT;",
+        )
+        .map_err(|e| JarvisError::Memory(format!("Migration failed: {}", e)))
+    }
+
+    /// A conversation's model (on its tier) and tier; `None` if there is no
+    /// such conversation.
+    pub fn session_settings(&self, session_id: &str) -> Result<Option<(Option<String>, bool)>> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn.query_row(
+            "SELECT model, remote FROM sessions WHERE id = ?1",
+            params![session_id],
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)? != 0)),
+        );
+        match row {
+            Ok(found) => Ok(Some(found)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(JarvisError::Memory(format!("Query failed: {}", e))),
+        }
+    }
+
+    pub fn save_session_settings(
+        &self,
+        session_id: &str,
+        model: Option<&str>,
+        remote: bool,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sessions SET model = ?2, remote = ?3 WHERE id = ?1",
+            params![session_id, model, remote as i64],
+        )
+        .map(|_| ())
+        .map_err(|e| JarvisError::Memory(format!("Failed to save session settings: {}", e)))
+    }
+
+    pub fn setting(&self, key: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        match conn.query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            params![key],
+            |row| row.get(0),
+        ) {
+            Ok(value) => Ok(Some(value)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(JarvisError::Memory(format!("Query failed: {}", e))),
+        }
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )
+        .map(|_| ())
+        .map_err(|e| JarvisError::Memory(format!("Failed to save setting: {}", e)))
+    }
+
+    /// An answer, with the model that wrote it - in the same insert, so an
+    /// answer never exists without its model.
+    pub fn add_answer(
+        &self,
+        session_id: &str,
+        content: &str,
+        label: Option<&Label>,
+        model: Option<&str>,
+    ) -> Result<i64> {
+        self.insert_message(session_id, "assistant", content, label, model)
     }
 
     pub fn create_session(&self, session_id: &str) -> Result<()> {
@@ -144,12 +275,23 @@ impl MemoryManager {
         content: &str,
         label: Option<&Label>,
     ) -> Result<i64> {
+        self.insert_message(session_id, role, content, label, None)
+    }
+
+    fn insert_message(
+        &self,
+        session_id: &str,
+        role: &str,
+        content: &str,
+        label: Option<&Label>,
+        model: Option<&str>,
+    ) -> Result<i64> {
         self.create_session(session_id)?;
         let label = label.and_then(|l| serde_json::to_string(l).ok());
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO messages (session_id, role, content, label) VALUES (?1, ?2, ?3, ?4)",
-            params![session_id, role, content, label],
+            "INSERT INTO messages (session_id, role, content, label, model) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![session_id, role, content, label, model],
         )
         .map_err(|e| JarvisError::Memory(format!("Failed to add message: {}", e)))?;
 
@@ -166,7 +308,7 @@ impl MemoryManager {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
-                "SELECT id, session_id, role, content, created_at, label
+                "SELECT id, session_id, role, content, created_at, label, model
                  FROM messages 
                  WHERE session_id = ?1 
                  ORDER BY created_at DESC, id DESC
@@ -185,6 +327,7 @@ impl MemoryManager {
                     content: row.get(3)?,
                     created_at,
                     label: parse_label(row.get(5)?),
+                    model: row.get(6)?,
                 })
             })
             .map_err(|e| JarvisError::Memory(format!("Query map failed: {}", e)))?;
@@ -278,7 +421,7 @@ impl MemoryManager {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
-                "SELECT id, session_id, role, content, created_at, label
+                "SELECT id, session_id, role, content, created_at, label, model
                  FROM messages 
                  WHERE session_id = ?1 
                  ORDER BY created_at ASC, id ASC",
@@ -296,6 +439,7 @@ impl MemoryManager {
                     content: row.get(3)?,
                     created_at,
                     label: parse_label(row.get(5)?),
+                    model: row.get(6)?,
                 })
             })
             .map_err(|e| JarvisError::Memory(format!("Query map failed: {}", e)))?;
@@ -307,7 +451,8 @@ impl MemoryManager {
         Ok(messages)
     }
 
-    pub fn prune_empty_sessions(&self) -> Result<usize> {
+    /// Delete conversations with no messages, except those in `keep`.
+    pub fn prune_empty_sessions(&self, keep: &[String]) -> Result<usize> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
@@ -321,7 +466,9 @@ impl MemoryManager {
 
         let mut to_delete: Vec<String> = Vec::new();
         for r in rows.flatten() {
-            to_delete.push(r);
+            if !keep.contains(&r) {
+                to_delete.push(r);
+            }
         }
         let count = to_delete.len();
         for id in to_delete {
@@ -1110,6 +1257,82 @@ mod tests {
         assert_eq!(found.len(), 1);
 
         drop(manager);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // Real use, found 2026-11-18: the delete and update triggers used FTS5's
+    // 'delete' command, which only external-content tables accept, so
+    // deleting a conversation with messages always failed ("SQL logic
+    // error"), and so did any update of a message.
+
+    fn fts_test_config() -> (Config, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("jarvis-fts-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut config = Config::default();
+        config.general.data_dir = dir.clone();
+        config.memory.db_path = dir.join("memory.db");
+        (config, dir)
+    }
+
+    #[test]
+    fn deleting_a_conversation_with_messages_works_and_leaves_search() {
+        let (config, dir) = fts_test_config();
+        let memory = MemoryManager::new(config).unwrap();
+        memory
+            .add_message("a", "user", "remember the kumquat")
+            .unwrap();
+        memory
+            .add_message("b", "user", "a kumquat elsewhere")
+            .unwrap();
+        memory.delete_session("a").unwrap();
+        let found: Vec<String> = memory
+            .recall("kumquat", 10)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.session_id)
+            .collect();
+        assert_eq!(found, vec!["b".to_string()]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn updating_a_message_keeps_search_in_step() {
+        let (config, dir) = fts_test_config();
+        let memory = MemoryManager::new(config).unwrap();
+        let id = memory
+            .add_message("a", "user", "the old word persimmon")
+            .unwrap();
+        {
+            let conn = memory.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE messages SET content = 'the new word lychee' WHERE id = ?1",
+                params![id],
+            )
+            .unwrap();
+        }
+        assert!(memory.recall("persimmon", 10).unwrap().is_empty());
+        assert_eq!(memory.recall("lychee", 10).unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_database_with_the_old_triggers_is_repaired() {
+        let (config, dir) = fts_test_config();
+        {
+            let memory = MemoryManager::new(config.clone()).unwrap();
+            let conn = memory.conn.lock().unwrap();
+            conn.execute_batch(
+                "DROP TRIGGER messages_ad;
+                 CREATE TRIGGER messages_ad AFTER DELETE ON messages BEGIN
+                     INSERT INTO messages_fts(messages_fts, rowid, session_id, role, content)
+                     VALUES('delete', old.id, old.session_id, old.role, old.content);
+                 END;",
+            )
+            .unwrap();
+        }
+        let memory = MemoryManager::new(config).unwrap();
+        memory.add_message("a", "user", "hello").unwrap();
+        memory.delete_session("a").unwrap();
         let _ = std::fs::remove_dir_all(dir);
     }
 }

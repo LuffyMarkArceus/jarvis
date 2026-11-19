@@ -85,7 +85,7 @@ impl Orchestrator {
         call: &ModelToolCall,
         plan: &TurnPlan,
         confirm: Option<&dyn ConfirmationHandler>,
-        rec: &TurnRecorder,
+        rec: &TurnRecorder<'_>,
     ) -> ToolOutcome {
         let name = call.function.name.clone();
         let args = normalize_arguments(call.function.arguments.clone());
@@ -99,7 +99,7 @@ impl Orchestrator {
         call: &parser::ToolCall,
         plan: &TurnPlan,
         confirm: Option<&dyn ConfirmationHandler>,
-        rec: &TurnRecorder,
+        rec: &TurnRecorder<'_>,
     ) -> ToolOutcome {
         let args = normalize_arguments(call.args.clone());
         self.execute_offered(call.name.clone(), args, true, plan, confirm, rec)
@@ -121,7 +121,7 @@ impl Orchestrator {
         by_model: bool,
         plan: &TurnPlan,
         confirm: Option<&dyn ConfirmationHandler>,
-        rec: &TurnRecorder,
+        rec: &TurnRecorder<'_>,
     ) -> ToolOutcome {
         if !plan.allows(&name) {
             let available = if plan.tools.is_empty() {
@@ -165,7 +165,7 @@ impl Orchestrator {
         // command, routed without one, never comes through here.
         let untrusted = if by_model && taint::is_action(&name) {
             let seen = taint::untrusted_sources(&rec.label(), &self.egress_policy());
-            self.trust.untrusted(&self.session_id, seen)
+            self.trust.untrusted(&rec.conversation.id, seen)
         } else {
             Vec::new()
         };
@@ -195,7 +195,7 @@ impl Orchestrator {
         mut args: Value,
         by_model: bool,
         confirm: Option<&dyn ConfirmationHandler>,
-        rec: &TurnRecorder,
+        rec: &TurnRecorder<'_>,
     ) -> std::result::Result<Value, (Value, String)> {
         if egress::tool_origin(name) != Origin::Web {
             return Ok(args);
@@ -306,11 +306,13 @@ impl Orchestrator {
         args: Value,
         confirm: Option<&dyn ConfirmationHandler>,
         untrusted: &[Source],
-        rec: &TurnRecorder,
+        rec: &TurnRecorder<'_>,
     ) -> ToolOutcome {
         rec.step(describe_step(&name, &args));
         let started = std::time::Instant::now();
-        let outcome = self.gate_and_run(name, args, confirm, untrusted).await;
+        let outcome = self
+            .gate_and_run(rec.conversation, name, args, confirm, untrusted)
+            .await;
         rec.tool_time(&outcome.name, started.elapsed());
         rec.tool(&outcome, status_label(&outcome.status));
         outcome
@@ -331,6 +333,7 @@ impl Orchestrator {
     /// says allow, and the prompt names it; deny still wins.
     pub(super) async fn gate_and_run(
         &self,
+        conv: &Conversation,
         name: String,
         args: Value,
         confirm: Option<&dyn ConfirmationHandler>,
@@ -371,7 +374,7 @@ impl Orchestrator {
                     compact_args(&args)
                 );
                 let _ = self.permissions.log_audit(
-                    Some(&self.session_id),
+                    Some(&conv.id),
                     &name,
                     &args,
                     "outside_sandbox_off",
@@ -394,7 +397,7 @@ impl Orchestrator {
                     names.join(", ")
                 );
                 let _ = self.permissions.log_audit(
-                    Some(&self.session_id),
+                    Some(&conv.id),
                     &name,
                     &args,
                     "outside_sandbox_untrusted",
@@ -414,7 +417,7 @@ impl Orchestrator {
 
         if !untrusted.is_empty() && verdict.action != PermissionAction::Deny {
             return self
-                .ask_after_untrusted(name, args, confirm, untrusted, verdict.pattern)
+                .ask_after_untrusted(conv, name, args, confirm, untrusted, verdict.pattern)
                 .await;
         }
 
@@ -433,13 +436,9 @@ impl Orchestrator {
                         compact_args(&args)
                     ),
                 };
-                let _ = self.permissions.log_audit(
-                    Some(&self.session_id),
-                    &name,
-                    &args,
-                    "denied",
-                    Some(&msg),
-                );
+                let _ =
+                    self.permissions
+                        .log_audit(Some(&conv.id), &name, &args, "denied", Some(&msg));
                 ToolOutcome {
                     name,
                     args,
@@ -452,7 +451,7 @@ impl Orchestrator {
             PermissionAction::Ask => match confirm {
                 Some(handler) => {
                     if handler.confirm(&name, &args).await {
-                        self.run_tool(name, args, "confirmed", verdict.pattern)
+                        self.run_tool(conv, name, args, "confirmed", verdict.pattern)
                             .await
                     } else {
                         let msg = format!(
@@ -461,7 +460,7 @@ impl Orchestrator {
                             compact_args(&args)
                         );
                         let _ = self.permissions.log_audit(
-                            Some(&self.session_id),
+                            Some(&conv.id),
                             &name,
                             &args,
                             "declined_by_user",
@@ -484,7 +483,7 @@ impl Orchestrator {
                         compact_args(&args)
                     );
                     let _ = self.permissions.log_audit(
-                        Some(&self.session_id),
+                        Some(&conv.id),
                         &name,
                         &args,
                         "ask_auto_denied",
@@ -500,7 +499,10 @@ impl Orchestrator {
                     }
                 }
             },
-            PermissionAction::Allow => self.run_tool(name, args, "allowed", verdict.pattern).await,
+            PermissionAction::Allow => {
+                self.run_tool(conv, name, args, "allowed", verdict.pattern)
+                    .await
+            }
         }
     }
 
@@ -508,6 +510,7 @@ impl Orchestrator {
     /// untrusted content: what it read, and whether it can be undone.
     pub(super) async fn ask_after_untrusted(
         &self,
+        conv: &Conversation,
         name: String,
         args: Value,
         confirm: Option<&dyn ConfirmationHandler>,
@@ -523,7 +526,7 @@ impl Orchestrator {
                 names.join(", ")
             );
             let _ = self.permissions.log_audit(
-                Some(&self.session_id),
+                Some(&conv.id),
                 &name,
                 &args,
                 "untrusted_not_asked",
@@ -565,17 +568,17 @@ impl Orchestrator {
         match handler.choose(&name, &shown, &choices).await {
             Some(key) => {
                 if key == 't' {
-                    self.trust.trust(&self.session_id, untrusted);
+                    self.trust.trust(&conv.id, untrusted);
                 }
                 let _ = self.permissions.log_audit(
-                    Some(&self.session_id),
+                    Some(&conv.id),
                     &name,
                     &args,
                     "confirmed_after_untrusted",
                     Some(&why),
                 );
                 // The row above says why it asked; this one what it did.
-                self.run_tool(name, args, "confirmed", pattern).await
+                self.run_tool(conv, name, args, "confirmed", pattern).await
             }
             None => {
                 let msg = format!(
@@ -585,7 +588,7 @@ impl Orchestrator {
                     compact_args(&args)
                 );
                 let _ = self.permissions.log_audit(
-                    Some(&self.session_id),
+                    Some(&conv.id),
                     &name,
                     &args,
                     "declined_after_untrusted",
@@ -630,6 +633,7 @@ impl Orchestrator {
     /// outright.
     pub(super) async fn run_tool(
         &self,
+        conv: &Conversation,
         name: String,
         args: Value,
         decision: &str,
@@ -644,7 +648,7 @@ impl Orchestrator {
                 match self.mcp.call_tool(&server, &tool_name, args.clone()).await {
                     Ok(res) => {
                         let _ = self.permissions.log_audit(
-                            Some(&self.session_id),
+                            Some(&conv.id),
                             &name,
                             &args,
                             decision,
@@ -663,7 +667,7 @@ impl Orchestrator {
                     Err(e) => {
                         let msg = format!("Tool {} failed: {}", name, e);
                         let _ = self.permissions.log_audit(
-                            Some(&self.session_id),
+                            Some(&conv.id),
                             &name,
                             &args,
                             &format!("{}_failed", decision),
@@ -700,7 +704,7 @@ impl Orchestrator {
                         "filesystem.write" | "filesystem.edit" | "filesystem.delete"
                     ) =>
                 {
-                    match store.before_change(std::path::Path::new(path), &name, &self.session_id) {
+                    match store.before_change(std::path::Path::new(path), &name, &conv.id) {
                         Ok(pending) => Some(pending),
                         Err(e) => {
                             warn!("no undo copy of {}: {}", path, e);
@@ -724,7 +728,7 @@ impl Orchestrator {
                 Ok(res) => {
                     let compact = compact_output(&name, &res);
                     let _ = self.permissions.log_audit(
-                        Some(&self.session_id),
+                        Some(&conv.id),
                         &name,
                         &args,
                         decision,
@@ -742,7 +746,7 @@ impl Orchestrator {
                 Err(e) => {
                     let msg = format!("Tool {} failed: {}", name, e);
                     let _ = self.permissions.log_audit(
-                        Some(&self.session_id),
+                        Some(&conv.id),
                         &name,
                         &args,
                         &format!("{}_failed", decision),

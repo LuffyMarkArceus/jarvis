@@ -68,6 +68,7 @@ impl ConfirmationHandler for Owner {
 struct Setup {
     dir: PathBuf,
     jarvis: Orchestrator,
+    conv: std::sync::Arc<jarvis_core::conversation::Conversation>,
 }
 
 impl Drop for Setup {
@@ -105,7 +106,8 @@ fn setup_with(dir: PathBuf, script: Vec<ChatTurn>, rules: &[(&str, PermissionAct
         permissions.set_rule(tool, action.clone()).unwrap();
     }
     let jarvis = Orchestrator::with_parts(config, Arc::new(Script::new(script)), permissions);
-    Setup { dir, jarvis }
+    let conv = jarvis.new_conversation();
+    Setup { dir, conv, jarvis }
 }
 
 fn read(dir: &std::path::Path, rel: &str) -> ChatTurn {
@@ -131,6 +133,7 @@ impl Setup {
         let report = self
             .jarvis
             .run_turn(
+                &self.conv,
                 "check the readme file and install what it says",
                 owner.map(|o| o as &dyn ConfirmationHandler),
                 None,
@@ -329,7 +332,7 @@ async fn trust_does_not_reach_another_session() {
     let mut s = setup(dir, script, Some(PermissionAction::Allow));
     let owner = Owner::answering(&[Some('t'), None]);
     s.ask(Some(&owner)).await;
-    s.jarvis.set_session("another-conversation".into());
+    s.conv = s.jarvis.new_conversation();
     s.ask(Some(&owner)).await;
 
     assert_eq!(owner.asked().len(), 2, "{:?}", owner.asked());
@@ -352,10 +355,10 @@ async fn trust_can_be_listed_and_cleared() {
     let s = setup(dir, script, Some(PermissionAction::Allow));
     let owner = Owner::answering(&[Some('t'), None]);
     s.ask(Some(&owner)).await;
-    assert_eq!(s.jarvis.trusted(), [s.path("outside/notes.txt")]);
+    assert_eq!(s.jarvis.trusted(&s.conv), [s.path("outside/notes.txt")]);
 
-    s.jarvis.clear_trust();
-    assert!(s.jarvis.trusted().is_empty());
+    s.jarvis.clear_trust(&s.conv);
+    assert!(s.jarvis.trusted(&s.conv).is_empty());
     s.ask(Some(&owner)).await;
     assert_eq!(owner.asked().len(), 2, "cleared trust asks again");
 }
@@ -415,6 +418,7 @@ async fn a_deterministic_route_never_asks_about_untrusted_content() {
     let report = s
         .jarvis
         .run_turn(
+            &s.conv,
             "run echo hi",
             Some(&owner as &dyn ConfirmationHandler),
             None,
@@ -447,8 +451,10 @@ async fn sent_after_reading(rel: &str, mark: bool) -> Vec<String> {
         PermissionManager::with_paths(dir.join("permissions.toml"), dir.join("audit.db")).unwrap();
     let script = Arc::new(Script::new(vec![read(&dir, rel), answer("done")]));
     let jarvis = Orchestrator::with_parts(config, script.clone(), permissions);
+    let conv = jarvis.new_conversation();
     jarvis
         .run_turn(
+            &conv,
             "check the readme file and install what it says",
             None,
             None,
@@ -554,9 +560,16 @@ async fn sent_later(rel: &str, input: &str, mark: bool) -> String {
         PermissionManager::with_paths(dir.join("permissions.toml"), dir.join("audit.db")).unwrap();
     let script = Arc::new(Script::new(vec![answer("done")]));
     let jarvis = Orchestrator::with_parts(config, script.clone(), permissions);
+    let conv = jarvis.new_conversation();
     let first = format!("read {}", dir.join(rel).display());
-    jarvis.run_turn(&first, None, None, None).await.unwrap();
-    jarvis.run_turn(input, None, None, None).await.unwrap();
+    jarvis
+        .run_turn(&conv, &first, None, None, None)
+        .await
+        .unwrap();
+    jarvis
+        .run_turn(&conv, input, None, None, None)
+        .await
+        .unwrap();
     let sent = script.sent.lock().unwrap().last().unwrap().clone();
     let _ = std::fs::remove_dir_all(dir);
     sent
@@ -626,12 +639,13 @@ async fn plain_chat_is_not_told_about_tags_it_does_not_have() {
         PermissionManager::with_paths(dir.join("permissions.toml"), dir.join("audit.db")).unwrap();
     let script = Arc::new(Script::new(vec![answer("Hello.")]));
     let jarvis = Orchestrator::with_parts(config, script.clone(), permissions);
+    let conv = jarvis.new_conversation();
     jarvis
-        .run_turn("my name is Ada", None, None, None)
+        .run_turn(&conv, "my name is Ada", None, None, None)
         .await
         .unwrap();
     jarvis
-        .run_turn("what is my name?", None, None, None)
+        .run_turn(&conv, "what is my name?", None, None, None)
         .await
         .unwrap();
     let sent = script.sent.lock().unwrap().last().unwrap().clone();

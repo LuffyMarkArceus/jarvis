@@ -69,6 +69,15 @@ pub fn local_ollama(config: &Config) -> Option<String> {
     })
 }
 
+/// Arguments for `jarvis-tui`.
+pub fn tui_args(continue_last: bool) -> Vec<&'static str> {
+    if continue_last {
+        vec!["--continue"]
+    } else {
+        Vec::new()
+    }
+}
+
 /// Whether something answers on `host:port`.
 fn answers(host: &str) -> bool {
     use std::net::ToSocketAddrs;
@@ -78,7 +87,7 @@ fn answers(host: &str) -> bool {
 }
 
 /// Start what is not running, then open the TUI.
-pub async fn run(restart: bool, tui: bool) -> anyhow::Result<()> {
+pub async fn run(restart: bool, tui: bool, continue_last: bool) -> anyhow::Result<()> {
     use std::os::unix::process::CommandExt as _;
     use std::process::{Command, Stdio};
     let config = Config::load();
@@ -180,7 +189,7 @@ pub async fn run(restart: bool, tui: bool) -> anyhow::Result<()> {
                 path.display()
             );
         }
-        let err = Command::new(&path).exec();
+        let err = Command::new(&path).args(tui_args(continue_last)).exec();
         anyhow::bail!("could not open {}: {}", path.display(), err);
     }
     Ok(())
@@ -245,5 +254,11 @@ mod tests {
             default: false,
         });
         assert_eq!(local_ollama(&config).as_deref(), Some("localhost:11500"));
+    }
+
+    #[test]
+    fn continue_is_passed_to_the_tui() {
+        assert!(tui_args(false).is_empty());
+        assert_eq!(tui_args(true), vec!["--continue"]);
     }
 }

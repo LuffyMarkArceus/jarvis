@@ -244,6 +244,9 @@ enum Commands {
         /// Start everything but do not open the TUI
         #[arg(long)]
         no_tui: bool,
+        /// Open the conversation used last instead of a new one
+        #[arg(long = "continue")]
+        continue_last: bool,
     },
     /// Undo Jarvis's last file change, or the one with this id
     Undo {
@@ -327,10 +330,8 @@ enum SessionCommands {
     },
     /// Create a new session
     New,
-    /// Switch to a session
-    Switch { session_id: String },
-    /// Show current session
-    Current,
+    /// The conversation used last (what `--continue` opens)
+    Last,
     /// Delete a session
     Delete { session_id: String },
     /// Show full conversation history
@@ -601,12 +602,24 @@ async fn main() -> anyhow::Result<()> {
             // Try to connect to daemon first
             // Each CLI invocation starts a fresh session so questions don't leak
             // between separate terminal invocations.
-            if let Ok(session_req) = send_request(Request::new("session.new", json!({}))).await {
-                if session_req.ok {
-                    // New session created and set as current on the daemon
+            let session = match send_request(Request::new("session.new", json!({}))).await {
+                Ok(r) if r.ok => r
+                    .result
+                    .and_then(|r| r["session_id"].as_str().map(String::from))
+                    .unwrap_or_default(),
+                // The daemon is up but could not start one: say why, rather
+                // than asking without a conversation.
+                Ok(r) => {
+                    eprintln!(
+                        "Error: could not start a conversation: {}",
+                        r.error.unwrap_or_default()
+                    );
+                    std::process::exit(1);
                 }
-            }
-            let request = Request::new("ask", json!({"prompt": prompt}));
+                // No daemon: the ask below runs in direct mode.
+                Err(_) => String::new(),
+            };
+            let request = Request::new("ask", json!({"prompt": prompt, "session": session}));
             let interactive = std::io::stdout().is_terminal();
             match ask_daemon(&get_socket_path(), request, interactive).await {
                 AskOutcome::Answered(response, printed) => {
@@ -661,8 +674,10 @@ async fn main() -> anyhow::Result<()> {
                     // Fallback to direct mode
                     info!("Daemon not running, using direct mode");
                     let orch = Orchestrator::new()?;
+                    // A one-off ask is its own conversation.
+                    let conv = orch.new_conversation();
                     let (response, footer, _timing) = orch
-                        .run_with_footer(&prompt, Some(&TerminalConfirmer), None, None, None)
+                        .run_with_footer(&conv, &prompt, Some(&TerminalConfirmer), None, None, None)
                         .await?;
                     println!("{}", response);
                     print_footer(&footer, std::io::stdout().is_terminal());
@@ -685,7 +700,7 @@ async fn main() -> anyhow::Result<()> {
                 };
                 daemon.write_pid().await?;
                 // Load the model now, not when the first question arrives.
-                daemon.warm_up().await;
+                daemon.warm_up_default().await;
                 let daemon_arc = std::sync::Arc::new(tokio::sync::Mutex::new(daemon.clone()));
                 let server =
                     jarvis_core::ipc::server::IpcServer::new(daemon_arc, daemon.get_socket_path());
@@ -823,7 +838,7 @@ async fn main() -> anyhow::Result<()> {
                             println!("Model:    {}", field("model"));
                             println!("Tier:     {}", field("tier"));
                             println!("Privacy:  {}", field("privacy"));
-                            println!("Session:  {}", field("session_id"));
+                            println!("Last:     {}", field("last_session"));
                             if let Some(tools) = result.get("tools").and_then(|t| t.as_array()) {
                                 println!();
                                 print_tools(tools);
@@ -958,7 +973,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Session { action } => match action {
             SessionCommands::List { limit } => {
                 let request = Request::new("session.list", json!({"limit": limit}));
-                let current_req = Request::new("session.current", json!({}));
+                let current_req = Request::new("session.last", json!({}));
                 match send_request(request).await {
                     Ok(response) => {
                         let current_id = if let Ok(cur) = send_request(current_req).await {
@@ -1068,34 +1083,13 @@ async fn main() -> anyhow::Result<()> {
                     Err(_) => println!("Daemon not running"),
                 }
             }
-            SessionCommands::Switch { session_id } => {
-                let request = Request::new("session.switch", json!({"session_id": session_id}));
-                match send_request(request).await {
-                    Ok(response) => {
-                        if response.ok {
-                            println!("Switched to session: {}", session_id);
-                        } else {
-                            println!("Error: {}", response.error.unwrap_or_default());
-                        }
-                    }
-                    Err(_) => println!("Daemon not running"),
-                }
-            }
-            SessionCommands::Current => {
-                let request = Request::new("session.current", json!({}));
-                match send_request(request).await {
-                    Ok(response) => {
-                        if response.ok {
-                            if let Some(result) = response.result {
-                                if let Some(sid) = result.get("session_id").and_then(|v| v.as_str())
-                                {
-                                    println!("Current session: {}", sid);
-                                }
-                            }
-                        } else {
-                            println!("Error: {}", response.error.unwrap_or_default());
-                        }
-                    }
+            SessionCommands::Last => {
+                match send_request(Request::new("session.last", json!({}))).await {
+                    Ok(response) => match response.result.as_ref().map(conversation_from_last) {
+                        Some(Ok(id)) => println!("Last conversation: {}", id),
+                        Some(Err(message)) => println!("{}", message),
+                        None => println!("Error: {}", response.error.unwrap_or_default()),
+                    },
                     Err(_) => println!("Daemon not running"),
                 }
             }
@@ -1134,6 +1128,11 @@ async fn main() -> anyhow::Result<()> {
                                                 .and_then(|v| v.as_str())
                                                 .unwrap_or("");
                                             println!("[{}]: {}", role, content);
+                                            if let Some(footer) =
+                                                msg.get("footer").and_then(|v| v.as_str())
+                                            {
+                                                println!("    ({footer})");
+                                            }
                                             println!("---");
                                         }
                                     }
@@ -1218,22 +1217,38 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Commands::Tier { tier } => {
+            let session = last_conversation().await?;
             let Some(tier) = tier else {
-                let response = send_request(Request::new("status", json!({}))).await?;
-                let tier = response
+                let response =
+                    send_request(Request::new("model.list", json!({ "session": session }))).await?;
+                let remote = response
                     .result
                     .as_ref()
-                    .and_then(|r| r.get("tier"))
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("unknown")
-                    .to_string();
-                println!("{}", tier);
+                    .and_then(|r| r["models"].as_array().cloned())
+                    .into_iter()
+                    .flatten()
+                    .find(|m| m["current"] == true)
+                    .map(|m| m["remote"] == true);
+                println!(
+                    "{} (conversation {})",
+                    match remote {
+                        Some(true) => "remote",
+                        Some(false) => "local",
+                        None => "unknown",
+                    },
+                    short_id(&session)
+                );
                 return Ok(());
             };
             if tier != "local" && tier != "remote" {
                 anyhow::bail!("tier must be 'local' or 'remote', not '{}'", tier);
             }
-            let response = send_request(Request::new("tier.set", json!({ "tier": tier }))).await?;
+            let response = send_request(Request::new(
+                "tier.set",
+                json!({ "tier": tier, "session": session }),
+            ))
+            .await?;
+            println!("Conversation {}:", short_id(&session));
             match (response.ok, response.result) {
                 (true, Some(result)) => {
                     let field = |k: &str| {
@@ -1254,7 +1269,11 @@ async fn main() -> anyhow::Result<()> {
                 ),
             }
         }
-        Commands::Up { restart, no_tui } => up::run(restart, !no_tui).await?,
+        Commands::Up {
+            restart,
+            no_tui,
+            continue_last,
+        } => up::run(restart, !no_tui, continue_last).await?,
         Commands::Report => {
             // Read directly, so it works with the daemon stopped.
             let data = jarvis_core::config::Config::load().general.data_dir;
@@ -1268,8 +1287,11 @@ async fn main() -> anyhow::Result<()> {
             println!("\nLog: {}", data.join("turns.jsonl").display());
         }
         Commands::Model { name } => {
+            let session = last_conversation().await?;
+            println!("Conversation {}:", short_id(&session));
             let Some(name) = name else {
-                let response = send_request(Request::new("model.list", json!({}))).await?;
+                let response =
+                    send_request(Request::new("model.list", json!({ "session": session }))).await?;
                 let result = response
                     .result
                     .ok_or_else(|| anyhow::anyhow!("{}", response.error.unwrap_or_default()))?;
@@ -1278,8 +1300,11 @@ async fn main() -> anyhow::Result<()> {
                 }
                 return Ok(());
             };
-            let response =
-                send_request(Request::new("model.set", json!({ "model": name }))).await?;
+            let response = send_request(Request::new(
+                "model.set",
+                json!({ "model": name, "session": session }),
+            ))
+            .await?;
             match (response.ok, response.result) {
                 (true, Some(result)) => {
                     let field = |k: &str| {
@@ -1434,6 +1459,31 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The conversation `session.last` named, or what to do when there is none.
+fn conversation_from_last(result: &serde_json::Value) -> Result<String, String> {
+    result["session_id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .map(String::from)
+        .ok_or_else(|| {
+            "There is no conversation yet: open one with `jarvis up` (or ask with `jarvis ask`)."
+                .to_string()
+        })
+}
+
+/// The conversation used last, for `jarvis model` and `jarvis tier`.
+async fn last_conversation() -> anyhow::Result<String> {
+    let response = send_request(Request::new("session.last", json!({}))).await?;
+    let result = response
+        .result
+        .ok_or_else(|| anyhow::anyhow!("{}", response.error.unwrap_or_default()))?;
+    conversation_from_last(&result).map_err(|message| anyhow::anyhow!(message))
+}
+
+fn short_id(id: &str) -> &str {
+    &id[..id.len().min(8)]
+}
+
 /// `jarvis model`: one line per model, the one answering marked.
 fn model_lines(result: &serde_json::Value) -> Vec<String> {
     result["models"]
@@ -1556,5 +1606,16 @@ mod tests {
                 "● cohere/north-mini-code:free  (remote)".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn the_last_conversation_or_a_clear_message() {
+        assert_eq!(
+            conversation_from_last(&json!({ "session_id": "abc" })),
+            Ok("abc".to_string())
+        );
+        let none = conversation_from_last(&json!({ "session_id": null })).unwrap_err();
+        assert!(none.contains("no conversation yet"), "{none}");
+        assert!(none.contains("jarvis up"), "says what to do: {none}");
     }
 }

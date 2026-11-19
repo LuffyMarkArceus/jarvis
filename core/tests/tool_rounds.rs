@@ -29,6 +29,7 @@ impl ConfirmationHandler for Yes {
 struct Setup {
     dir: PathBuf,
     jarvis: Orchestrator,
+    conv: std::sync::Arc<jarvis_core::conversation::Conversation>,
 }
 
 impl Drop for Setup {
@@ -52,7 +53,8 @@ fn setup(dir: PathBuf, replies: Vec<ChatTurn>, max_rounds: Option<usize>) -> Set
     let permissions =
         PermissionManager::with_paths(dir.join("permissions.toml"), dir.join("audit.db")).unwrap();
     let jarvis = Orchestrator::with_parts(config, Arc::new(Script::new(replies)), permissions);
-    Setup { dir, jarvis }
+    let conv = jarvis.new_conversation();
+    Setup { dir, conv, jarvis }
 }
 
 fn write(dir: &std::path::Path, n: usize) -> ChatTurn {
@@ -70,7 +72,7 @@ impl Setup {
         );
         let report = self
             .jarvis
-            .run_turn(&input, Some(user), None, None)
+            .run_turn(&self.conv, &input, Some(user), None, None)
             .await
             .unwrap();
         assert_eq!(report.route, "Model");
@@ -203,7 +205,8 @@ async fn a_relative_path_lands_in_the_work_dir() {
         answer("done"),
     ];
     let jarvis = Orchestrator::with_parts(config, Arc::new(Script::new(script)), permissions);
-    let s = Setup { dir, jarvis };
+    let conv = jarvis.new_conversation();
+    let s = Setup { dir, conv, jarvis };
     let report = s.ask(&Yes(Mutex::new(0))).await;
 
     assert_eq!(writes(&report), 1, "{:?}", report.calls);
@@ -235,10 +238,11 @@ async fn a_command_runs_in_the_work_dir() {
         Arc::new(Script::new(vec![answer("x")])),
         permissions,
     );
-    let s = Setup { dir, jarvis };
+    let conv = jarvis.new_conversation();
+    let s = Setup { dir, conv, jarvis };
     let report = s
         .jarvis
-        .run_turn("run pwd", Some(&Yes(Mutex::new(0))), None, None)
+        .run_turn(&s.conv, "run pwd", Some(&Yes(Mutex::new(0))), None, None)
         .await
         .unwrap();
     assert_eq!(report.route, "Tool(shell.run)");

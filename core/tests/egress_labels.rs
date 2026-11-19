@@ -25,15 +25,22 @@ async fn a_file_read_is_stored_and_recalled_as_file_content() {
     let permissions =
         PermissionManager::with_paths(dir.join("permissions.toml"), dir.join("audit.db")).unwrap();
     let jarvis = Orchestrator::with_parts(config.clone(), Arc::new(ScriptedProvider), permissions);
+    let conv = jarvis.new_conversation();
 
     let report = jarvis
-        .run_turn(&format!("read {}", notes.display()), None, None, None)
+        .run_turn(
+            &conv,
+            &format!("read {}", notes.display()),
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(report.route, "Tool(filesystem.read)");
 
     let memory = MemoryManager::new(config).unwrap();
-    let history = memory.get_recent_messages(jarvis.session_id(), 10).unwrap();
+    let history = memory.get_recent_messages(&conv.id, 10).unwrap();
     let [question, answer] = history.as_slice() else {
         panic!("expected two messages, got {:?}", history);
     };
@@ -95,6 +102,7 @@ fn user(answer: bool) -> User {
 struct Setup {
     dir: PathBuf,
     jarvis: Orchestrator,
+    conv: std::sync::Arc<jarvis_core::conversation::Conversation>,
     model: Arc<RecordingProvider>,
 }
 
@@ -122,7 +130,13 @@ fn setup(locality: &str, reply: &str, file_allow: &[&str]) -> Setup {
         PermissionManager::with_paths(dir.join("permissions.toml"), dir.join("audit.db")).unwrap();
     let model = Arc::new(RecordingProvider::replying(reply));
     let jarvis = Orchestrator::with_parts(config, model.clone(), permissions);
-    Setup { dir, jarvis, model }
+    let conv = jarvis.new_conversation();
+    Setup {
+        dir,
+        conv,
+        jarvis,
+        model,
+    }
 }
 
 impl Setup {
@@ -135,6 +149,7 @@ impl Setup {
     async fn ask(&self, input: &str, user: Option<&User>) -> TurnReport {
         self.jarvis
             .run_turn(
+                &self.conv,
                 input,
                 user.map(|u| u as &dyn ConfirmationHandler),
                 None,
@@ -304,6 +319,7 @@ fn owner(send: Option<char>, answer_locally: bool) -> Owner {
 struct Tiers {
     dir: PathBuf,
     jarvis: Orchestrator,
+    conv: std::sync::Arc<jarvis_core::conversation::Conversation>,
     local: Arc<RecordingProvider>,
     remote: Arc<RecordingProvider>,
 }
@@ -337,8 +353,10 @@ fn tiers() -> Tiers {
     let remote = Arc::new(RecordingProvider::replying("remote answer"));
     let jarvis = Orchestrator::with_parts(config, local.clone(), permissions)
         .with_remote(Some(remote.clone()));
+    let conv = jarvis.new_conversation();
     Tiers {
         dir,
+        conv,
         jarvis,
         local,
         remote,
@@ -350,14 +368,20 @@ impl Tiers {
         let path = self.dir.join("notes").join(name);
         std::fs::write(&path, text).unwrap();
         self.jarvis
-            .run_turn(&format!("read {}", path.display()), None, None, None)
+            .run_turn(
+                &self.conv,
+                &format!("read {}", path.display()),
+                None,
+                None,
+                None,
+            )
             .await
             .unwrap();
     }
 
     async fn ask(&self, input: &str, who: &Owner) -> TurnReport {
         self.jarvis
-            .run_turn(input, Some(who), None, None)
+            .run_turn(&self.conv, input, Some(who), None, None)
             .await
             .unwrap()
     }
@@ -451,13 +475,13 @@ async fn a_never_file_offers_only_the_local_model() {
 #[tokio::test]
 async fn a_session_switches_tiers_and_cannot_switch_to_a_missing_one() {
     let t = tiers();
-    t.jarvis.set_remote(false).unwrap();
+    t.jarvis.set_remote(&t.conv, false).unwrap();
     t.ask("hello", &owner(None, false)).await;
     assert_eq!(t.local.requests().len(), 1);
     assert!(t.remote.requests().is_empty());
 
     let s = setup("local", "ok", &[]);
-    assert!(s.jarvis.set_remote(true).is_err());
+    assert!(s.jarvis.set_remote(&s.conv, true).is_err());
 }
 
 #[tokio::test]
@@ -501,9 +525,16 @@ async fn recalled_memory_the_policy_would_not_send_is_left_out_not_asked_about()
     let remote = Arc::new(RecordingProvider::replying("Paris"));
     let jarvis =
         Orchestrator::with_parts(config, local, permissions).with_remote(Some(remote.clone()));
+    let conv = jarvis.new_conversation();
     let who = owner(None, false);
     let report = jarvis
-        .run_turn("what is the capital of France?", Some(&who), None, None)
+        .run_turn(
+            &conv,
+            "what is the capital of France?",
+            Some(&who),
+            None,
+            None,
+        )
         .await
         .unwrap();
     assert!(

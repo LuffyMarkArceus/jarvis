@@ -11,6 +11,7 @@ use std::sync::Arc;
 struct Setup {
     dir: PathBuf,
     jarvis: Orchestrator,
+    conv: std::sync::Arc<jarvis_core::conversation::Conversation>,
     local: Arc<RecordingProvider>,
     remote: Arc<RecordingProvider>,
 }
@@ -50,8 +51,10 @@ fn setup() -> Setup {
     let remote = Arc::new(RecordingProvider::replying("remote"));
     let jarvis = Orchestrator::with_parts(config, local.clone(), permissions)
         .with_remote(Some(remote.clone()));
+    let conv = jarvis.new_conversation();
     Setup {
         dir,
+        conv,
         jarvis,
         local,
         remote,
@@ -61,7 +64,7 @@ fn setup() -> Setup {
 impl Setup {
     async fn chat(&self) {
         self.jarvis
-            .run_turn("tell me a joke", None, None, None)
+            .run_turn(&self.conv, "tell me a joke", None, None, None)
             .await
             .unwrap();
     }
@@ -69,7 +72,7 @@ impl Setup {
 
 fn names(s: &Setup) -> Vec<(String, bool, bool)> {
     s.jarvis
-        .models()
+        .models(&s.conv)
         .into_iter()
         .map(|m| (m.name, m.remote, m.current))
         .collect()
@@ -93,19 +96,19 @@ fn the_list_is_each_tiers_default_then_its_others_without_repeats() {
 #[tokio::test]
 async fn a_local_model_is_used_for_the_next_turn() {
     let s = setup();
-    let chosen = s.jarvis.set_model("qwen").unwrap();
+    let chosen = s.jarvis.set_model(&s.conv, "qwen").unwrap();
     assert_eq!(chosen.name, "qwen2.5:3b");
     assert!(!chosen.remote);
     s.chat().await;
     assert_eq!(*s.local.models.lock().unwrap(), vec!["qwen2.5:3b"]);
-    assert_eq!(s.jarvis.model_info().1, "qwen2.5:3b");
+    assert_eq!(s.jarvis.model_info(&s.conv).1, "qwen2.5:3b");
 }
 
 #[tokio::test]
 async fn a_remote_model_moves_the_conversation_to_the_remote_tier() {
     let s = setup();
-    s.jarvis.set_model("north").unwrap();
-    assert!(s.jarvis.uses_remote());
+    s.jarvis.set_model(&s.conv, "north").unwrap();
+    assert!(s.jarvis.uses_remote(&s.conv));
     s.chat().await;
     assert_eq!(
         *s.remote.models.lock().unwrap(),
@@ -113,8 +116,8 @@ async fn a_remote_model_moves_the_conversation_to_the_remote_tier() {
     );
     assert!(s.local.models.lock().unwrap().is_empty());
     // Back to local: the local tier's choice is still its own.
-    s.jarvis.set_model("llama").unwrap();
-    assert!(!s.jarvis.uses_remote());
+    s.jarvis.set_model(&s.conv, "llama").unwrap();
+    assert!(!s.jarvis.uses_remote(&s.conv));
     s.chat().await;
     assert_eq!(*s.local.models.lock().unwrap(), vec!["llama3.2:1b"]);
 }
@@ -122,11 +125,11 @@ async fn a_remote_model_moves_the_conversation_to_the_remote_tier() {
 #[test]
 fn switching_tiers_keeps_each_tiers_choice() {
     let s = setup();
-    s.jarvis.set_model("flint").unwrap();
-    s.jarvis.set_remote(false).unwrap();
-    assert_eq!(s.jarvis.model_info().1, "llama3.2:1b");
-    s.jarvis.set_remote(true).unwrap();
-    assert_eq!(s.jarvis.model_info().1, "recursive/flint-v1.0:free");
+    s.jarvis.set_model(&s.conv, "flint").unwrap();
+    s.jarvis.set_remote(&s.conv, false).unwrap();
+    assert_eq!(s.jarvis.model_info(&s.conv).1, "llama3.2:1b");
+    s.jarvis.set_remote(&s.conv, true).unwrap();
+    assert_eq!(s.jarvis.model_info(&s.conv).1, "recursive/flint-v1.0:free");
 }
 
 #[test]
@@ -134,26 +137,37 @@ fn an_exact_name_wins_and_an_ambiguous_or_unknown_one_is_refused() {
     let s = setup();
     // "llama3.2:1b" is exact; ":free" matches three.
     assert_eq!(
-        s.jarvis.set_model("llama3.2:1b").unwrap().name,
+        s.jarvis.set_model(&s.conv, "llama3.2:1b").unwrap().name,
         "llama3.2:1b"
     );
-    let err = s.jarvis.set_model(":free").unwrap_err().to_string();
+    let err = s
+        .jarvis
+        .set_model(&s.conv, ":free")
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("north-mini-code"), "{}", err);
-    let err = s.jarvis.set_model("gpt-9").unwrap_err().to_string();
+    let err = s
+        .jarvis
+        .set_model(&s.conv, "gpt-9")
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("models ="), "says how to add one: {}", err);
     // A refused switch changes nothing.
-    assert_eq!(s.jarvis.model_info().1, "llama3.2:1b");
+    assert_eq!(s.jarvis.model_info(&s.conv).1, "llama3.2:1b");
     // Case does not matter.
-    assert_eq!(s.jarvis.set_model("QWEN").unwrap().name, "qwen2.5:3b");
+    assert_eq!(
+        s.jarvis.set_model(&s.conv, "QWEN").unwrap().name,
+        "qwen2.5:3b"
+    );
 }
 
 #[test]
 fn the_current_mark_follows_the_choice() {
     let s = setup();
-    s.jarvis.set_model("nemotron").unwrap();
+    s.jarvis.set_model(&s.conv, "nemotron").unwrap();
     let current: Vec<String> = s
         .jarvis
-        .models()
+        .models(&s.conv)
         .into_iter()
         .filter(|m| m.current)
         .map(|m| m.name)
@@ -178,8 +192,9 @@ fn without_a_remote_tier_only_local_models_are_listed() {
         Arc::new(RecordingProvider::replying("x")),
         permissions,
     );
-    assert!(jarvis.models().iter().all(|m| !m.remote));
-    assert_eq!(jarvis.models().len(), 2);
+    let conv = jarvis.new_conversation();
+    assert!(jarvis.models(&conv).iter().all(|m| !m.remote));
+    assert_eq!(jarvis.models(&conv).len(), 2);
 }
 
 /// Lets the background warm-up task run.
@@ -193,16 +208,16 @@ async fn settle() {
 async fn picking_a_local_model_loads_it_in_the_background() {
     // So the first question after /model does not wait 25-42 s for a load.
     let s = setup();
-    s.jarvis.set_model("qwen").unwrap();
+    s.jarvis.set_model(&s.conv, "qwen").unwrap();
     settle().await;
     assert_eq!(*s.local.warmed.lock().unwrap(), vec!["qwen2.5:3b"]);
-    s.jarvis.set_model("north").unwrap();
+    s.jarvis.set_model(&s.conv, "north").unwrap();
     settle().await;
     assert!(
         s.remote.warmed.lock().unwrap().is_empty(),
         "nothing to load remotely"
     );
-    s.jarvis.warm_up();
+    s.jarvis.warm_up(&s.conv);
     settle().await;
     assert_eq!(
         s.local.warmed.lock().unwrap().len(),

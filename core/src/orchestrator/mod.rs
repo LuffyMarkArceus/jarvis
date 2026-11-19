@@ -48,6 +48,7 @@
 use crate::cancel::Cancellation;
 use crate::config::{Config, ModelConfig};
 use crate::context::{self, ContextPlan};
+use crate::conversation::{Conversation, LastTurn};
 use crate::egress::redact::Redactor;
 use crate::egress::{
     self, Concern, DataPolicy, Destination, Label, Locality, Origin, Policy, Verdict,
@@ -148,16 +149,8 @@ pub struct Orchestrator {
     client: Arc<dyn Provider>,
     /// The `[remote]` tier, when configured.
     remote: Option<Arc<dyn Provider>>,
-    /// Whether this session's turns go to the remote tier.
-    use_remote: std::sync::atomic::AtomicBool,
-    /// The model `/model` chose on each tier, `[local, remote]`; `None` is
-    /// the tier's `default_model`.
-    chosen: std::sync::Mutex<[Option<String>; 2]>,
-    /// The last logged turn, for `/bad` and spotting a rephrase.
-    last_turn: std::sync::Mutex<Option<LastTurn>>,
     tools: ToolRegistry,
     memory: Option<MemoryManager>,
-    session_id: String,
     /// Sources the owner trusted with `[t]`, per conversation.
     trust: SessionTrust,
     /// Copies of files before Jarvis changes them. `None` if the folder
@@ -225,7 +218,6 @@ impl Orchestrator {
         }));
         tools.register(Box::new(GetSystemInfoTool));
         tools.register(Box::new(ListProcessesTool));
-        let session_id = Uuid::new_v4().to_string();
         let undo = match UndoStore::for_config(&config) {
             Ok(store) => Some(store),
             Err(e) => {
@@ -234,19 +226,12 @@ impl Orchestrator {
             }
         };
         let memory = MemoryManager::new(config.clone()).ok();
-        if let Some(ref m) = memory {
-            let _ = m.create_session(&session_id);
-        }
         Self {
             config,
             client,
             remote: None,
-            use_remote: std::sync::atomic::AtomicBool::new(false),
-            chosen: std::sync::Mutex::new([None, None]),
-            last_turn: std::sync::Mutex::new(None),
             tools,
             memory,
-            session_id,
             trust: SessionTrust::default(),
             undo,
             permissions,
@@ -257,44 +242,53 @@ impl Orchestrator {
     /// Attach the `[remote]` tier's provider. New sessions start on it only
     /// if `[remote] default = true`.
     pub fn with_remote(mut self, client: Option<Arc<dyn Provider>>) -> Self {
-        let default = self.config.remote.as_ref().is_some_and(|r| r.default);
-        self.use_remote = std::sync::atomic::AtomicBool::new(client.is_some() && default);
         self.remote = client;
         self
     }
 
-    /// Switch this session between the local and remote tier.
-    pub fn set_remote(&self, on: bool) -> Result<()> {
+    /// A new conversation, with its `sessions` row: on the remote tier if
+    /// `[remote] default` is set and a remote tier exists.
+    pub fn new_conversation(&self) -> Arc<Conversation> {
+        let id = Uuid::new_v4().to_string();
+        if let Some(ref m) = self.memory {
+            let _ = m.create_session(&id);
+        }
+        let remote =
+            self.remote.is_some() && self.config.remote.as_ref().is_some_and(|r| r.default);
+        Conversation::new(id, remote)
+    }
+
+    /// Switch `conv` between the local and remote tier.
+    pub fn set_remote(&self, conv: &Conversation, on: bool) -> Result<()> {
         if on && self.remote.is_none() {
             return Err(JarvisError::Config(
                 "no remote model is configured: add a [remote] section to config.toml".into(),
             ));
         }
-        self.use_remote
-            .store(on, std::sync::atomic::Ordering::Relaxed);
-        self.warm_up();
+        conv.set_remote(on);
+        self.warm_up(conv);
         Ok(())
     }
 
-    pub fn uses_remote(&self) -> bool {
-        self.use_remote.load(std::sync::atomic::Ordering::Relaxed) && self.remote.is_some()
+    pub fn uses_remote(&self, conv: &Conversation) -> bool {
+        conv.remote() && self.remote.is_some()
     }
 
     /// The model settings and provider this session's turns go to, with
     /// the model `/model` chose.
-    fn tier(&self) -> (ModelConfig, Arc<dyn Provider>) {
-        let remote = self.uses_remote();
+    fn tier(&self, conv: &Conversation) -> (ModelConfig, Arc<dyn Provider>) {
+        let remote = self.uses_remote(conv);
         let (cfg, client) = match (&self.config.remote, &self.remote) {
             (Some(cfg), Some(client)) if remote => (&cfg.model, client),
             _ => (&self.config.model, &self.client),
         };
-        (self.with_choice(cfg, remote), client.clone())
+        (self.with_choice(conv, cfg, remote), client.clone())
     }
 
     /// `cfg` with the model chosen for its tier.
-    fn with_choice(&self, cfg: &ModelConfig, remote: bool) -> ModelConfig {
+    fn with_choice(&self, conv: &Conversation, cfg: &ModelConfig, remote: bool) -> ModelConfig {
         let mut cfg = cfg.clone();
-        if let Some(model) = self.chosen.lock().unwrap()[remote as usize].clone() {
+        if let Some(model) = conv.chosen()[remote as usize].clone() {
             cfg.default_model = model;
         }
         cfg
@@ -302,10 +296,10 @@ impl Orchestrator {
 
     /// The model to offer when a remote request was not sent: `[model]`,
     /// if this session is on the remote tier and `[model]` is local.
-    fn local_fallback(&self) -> Option<(ModelConfig, Arc<dyn Provider>)> {
-        (self.uses_remote() && !destination_of(&self.config.model).is_remote()).then(|| {
+    fn local_fallback(&self, conv: &Conversation) -> Option<(ModelConfig, Arc<dyn Provider>)> {
+        (self.uses_remote(conv) && !destination_of(&self.config.model).is_remote()).then(|| {
             (
-                self.with_choice(&self.config.model, false),
+                self.with_choice(conv, &self.config.model, false),
                 self.client.clone(),
             )
         })
@@ -314,14 +308,14 @@ impl Orchestrator {
     /// Load the local model this conversation uses, in the background, so
     /// the next question does not wait for it (measured: 25-42 s). Nothing
     /// on the remote tier; without a runtime (a plain test), nothing.
-    pub fn warm_up(&self) {
-        if self.uses_remote() {
+    pub fn warm_up(&self, conv: &Conversation) {
+        if self.uses_remote(conv) {
             return;
         }
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
-        let (cfg, client) = self.tier();
+        let (cfg, client) = self.tier(conv);
         let options = self.model_options(&cfg);
         runtime.spawn(async move {
             if let Err(e) = client.warm(&cfg.default_model, &options).await {
@@ -365,13 +359,13 @@ impl Orchestrator {
 
     /// Every model `/model` can switch to: each tier's `default_model`, then
     /// its `models`, local first. `current` marks the one answering now.
-    pub fn models(&self) -> Vec<ModelChoice> {
+    pub fn models(&self, conv: &Conversation) -> Vec<ModelChoice> {
         let mut tiers = vec![(&self.config.model, false)];
         if let (Some(cfg), Some(_)) = (&self.config.remote, &self.remote) {
             tiers.push((&cfg.model, true));
         }
-        let now = self.tier().0.default_model;
-        let on_remote = self.uses_remote();
+        let now = self.tier(conv).0.default_model;
+        let on_remote = self.uses_remote(conv);
         let mut out: Vec<ModelChoice> = Vec::new();
         for (cfg, remote) in tiers {
             for name in std::iter::once(&cfg.default_model).chain(cfg.models.iter()) {
@@ -392,8 +386,8 @@ impl Orchestrator {
     /// or a part of exactly one name, any case. The model's tier comes with
     /// it. A name that is not configured, or matches several, changes
     /// nothing.
-    pub fn set_model(&self, query: &str) -> Result<ModelChoice> {
-        let models = self.models();
+    pub fn set_model(&self, conv: &Conversation, query: &str) -> Result<ModelChoice> {
+        let models = self.models(conv);
         let q = query.trim().to_lowercase();
         let exact: Vec<&ModelChoice> = models
             .iter()
@@ -431,8 +425,8 @@ impl Orchestrator {
                 )))
             }
         };
-        self.chosen.lock().unwrap()[chosen.remote as usize] = Some(chosen.name.clone());
-        self.set_remote(chosen.remote)?;
+        conv.choose(chosen.remote, chosen.name.clone());
+        self.set_remote(conv, chosen.remote)?;
         Ok(ModelChoice {
             current: true,
             ..chosen
@@ -448,8 +442,8 @@ impl Orchestrator {
     }
 
     /// The provider and model a turn will be sent to, for `jarvis status`.
-    pub fn model_info(&self) -> (&'static str, String, String) {
-        let (cfg, client) = self.tier();
+    pub fn model_info(&self, conv: &Conversation) -> (&'static str, String, String) {
+        let (cfg, client) = self.tier(conv);
         (client.name(), cfg.default_model, cfg.base_url)
     }
 
@@ -457,8 +451,8 @@ impl Orchestrator {
     /// was already rejected at startup (`provider::from_config`); if one gets
     /// here anyway, it is treated as remote with an undeclared policy, which
     /// asks rather than sends.
-    pub fn destination(&self) -> Destination {
-        destination_of(&self.tier().0)
+    pub fn destination(&self, conv: &Conversation) -> Destination {
+        destination_of(&self.tier(conv).0)
     }
 
     /// The owner's policy for remote requests, with their allow-list.
@@ -483,69 +477,19 @@ impl Orchestrator {
     }
 
     /// What this conversation trusts (`[t]`), for `/trust`.
-    pub fn trusted(&self) -> Vec<String> {
-        self.trust.list(&self.session_id)
+    pub fn trusted(&self, conv: &Conversation) -> Vec<String> {
+        self.trust.list(&conv.id)
     }
 
     /// Forget this conversation's trust, for `/trust clear`.
-    pub fn clear_trust(&self) {
-        self.trust.clear(&self.session_id)
-    }
-
-    pub fn session_id(&self) -> &str {
-        &self.session_id
-    }
-
-    pub fn set_session(&mut self, session_id: String) {
-        self.session_id = session_id.clone();
-        if let Some(ref m) = self.memory {
-            let _ = m.create_session(&session_id);
-        }
-    }
-
-    /// Handle one user turn with no way to reach a human.
-    ///
-    /// Any tool with an `ask` policy is denied. Use [`Orchestrator::run_with`]
-    /// when a front-end is present and can prompt.
-    pub async fn run(&self, input: &str) -> Result<String> {
-        self.run_with(input, None).await
-    }
-
-    /// Handle one user turn, asking `confirm` before an `ask`-policy tool
-    /// runs.
-    pub async fn run_with(
-        &self,
-        input: &str,
-        confirm: Option<&dyn ConfirmationHandler>,
-    ) -> Result<String> {
-        self.run_with_options(input, confirm, None, None).await
-    }
-
-    /// Handle one user turn with cancellation and optional token streaming.
-    ///
-    /// `sink` receives the assistant text of a *direct* conversation as the
-    /// model produces it. A tool-capable turn is not streamed: the model may
-    /// answer with a tool call, and text shown before that decision would be
-    /// pulled back from the screen. The caller still receives the complete
-    /// answer as the return value.
-    ///
-    /// Cancellation is checked between model calls and inside them. A tool
-    /// that has already started always runs to completion.
-    pub async fn run_with_options(
-        &self,
-        input: &str,
-        confirm: Option<&dyn ConfirmationHandler>,
-        cancel: Option<&Cancellation>,
-        sink: Option<&UnboundedSender<String>>,
-    ) -> Result<String> {
-        self.run_turn(input, confirm, cancel, sink)
-            .await
-            .map(|report| report.answer)
+    pub fn clear_trust(&self, conv: &Conversation) {
+        self.trust.clear(&conv.id)
     }
 
     /// One turn's answer and its footer, for clients that show both.
     pub async fn run_with_footer(
         &self,
+        conv: &Conversation,
         input: &str,
         confirm: Option<&dyn ConfirmationHandler>,
         cancel: Option<&Cancellation>,
@@ -553,7 +497,7 @@ impl Orchestrator {
         progress: Option<&UnboundedSender<String>>,
     ) -> Result<(String, String, TurnTiming)> {
         let report = self
-            .run_turn_observed(input, confirm, cancel, sink, progress)
+            .run_turn_observed(conv, input, confirm, cancel, sink, progress)
             .await?;
         let footer = footer(&report);
         Ok((report.answer, footer, report.timing))
@@ -563,12 +507,13 @@ impl Orchestrator {
     /// answer. The eval harness grades this report.
     pub async fn run_turn(
         &self,
+        conv: &Conversation,
         input: &str,
         confirm: Option<&dyn ConfirmationHandler>,
         cancel: Option<&Cancellation>,
         sink: Option<&UnboundedSender<String>>,
     ) -> Result<TurnReport> {
-        self.run_turn_observed(input, confirm, cancel, sink, None)
+        self.run_turn_observed(conv, input, confirm, cancel, sink, None)
             .await
     }
 
@@ -577,6 +522,7 @@ impl Orchestrator {
     /// can tell a long turn from a stuck one.
     pub async fn run_turn_observed(
         &self,
+        conv: &Conversation,
         input: &str,
         confirm: Option<&dyn ConfirmationHandler>,
         cancel: Option<&Cancellation>,
@@ -588,12 +534,10 @@ impl Orchestrator {
         let started = std::time::Instant::now();
         let timed = confirm.map(TimedConfirm::new);
         let confirm = timed.as_ref().map(|t| t as &dyn ConfirmationHandler);
-        let rec = TurnRecorder {
-            progress: progress.cloned(),
-            ..TurnRecorder::default()
-        };
+        let mut rec = TurnRecorder::new(conv);
+        rec.progress = progress.cloned();
         let result = self
-            .run_turn_inner(input, confirm, cancel, sink, &rec)
+            .run_turn_inner(conv, input, confirm, cancel, sink, &rec)
             .await;
         let you_ms = timed.as_ref().map_or(0, TimedConfirm::waited_ms);
         let total_ms = started.elapsed().as_millis() as u64;
@@ -602,7 +546,7 @@ impl Orchestrator {
                 let mut report = rec.finish(answer, &plan);
                 report.timing.total_ms = total_ms;
                 report.timing.you_ms = you_ms;
-                self.log_turn(input, &report, signals(&report));
+                self.log_turn(conv, input, &report, signals(&report));
                 Ok(report)
             }
             Err(e) => {
@@ -616,7 +560,7 @@ impl Orchestrator {
                 } else {
                     "error"
                 });
-                self.log_turn(input, &report, found);
+                self.log_turn(conv, input, &report, found);
                 Err(e)
             }
         }
@@ -626,11 +570,12 @@ impl Orchestrator {
     /// logs it.
     async fn run_turn_inner(
         &self,
+        conv: &Conversation,
         input: &str,
         confirm: Option<&dyn ConfirmationHandler>,
         cancel: Option<&Cancellation>,
         sink: Option<&UnboundedSender<String>>,
-        rec: &TurnRecorder,
+        rec: &TurnRecorder<'_>,
     ) -> Result<(String, TurnPlan)> {
         if cancel.is_some_and(Cancellation::is_cancelled) {
             return Err(JarvisError::Cancelled);
@@ -641,15 +586,10 @@ impl Orchestrator {
 
         // Snapshot history *before* persisting the new user message so the
         // prompt never contains the request twice.
-        let history = self.history_for_prompt();
+        let history = self.history_for_prompt(conv);
 
         if let Some(ref m) = self.memory {
-            let _ = m.add_labeled_message(
-                &self.session_id,
-                "user",
-                input,
-                Some(&Label::of(Origin::User)),
-            );
+            let _ = m.add_labeled_message(&conv.id, "user", input, Some(&Label::of(Origin::User)));
         }
         rec.saw(&Label::of(Origin::User));
 
@@ -709,7 +649,13 @@ impl Orchestrator {
             .iter()
             .any(|c| c.status == "executed");
         let answer = taint::scrub_markers(&answer, ran);
-        self.persist_assistant(&answer, &rec.label());
+        let model = rec
+            .used
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|(model, _)| model.clone());
+        self.persist_assistant(conv, &answer, &rec.label(), model.as_deref());
         Ok((answer, plan))
     }
 

@@ -67,11 +67,26 @@ explained.
   `jarvis report`.
 * A sentence after "run outside the sandbox:" goes to the model.
 
-## Milestone 6.5 - concurrency (next)
+## Milestone 6.5a - one conversation per window (done, 2026-11-19)
+
+Real use: `/new` in one window moved every window, and a question went into a
+conversation its window did not show.
+
+* A `Conversation` holds one conversation's state; the orchestrator holds
+  none, and every caller passes one.
+* Every conversation request names its `session`; none is a default.
+* Each conversation keeps its model and tier across restarts; each answer
+  records its model; new conversations start with the model used last.
+* A new window starts a new conversation (`--continue` for the last one).
+* Fixed on the way: the search-index triggers made deleting a conversation
+  with messages, or updating any message, fail.
+* [Design](superpowers/specs/2026-11-18-conversation-isolation-design.md).
+
+## Milestone 6.5b - turns in parallel (next)
 
 Two conversations at once: a quick question must not wait for a long one.
-Per-conversation state (history, trust, model, mode), shared services behind
-short locks, one GPU queue that says it is waiting. Spec first.
+Shared services behind short locks instead of one lock per turn, and one GPU
+queue that says it is waiting. Spec first.
 
 ## Milestone 6.6 - modes
 

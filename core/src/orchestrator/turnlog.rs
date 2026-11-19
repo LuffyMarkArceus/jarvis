@@ -16,14 +16,6 @@ const REPHRASE_WITHIN: Duration = Duration::from_secs(60);
 /// Past this size the log moves to `turns.1.jsonl`, replacing the older one.
 const ROTATE_BYTES: u64 = 5 * 1024 * 1024;
 
-/// The turn `/bad` and a rephrase are judged against.
-pub(super) struct LastTurn {
-    pub(super) id: String,
-    pub(super) session: String,
-    pub(super) ended: Instant,
-    pub(super) words: HashSet<String>,
-}
-
 /// Times the owner's answers to prompts: that time is theirs, not Jarvis's,
 /// and must not make a turn look slow.
 pub(super) struct TimedConfirm<'a> {
@@ -159,6 +151,7 @@ impl Orchestrator {
     /// and for spotting a rephrase.
     pub(super) fn log_turn(
         &self,
+        conv: &Conversation,
         input: &str,
         report: &TurnReport,
         mut signals: Vec<&'static str>,
@@ -166,12 +159,9 @@ impl Orchestrator {
         let words = meaning_words(input);
         let id = Uuid::new_v4().to_string();
         {
-            let last = self.last_turn.lock().unwrap();
+            let last = conv.last_turn.lock().unwrap();
             if let Some(last) = last.as_ref() {
-                if last.session == self.session_id
-                    && last.ended.elapsed() <= REPHRASE_WITHIN
-                    && rephrases(&last.words, &words)
-                {
+                if last.ended.elapsed() <= REPHRASE_WITHIN && rephrases(&last.words, &words) {
                     signals.push("rephrased");
                 }
             }
@@ -185,7 +175,7 @@ impl Orchestrator {
             "type": "turn",
             "id": id,
             "at": chrono::Utc::now().to_rfc3339(),
-            "session": self.session_id,
+            "session": conv.id,
             "input": excerpt(input, 300),
             "route": report.route,
             "model": report.model,
@@ -196,20 +186,19 @@ impl Orchestrator {
             "timing": report.timing,
             "signals": signals,
         }));
-        *self.last_turn.lock().unwrap() = Some(LastTurn {
+        *conv.last_turn.lock().unwrap() = Some(LastTurn {
             id,
-            session: self.session_id.clone(),
             ended: Instant::now(),
             words,
         });
     }
 
     /// `/bad` or `/good` about the last turn of this conversation.
-    pub fn feedback(&self, kind: &str, note: &str) -> Result<()> {
+    pub fn feedback(&self, conv: &Conversation, kind: &str, note: &str) -> Result<()> {
         let turn = {
-            let last = self.last_turn.lock().unwrap();
+            let last = conv.last_turn.lock().unwrap();
             match last.as_ref() {
-                Some(t) if t.session == self.session_id => t.id.clone(),
+                Some(t) => t.id.clone(),
                 _ => {
                     return Err(JarvisError::Config(
                         "There is no turn in this conversation yet to give feedback on.".into(),
@@ -220,7 +209,7 @@ impl Orchestrator {
         self.append_turn_log(&json!({
             "type": "feedback",
             "at": chrono::Utc::now().to_rfc3339(),
-            "session": self.session_id,
+            "session": conv.id,
             "turn": turn,
             "kind": kind,
             "note": note.trim(),

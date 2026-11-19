@@ -107,10 +107,13 @@ impl Orchestrator {
         confirm: Option<&dyn ConfirmationHandler>,
         cancel: Option<&Cancellation>,
         sink: Option<&UnboundedSender<String>>,
-        rec: &TurnRecorder,
+        rec: &TurnRecorder<'_>,
     ) -> Result<String> {
-        let (system_prompt, recall_label) =
-            self.with_recall(input, self.conversation_prompt_for(history));
+        let (system_prompt, recall_label) = self.with_recall(
+            rec.conversation,
+            input,
+            self.conversation_prompt_for(history),
+        );
         let mut plan = context::assemble(&system_prompt, input, history, &self.config.context, 0);
         self.mark_history(&mut plan.messages);
         self.log_plan(&plan);
@@ -137,7 +140,7 @@ impl Orchestrator {
             Err(e) => {
                 info!("Model unavailable: {}, using fallback", e);
                 rec.model_failed(&e);
-                return Ok(self.fallback_answer(&e));
+                return Ok(self.fallback_answer(rec.conversation, &e));
             }
         };
         rec.model_turn(&turn);
@@ -163,13 +166,16 @@ impl Orchestrator {
         plan: &TurnPlan,
         confirm: Option<&dyn ConfirmationHandler>,
         cancel: Option<&Cancellation>,
-        rec: &TurnRecorder,
+        rec: &TurnRecorder<'_>,
     ) -> Result<String> {
         // The offered tools are the request's tools. There is no second
         // filter here, and no way for the prompt to mention anything else.
         let tools = plan.schemas();
-        let (system_prompt, recall_label) =
-            self.with_recall(input, self.tool_system_prompt(&plan.tools));
+        let (system_prompt, recall_label) = self.with_recall(
+            rec.conversation,
+            input,
+            self.tool_system_prompt(&plan.tools),
+        );
         let reserved = self.tool_schema_tokens(&tools);
         let assembled = context::assemble(
             &system_prompt,
@@ -216,7 +222,7 @@ impl Orchestrator {
         }
 
         let max_rounds = self
-            .tier()
+            .tier(rec.conversation)
             .0
             .max_rounds
             .unwrap_or(DEFAULT_MAX_ROUNDS)
@@ -251,7 +257,7 @@ impl Orchestrator {
                 Err(e) => {
                     info!("Model unavailable: {}, using fallback", e);
                     rec.model_failed(&e);
-                    return Ok(self.fallback_answer(&e));
+                    return Ok(self.fallback_answer(rec.conversation, &e));
                 }
             };
             rec.model_turn(&turn);
@@ -419,7 +425,7 @@ impl Orchestrator {
         plan: &TurnPlan,
         confirm: Option<&dyn ConfirmationHandler>,
         messages: &mut Vec<ChatMessage>,
-        rec: &TurnRecorder,
+        rec: &TurnRecorder<'_>,
     ) -> Vec<ToolOutcome> {
         let mut outcomes = Vec::new();
 

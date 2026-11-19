@@ -90,3 +90,10 @@ turns were really in.
 Re-run on nemotron: both requests now search /mnt/storage, then ask before
 sending its listing to the remote model ("always allow" stops that).
 
+## 2026-11-19, Milestone 6.5a
+
+| Finding | Whose | Done |
+| --- | --- | --- |
+| Two windows shared one conversation: `/new` in one moved both, and a question landed in a conversation its window did not show (a test against the live daemon did this to the owner's session) | ours | Each window is its own conversation; checked live with two TUIs against a throw-away daemon |
+| Deleting a conversation with messages always failed ("SQL logic error"): the search-index triggers used FTS5's 'delete' command on a table that is not external-content | ours, latent since the start | Triggers recreated correctly on every start; repairs existing databases |
+
