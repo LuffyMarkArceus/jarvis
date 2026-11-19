@@ -185,6 +185,16 @@ impl Orchestrator {
         p.push_str("- Only report actions that appear in the tool results. Never claim an action succeeded unless it appears there.\n");
         p.push_str("- When using tools, be plain and factual about what was done; save the wit for conversation.\n");
         p.push_str("- To use a tool, emit a tool call with its arguments. Never repeat a tool's definition.\n");
+        // "My DATA drive" is a label; the model needs its folder. Only where
+        // it can act on files, so chat prompts stay short.
+        let acts_on_files = offered
+            .iter()
+            .any(|t| t.name.starts_with("filesystem.") || t.name == "shell.run");
+        if acts_on_files {
+            if let Some(line) = crate::drives::prompt_line(&crate::drives::mounted()) {
+                p.push_str(&line);
+            }
+        }
         // When both are offered, say how they fit together. A small model
         // will otherwise fetch a guessed URL and fail, or search and then
         // answer from the snippet alone.

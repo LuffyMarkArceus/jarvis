@@ -330,6 +330,39 @@ impl Orchestrator {
         });
     }
 
+    /// "open X" from the router is a guess that X is an app. Confirm it from
+    /// the installed apps and launch the app's own command ("vscode" runs
+    /// `code`); if X is no app ("episode 001 of ..."), it is something to
+    /// find and open, which is the model's job.
+    fn resolve_launch(&self, route: Route) -> Route {
+        let Route::Tool { name, args } = &route else {
+            return route;
+        };
+        if name != "shell.run" || args["background"].as_bool() != Some(true) {
+            return route;
+        }
+        let Some(wanted) = args["command"].as_str() else {
+            return route;
+        };
+        let dirs = self
+            .config
+            .tools
+            .app_dirs
+            .clone()
+            .unwrap_or_else(crate::apps::app_dirs);
+        match crate::apps::find(&dirs, wanted) {
+            Some(app) => {
+                let mut args = args.clone();
+                args["command"] = json!(app.command);
+                Route::Tool {
+                    name: name.clone(),
+                    args,
+                }
+            }
+            None => Route::Model,
+        }
+    }
+
     /// Every model `/model` can switch to: each tier's `default_model`, then
     /// its `models`, local first. `current` marks the one answering now.
     pub fn models(&self) -> Vec<ModelChoice> {
@@ -620,7 +653,7 @@ impl Orchestrator {
         }
         rec.saw(&Label::of(Origin::User));
 
-        let route = router::route(input);
+        let route = self.resolve_launch(router::route(input));
         // One decision, one owner: the planner narrows the route and produces
         // the exact tool set this turn may use. Both the provider request and
         // the system prompt are rendered from `plan.tools`, so the model can
@@ -667,6 +700,15 @@ impl Orchestrator {
             }
         };
 
+        // A model copying our untrusted marker is never shown, and one that
+        // wraps made-up output in it, with no tool run, is called out.
+        let ran = rec
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c.status == "executed");
+        let answer = taint::scrub_markers(&answer, ran);
         self.persist_assistant(&answer, &rec.label());
         Ok((answer, plan))
     }

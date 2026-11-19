@@ -572,3 +572,11 @@ fn every_request_says_how_long_to_keep_the_model_loaded() {
     assert_eq!(jarvis.model_options(&model)["keep_alive"], "-1");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn drive_names_are_given_only_where_the_model_can_use_them() {
+    let (jarvis, dir) = web_jarvis();
+    let chat = jarvis.tool_system_prompt(&[]);
+    assert!(!chat.contains("Drives on this machine"), "{chat}");
+    let _ = std::fs::remove_dir_all(dir);
+}

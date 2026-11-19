@@ -1004,6 +1004,7 @@ name = "jarvis-tui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "crossterm",
  "jarvis-common",
  "jarvis-core",

@@ -309,6 +309,9 @@ pub struct ToolsConfig {
     /// Where relative paths and shell commands run. Unset: wherever the
     /// process started. Not a sandbox - an absolute path goes anywhere.
     pub work_dir: Option<PathBuf>,
+    /// Where "open <app>" looks for installed apps (`.desktop` files).
+    /// Unset: the desktop's own folders.
+    pub app_dirs: Option<Vec<PathBuf>>,
 }
 
 impl Default for ToolsConfig {
@@ -317,6 +320,7 @@ impl Default for ToolsConfig {
             require_confirmation: true,
             allowed_shell_commands: Vec::new(),
             work_dir: None,
+            app_dirs: None,
         }
     }
 }

@@ -50,6 +50,20 @@ const WEB_SERVERS: &[&str] = &["fetch", "search", "web", "browser", "http", "cra
 /// File-ish nouns. Used because the bare verb "write" appears in "write a
 /// poem", which must not offer the filesystem tools.
 const FILE_NOUNS: &[&str] = &[
+    // Real use: "watch these episodes on my DATA drive in mpv" got no tools.
+    "drive",
+    "drives",
+    "episode",
+    "episodes",
+    "video",
+    "videos",
+    "movie",
+    "movies",
+    "music",
+    "song",
+    "songs",
+    "photo",
+    "photos",
     "file",
     "files",
     "folder",
@@ -324,7 +338,7 @@ fn detect_intent(input: &str) -> Intent {
         files: has_file_noun || has_file_path || (has_file_verb && has_path(&without_urls)),
         shell: [
             "run", "execute", "exec", "command", "install", "launch", "kill", "sudo", "package",
-            "service", "shell", "terminal", "bash",
+            "service", "shell", "terminal", "bash", "open", "play", "watch",
         ]
         .iter()
         .any(|w| words.contains(*w))
@@ -454,6 +468,21 @@ mod tests {
             &fetch_tools(),
         );
         assert!(!plan.web);
+    }
+
+    #[test]
+    fn finding_and_opening_media_offers_files_and_the_shell() {
+        // Real use: with no tools offered, nemotron answered "watch these
+        // episodes in mpv" with a find result it made up.
+        for input in [
+            "I want to watch Kusuriya no Hitoigoto episodes on my DATA drive, open them in mpv app for me",
+            "Can you open the episode 001 of BleaCH on my DATA drive?",
+            "play the latest song in my music folder",
+        ] {
+            let plan = plan(input, Route::Model, &native(), &fetch_tools());
+            assert!(plan.allows("shell.run"), "{input}: {:?}", plan.names());
+            assert!(plan.allows("filesystem.list_dir"), "{input}: {:?}", plan.names());
+        }
     }
 
     #[test]

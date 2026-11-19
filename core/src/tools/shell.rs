@@ -16,6 +16,29 @@ pub struct RunShellTool {
     pub key_vars: Vec<String>,
 }
 
+/// The program a command line runs, if it cannot be found: a path that is
+/// not an executable file, or a name on no directory of `PATH`. Leading
+/// `NAME=value` assignments are skipped.
+fn missing_program(command: &str) -> Option<String> {
+    let program = command
+        .split_whitespace()
+        .find(|word| !word.contains('=') || word.starts_with('='))?;
+    let is_exe = |p: &std::path::Path| {
+        use std::os::unix::fs::PermissionsExt as _;
+        p.is_file()
+            && p.metadata()
+                .is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+    };
+    let found = if program.contains('/') {
+        is_exe(std::path::Path::new(program))
+    } else {
+        std::env::var_os("PATH")
+            .map(|path| std::env::split_paths(&path).any(|dir| is_exe(&dir.join(program))))
+            .unwrap_or(false)
+    };
+    (!found).then(|| program.to_string())
+}
+
 /// Output that says the sandbox, not the command, was the problem.
 const SANDBOX_SIGNS: &[&str] = &[
     "Read-only file system",
@@ -117,6 +140,14 @@ impl Tool for RunShellTool {
         let outside = args["outside_sandbox"].as_bool().unwrap_or(false);
 
         if background {
+            // `setsid X &` succeeds whether or not X exists, so check first:
+            // "Started in the background" for nothing is the worst kind of
+            // failure - confidently false.
+            if let Some(program) = missing_program(command) {
+                return Err(crate::error::JarvisError::Tool(format!(
+                    "No program called '{program}' is installed on this machine, so nothing was started."
+                )));
+            }
             // Detach the child so a GUI app does not hold the call open.
             // `setsid` detaches from the controlling terminal, which means the
             // process survives the shell that started it.

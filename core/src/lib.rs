@@ -1,10 +1,12 @@
 //! Jarvis Core - Orchestrator, tools, memory, and IPC
 
+pub mod apps;
 pub mod cancel;
 pub mod config;
 pub mod confirm;
 pub mod context;
 pub mod daemon;
+pub mod drives;
 pub mod egress;
 pub mod error;
 pub mod eval;

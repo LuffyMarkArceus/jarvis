@@ -273,3 +273,27 @@ async fn a_hidden_folder_that_does_not_exist_yet_cannot_be_planted() {
     assert_eq!(out["status"], 0, "{}", out);
     assert!(home.join("notes.md").exists());
 }
+
+#[tokio::test]
+async fn a_background_launch_of_a_program_that_does_not_exist_fails() {
+    // Real use: "Started in the background: episode 001" - and "vscode" -
+    // for programs that do not exist. `setsid X &` succeeds either way.
+    let d = dirs();
+    let mut t = tool(&d);
+    t.sandbox = None;
+    for missing in ["episode 001", "vscode", "/no/such/program --flag"] {
+        let err = t
+            .execute(json!({ "command": missing, "background": true, "outside_sandbox": true }))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("No program called"), "{missing}: {err}");
+    }
+    // A real one still starts.
+    let ok = run(
+        &t,
+        json!({ "command": "true", "background": true, "outside_sandbox": true }),
+    )
+    .await;
+    assert_eq!(ok["background"], true, "{ok}");
+}
