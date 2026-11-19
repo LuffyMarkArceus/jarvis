@@ -352,6 +352,7 @@ async fn handle_request(
                     "provider": provider,
                     "model": model,
                     "base_url": base_url,
+                    "tier": if daemon_lock.default_remote() { "remote" } else { "local" },
                     "privacy": daemon_lock.default_privacy().await,
                     "tools": daemon_lock.list_tools().await,
                     "last_session": daemon_lock.last_session(),
@@ -490,14 +491,26 @@ async fn handle_request(
             // A window opening a conversation is about to ask in it.
             daemon_lock.warm_up(&sid).await;
             match daemon_lock.get_session_messages(&sid).await {
-                Ok(messages) => Response::ok(
-                    request.id,
-                    serde_json::json!({
-                        "messages": messages,
-                        "model": daemon_lock.model_info(&sid).await.map(|m| m.1).unwrap_or_default(),
-                        "tier": if daemon_lock.uses_remote(&sid).await.unwrap_or(false) { "remote" } else { "local" },
-                    }),
-                ),
+                Ok(messages) => {
+                    let messages: Vec<serde_json::Value> = messages
+                        .iter()
+                        .map(|m| {
+                            let mut v = serde_json::to_value(m).unwrap_or_default();
+                            if let Some(model) = &m.model {
+                                v["footer"] = daemon_lock.answer_footer(model).into();
+                            }
+                            v
+                        })
+                        .collect();
+                    Response::ok(
+                        request.id,
+                        serde_json::json!({
+                            "messages": messages,
+                            "model": daemon_lock.model_info(&sid).await.map(|m| m.1).unwrap_or_default(),
+                            "tier": if daemon_lock.uses_remote(&sid).await.unwrap_or(false) { "remote" } else { "local" },
+                        }),
+                    )
+                }
                 Err(e) => Response::err(request.id, e.to_string()),
             }
         }

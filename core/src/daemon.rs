@@ -269,6 +269,20 @@ impl Daemon {
         Ok(orch.destination(&conv).notice().to_string())
     }
 
+    /// Whether a new conversation starts on the remote tier, for `status`.
+    pub fn default_remote(&self) -> bool {
+        self.conversations.preferred().remote()
+    }
+
+    /// The footer under a stored answer: the model that wrote it and the
+    /// tier that model runs on (as configured now).
+    pub fn answer_footer(&self, model: &str) -> String {
+        let remote = self.config.remote.as_ref().is_some_and(|r| {
+            r.model.default_model == model || r.model.models.iter().any(|m| m == model)
+        });
+        format!("{model} · {}", if remote { "remote" } else { "local" })
+    }
+
     /// The privacy notice for a new conversation's tier, for `status`.
     pub async fn default_privacy(&self) -> String {
         let preferred = self.conversations.preferred();

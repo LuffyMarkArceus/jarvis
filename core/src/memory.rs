@@ -140,8 +140,23 @@ impl MemoryManager {
     /// delete or update of a message failed. Recreated on every start, which
     /// also repairs databases made with the old ones.
     fn repair_fts_triggers(conn: &Connection) -> Result<()> {
+        // Only once, and atomically: a message deleted between a DROP and
+        // its CREATE would leave its text searchable.
+        let repaired: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'trigger'
+                 AND name IN ('messages_ad', 'messages_au')
+                 AND sql LIKE '%WHERE rowid = old.id%'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| JarvisError::Memory(format!("Migration failed: {}", e)))?;
+        if repaired == 2 {
+            return Ok(());
+        }
         conn.execute_batch(
-            "DROP TRIGGER IF EXISTS messages_ad;
+            "BEGIN IMMEDIATE;
+             DROP TRIGGER IF EXISTS messages_ad;
              DROP TRIGGER IF EXISTS messages_au;
              CREATE TRIGGER messages_ad AFTER DELETE ON messages BEGIN
                  DELETE FROM messages_fts WHERE rowid = old.id;
@@ -150,7 +165,8 @@ impl MemoryManager {
                  DELETE FROM messages_fts WHERE rowid = old.id;
                  INSERT INTO messages_fts(rowid, session_id, role, content)
                  VALUES (new.id, new.session_id, new.role, new.content);
-             END;",
+             END;
+             COMMIT;",
         )
         .map_err(|e| JarvisError::Memory(format!("Migration failed: {}", e)))
     }

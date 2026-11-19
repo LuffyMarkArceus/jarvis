@@ -100,11 +100,16 @@ impl Conversations {
         let mut chosen = [None, None];
         chosen[remote as usize] = model;
         let conv = Conversation::restore(id.to_string(), remote, chosen);
-        self.loaded
+        // Whoever loaded it first wins: two windows on one conversation
+        // must share one `Conversation`, or a model switch in one would miss
+        // the other.
+        Ok(self
+            .loaded
             .lock()
             .unwrap()
-            .insert(id.to_string(), conv.clone());
-        Ok(conv)
+            .entry(id.to_string())
+            .or_insert(conv)
+            .clone())
     }
 
     /// A new conversation, on the model and tier used most recently.

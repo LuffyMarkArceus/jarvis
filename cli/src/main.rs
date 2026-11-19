@@ -607,7 +607,17 @@ async fn main() -> anyhow::Result<()> {
                     .result
                     .and_then(|r| r["session_id"].as_str().map(String::from))
                     .unwrap_or_default(),
-                _ => String::new(),
+                // The daemon is up but could not start one: say why, rather
+                // than asking without a conversation.
+                Ok(r) => {
+                    eprintln!(
+                        "Error: could not start a conversation: {}",
+                        r.error.unwrap_or_default()
+                    );
+                    std::process::exit(1);
+                }
+                // No daemon: the ask below runs in direct mode.
+                Err(_) => String::new(),
             };
             let request = Request::new("ask", json!({"prompt": prompt, "session": session}));
             let interactive = std::io::stdout().is_terminal();
@@ -828,7 +838,7 @@ async fn main() -> anyhow::Result<()> {
                             println!("Model:    {}", field("model"));
                             println!("Tier:     {}", field("tier"));
                             println!("Privacy:  {}", field("privacy"));
-                            println!("Session:  {}", field("session_id"));
+                            println!("Last:     {}", field("last_session"));
                             if let Some(tools) = result.get("tools").and_then(|t| t.as_array()) {
                                 println!();
                                 print_tools(tools);
@@ -1118,6 +1128,11 @@ async fn main() -> anyhow::Result<()> {
                                                 .and_then(|v| v.as_str())
                                                 .unwrap_or("");
                                             println!("[{}]: {}", role, content);
+                                            if let Some(footer) =
+                                                msg.get("footer").and_then(|v| v.as_str())
+                                            {
+                                                println!("    ({footer})");
+                                            }
                                             println!("---");
                                         }
                                     }

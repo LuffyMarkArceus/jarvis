@@ -311,3 +311,44 @@ async fn pruning_leaves_open_conversations_alone() {
     let asked = a.in_mine("ask", json!({ "prompt": "still here?" })).await;
     assert!(asked.ok, "{:?}", asked.error);
 }
+
+#[tokio::test]
+async fn a_reopened_conversation_says_which_model_wrote_each_answer() {
+    let home = fresh().await;
+    let mut a = Window::open(&home).await;
+    assert!(a.in_mine("ask", json!({ "prompt": "one" })).await.ok);
+    assert!(
+        a.in_mine("model.set", json!({ "model": "nemotron" }))
+            .await
+            .ok
+    );
+    assert!(a.in_mine("ask", json!({ "prompt": "two" })).await.ok);
+    let session = a.session.clone();
+    let shown = a
+        .in_mine("session.show", json!({ "session_id": session }))
+        .await;
+    let footers: Vec<Value> = shown.result.unwrap()["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["role"] == "assistant")
+        .map(|m| m["footer"].clone())
+        .collect();
+    assert_eq!(
+        footers,
+        vec![
+            json!("llama3.2:1b · local"),
+            json!("nvidia/nemotron-3-ultra-550b-a55b:free · remote")
+        ]
+    );
+}
+
+#[tokio::test]
+async fn status_reports_the_default_tier_and_last_conversation() {
+    let home = fresh().await;
+    let mut a = Window::open(&home).await;
+    assert!(a.in_mine("ask", json!({ "prompt": "hi" })).await.ok);
+    let status = a.call("status", json!({})).await.result.unwrap();
+    assert_eq!(status["tier"], "local");
+    assert_eq!(status["last_session"], json!(a.session));
+}

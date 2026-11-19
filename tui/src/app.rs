@@ -675,6 +675,14 @@ impl App {
             return vec![];
         }
 
+        if self.session_id.is_none() {
+            self.input.set(trimmed);
+            self.note(Entry::system(
+                "This window has no conversation yet. Type /new to start one.",
+            ));
+            return vec![];
+        }
+
         if self.history.last().map(String::as_str) != Some(trimmed) {
             self.history.push(trimmed.to_string());
         }
@@ -886,9 +894,17 @@ impl App {
                 .error
                 .unwrap_or_else(|| "the daemon did not say why".to_string());
             self.note(Entry::error(reason));
-            // The message that was to follow a failed /model is not lost.
-            if let Some(Pending::Model(Some(message))) = pending {
-                self.input.set(&message);
+            match pending {
+                // The message that was to follow a failed /model is not lost.
+                Some(Pending::Model(Some(message))) => self.input.set(&message),
+                // The window could not reopen or continue its conversation:
+                // it starts a new one rather than being left with none.
+                Some(Pending::LastSession | Pending::ShowSession(_))
+                    if self.session_id.is_none() =>
+                {
+                    return vec![Self::new_session_request()];
+                }
+                _ => {}
             }
             return vec![];
         }
@@ -976,6 +992,12 @@ impl App {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string();
+                if id.is_empty() {
+                    self.note(Entry::error(
+                        "The daemon did not start a conversation. Type /new to try again.",
+                    ));
+                    return vec![];
+                }
                 self.session_id = Some(id.clone());
                 if let Some(model) = result.get("model").and_then(Value::as_str) {
                     self.model = model.to_string();
@@ -1390,7 +1412,13 @@ fn messages_to_entries(result: &Value) -> Vec<Entry> {
                     let text = message.get("content")?.as_str()?.to_string();
                     let entry = match message.get("role").and_then(Value::as_str) {
                         Some("user") => Entry::user(text),
-                        Some("assistant") => Entry::assistant(text),
+                        Some("assistant") => Entry {
+                            footer: message
+                                .get("footer")
+                                .and_then(Value::as_str)
+                                .map(String::from),
+                            ..Entry::assistant(text)
+                        },
                         Some(role) => Entry::system(format!("{role}: {text}")),
                         None => Entry::system(text),
                     };
@@ -1517,6 +1545,7 @@ mod tests {
     #[test]
     fn enter_sends_the_prompt_and_adds_it_to_history() {
         let mut app = App::new("test".into());
+        app.session_id = Some("abc".into());
         app.input.set("hello");
         let actions = press(&mut app, KeyCode::Enter);
         match actions.as_slice() {
@@ -1544,6 +1573,18 @@ mod tests {
         app.input.insert_str("two");
         assert_eq!(app.input.text(), "one\ntwo");
         assert!(app.entries.iter().all(|entry| entry.role != Role::User));
+    }
+
+    #[test]
+    fn a_reopened_answer_keeps_its_models_footer() {
+        let entries = messages_to_entries(&json!({ "messages": [
+            { "role": "user", "content": "hi" },
+            { "role": "assistant", "content": "hello", "footer": "qwen2.5:3b · local" },
+            { "role": "assistant", "content": "old" },
+        ]}));
+        assert_eq!(entries[0].footer, None);
+        assert_eq!(entries[1].footer.as_deref(), Some("qwen2.5:3b · local"));
+        assert_eq!(entries[2].footer, None, "stored before models were");
     }
 
     #[test]
@@ -1795,6 +1836,7 @@ mod tests {
     #[test]
     fn history_walks_backwards_and_forwards() {
         let mut app = App::new("test".into());
+        app.session_id = Some("abc".into());
         for prompt in ["one", "two"] {
             app.input.set(prompt);
             press(&mut app, KeyCode::Enter);
@@ -2170,6 +2212,46 @@ mod tests {
         app.begin_request(request.id, Pending::LastSession);
         let actions = app.on_response(Response::ok(request.id, json!({ "session_id": null })));
         assert_eq!(request_of(&actions).0, "session.new");
+    }
+
+    #[test]
+    fn a_failed_continue_falls_back_to_a_new_conversation() {
+        // A window whose conversation could not be opened must not be
+        // left without one, refusing every prompt.
+        let mut app = App::new("llama3.2:1b".into());
+        app.session_id = Some("gone".into());
+        app.on_connected();
+        app.session_id = None;
+        let request = Request::new("session.show", json!({}));
+        app.begin_request(request.id, Pending::ShowSession("gone".into()));
+        let actions = app.on_response(Response::err(
+            request.id,
+            "There is no conversation gone.".into(),
+        ));
+        assert_eq!(request_of(&actions).0, "session.new");
+    }
+
+    #[test]
+    fn a_prompt_with_no_conversation_is_kept_not_shown_as_sent() {
+        let mut app = App::new("llama3.2:1b".into());
+        let request = Request::new("session.new", json!({}));
+        app.begin_request(request.id, Pending::NewSession);
+        app.on_response(Response::err(request.id, "database is locked".into()));
+        assert_eq!(app.session_id, None);
+        app.input.set("hello");
+        assert!(app.submit().is_empty());
+        assert_eq!(app.input.text(), "hello");
+        assert!(!app.entries.iter().any(|e| e.role == Role::User));
+        assert!(app.entries.last().unwrap().text.contains("/new"));
+    }
+
+    #[test]
+    fn a_new_conversation_reply_without_an_id_is_not_taken() {
+        let mut app = App::new("llama3.2:1b".into());
+        let request = Request::new("session.new", json!({}));
+        app.begin_request(request.id, Pending::NewSession);
+        app.on_response(Response::ok(request.id, json!({ "model": "x" })));
+        assert_eq!(app.session_id, None);
     }
 
     #[test]
