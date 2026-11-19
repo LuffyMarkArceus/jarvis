@@ -150,10 +150,10 @@ impl Input {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pending {
     Turn,
-    CurrentSession,
+    /// `session.last`, for `--continue`.
+    LastSession,
     ShowSession(String),
     ListSessions,
-    SwitchSession(String),
     NewSession,
     DeleteSession(String),
     Prune,
@@ -398,6 +398,8 @@ pub struct App {
     history_pos: Option<usize>,
     /// The last answered turn's timing, for `/timing`.
     last_timing: Option<Value>,
+    /// Open the conversation used last instead of a new one (`--continue`).
+    pub continue_last: bool,
     /// When the pending request was sent.
     busy_since: Option<Instant>,
     /// What the pending turn says it is doing now.
@@ -429,6 +431,7 @@ impl App {
             history: Vec::new(),
             history_pos: None,
             last_timing: None,
+            continue_last: false,
             busy_since: None,
             progress: None,
             diag: Vec::new(),
@@ -518,11 +521,48 @@ impl App {
         self.pending_id = None;
         self.streaming = None;
         self.cancelling = false;
-        vec![Action::Request {
-            method: "session.current",
+        // A window keeps its conversation across reconnects; a new one
+        // starts its own, or with --continue the one used last.
+        if let Some(id) = self.session_id.clone() {
+            return vec![self.show_request(&id)];
+        }
+        if self.continue_last {
+            return vec![Action::Request {
+                method: "session.last",
+                params: json!({}),
+                pending: Pending::LastSession,
+            }];
+        }
+        vec![Self::new_session_request()]
+    }
+
+    fn new_session_request() -> Action {
+        Action::Request {
+            method: "session.new",
             params: json!({}),
-            pending: Pending::CurrentSession,
-        }]
+            pending: Pending::NewSession,
+        }
+    }
+
+    /// `params` for `method`, with this window's conversation added when
+    /// the request is about one. `None` when the window has no conversation
+    /// yet: the request waits rather than going out without one.
+    pub fn scoped(&self, method: &str, mut params: Value) -> Option<Value> {
+        const CONVERSATION: &[&str] = &[
+            "ask",
+            "model.list",
+            "model.set",
+            "tier.set",
+            "feedback",
+            "trust.list",
+            "trust.clear",
+        ];
+        if !CONVERSATION.contains(&method) {
+            return Some(params);
+        }
+        let session = self.session_id.as_ref()?;
+        params["session"] = json!(session);
+        Some(params)
     }
 
     pub fn on_disconnected(&mut self, reason: String) {
@@ -813,12 +853,10 @@ impl App {
         )));
     }
 
+    /// Switching is the window's choice: it loads that conversation and
+    /// sends its id from then on. Nothing changes for other windows.
     fn switch_request(&mut self, id: &str) -> Vec<Action> {
-        vec![Action::Request {
-            method: "session.switch",
-            params: json!({ "session_id": id }),
-            pending: Pending::SwitchSession(id.to_string()),
-        }]
+        vec![self.show_request(id)]
     }
 
     fn show_request(&self, id: &str) -> Action {
@@ -912,19 +950,15 @@ impl App {
                 }
                 vec![]
             }
-            Some(Pending::CurrentSession) => {
-                let Some(id) = result.get("session_id").and_then(Value::as_str) else {
-                    self.note(Entry::error("The daemon did not report a session."));
-                    return vec![];
-                };
-                self.session_id = Some(id.to_string());
+            Some(Pending::LastSession) => match result.get("session_id").and_then(Value::as_str) {
+                Some(id) => vec![self.show_request(id)],
+                None => vec![Self::new_session_request()],
+            },
+            Some(Pending::ShowSession(id)) => {
+                self.session_id = Some(id);
                 if let Some(model) = result.get("model").and_then(Value::as_str) {
                     self.model = model.to_string();
                 }
-                vec![self.show_request(id)]
-            }
-            Some(Pending::ShowSession(id)) => {
-                self.session_id = Some(id);
                 self.entries = messages_to_entries(&result);
                 self.scroll = 0;
                 vec![]
@@ -936,12 +970,6 @@ impl App {
                 });
                 vec![]
             }
-            Some(Pending::SwitchSession(id)) => {
-                self.session_id = Some(id.clone());
-                self.entries.clear();
-                self.scroll = 0;
-                vec![self.show_request(&id)]
-            }
             Some(Pending::NewSession) => {
                 let id = result
                     .get("session_id")
@@ -949,6 +977,9 @@ impl App {
                     .unwrap_or_default()
                     .to_string();
                 self.session_id = Some(id.clone());
+                if let Some(model) = result.get("model").and_then(Value::as_str) {
+                    self.model = model.to_string();
+                }
                 self.entries.clear();
                 self.note(Entry::system(format!("Started session {id}.")));
                 vec![]
@@ -956,11 +987,13 @@ impl App {
             Some(Pending::DeleteSession(id)) => {
                 self.note(Entry::system(format!("Deleted session {id}.")));
                 self.overlay = None;
-                vec![Action::Request {
-                    method: "session.current",
-                    params: json!({}),
-                    pending: Pending::CurrentSession,
-                }]
+                // This window's own: it needs a new one. Another's: carry on.
+                if self.session_id.as_deref() == Some(id.as_str()) {
+                    self.session_id = None;
+                    vec![Self::new_session_request()]
+                } else {
+                    vec![]
+                }
             }
             Some(Pending::Prune) => {
                 let pruned = result
@@ -1565,41 +1598,6 @@ mod tests {
     }
 
     #[test]
-    fn current_session_chains_into_loading_the_transcript() {
-        let mut app = App::new("test".into());
-        let request = Request::new("session.current", json!({}));
-        app.begin_request(request.id, Pending::CurrentSession);
-        let actions = app.on_response(Response::ok(request.id, json!({"session_id": "abc"})));
-        match actions.as_slice() {
-            [Action::Request {
-                method, pending, ..
-            }] => {
-                assert_eq!(*method, "session.show");
-                assert_eq!(*pending, Pending::ShowSession("abc".into()));
-            }
-            other => panic!("unexpected actions: {other:?}"),
-        }
-        assert_eq!(app.session_id.as_deref(), Some("abc"));
-    }
-
-    #[test]
-    fn switching_sessions_replaces_the_transcript() {
-        let mut app = App::new("test".into());
-        app.entries.push(Entry::assistant("old"));
-        let request = Request::new("session.switch", json!({}));
-        app.begin_request(request.id, Pending::SwitchSession("new".into()));
-        let actions = app.on_response(Response::ok(request.id, json!({})));
-        assert!(app.entries.is_empty());
-        assert!(matches!(
-            actions.as_slice(),
-            [Action::Request {
-                pending: Pending::ShowSession(id),
-                ..
-            }] if id == "new"
-        ));
-    }
-
-    #[test]
     fn session_list_is_parsed_into_rows() {
         let result = json!({
             "sessions": [
@@ -1967,8 +1965,8 @@ mod tests {
         ));
         assert_eq!(app.model, "qwen2.5:3b");
 
-        let request = Request::new("session.current", json!({}));
-        app.begin_request(request.id, Pending::CurrentSession);
+        let request = Request::new("session.new", json!({}));
+        app.begin_request(request.id, Pending::NewSession);
         app.on_response(Response::ok(
             request.id,
             json!({ "session_id": "abc", "model": "cohere/north-mini-code:free", "tier": "remote" }),
@@ -2144,5 +2142,113 @@ mod tests {
         assert_eq!(notes.len(), 1, "{notes:?}");
         assert!(notes[0].contains("gave up"), "{notes:?}");
         assert!(app.take_diag().is_empty(), "taken once");
+    }
+
+    // ------------------------------------------- 6.5a: a window, a conversation
+
+    fn request_of(actions: &[Action]) -> (&'static str, Value) {
+        match actions {
+            [Action::Request { method, params, .. }] => (*method, params.clone()),
+            other => panic!("expected one request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_new_window_starts_a_new_conversation() {
+        let mut app = App::new("llama3.2:1b".into());
+        assert_eq!(request_of(&app.on_connected()).0, "session.new");
+        let mut resuming = App::new("llama3.2:1b".into());
+        resuming.continue_last = true;
+        assert_eq!(request_of(&resuming.on_connected()).0, "session.last");
+    }
+
+    #[test]
+    fn continue_with_nothing_to_continue_starts_a_new_one() {
+        let mut app = App::new("llama3.2:1b".into());
+        app.continue_last = true;
+        let request = Request::new("session.last", json!({}));
+        app.begin_request(request.id, Pending::LastSession);
+        let actions = app.on_response(Response::ok(request.id, json!({ "session_id": null })));
+        assert_eq!(request_of(&actions).0, "session.new");
+    }
+
+    #[test]
+    fn a_reconnecting_window_keeps_its_conversation() {
+        let mut app = App::new("llama3.2:1b".into());
+        app.session_id = Some("abc".into());
+        let (method, params) = request_of(&app.on_connected());
+        assert_eq!(method, "session.show");
+        assert_eq!(params["session_id"], "abc");
+    }
+
+    #[test]
+    fn every_conversation_request_carries_the_windows_session() {
+        let mut app = App::new("llama3.2:1b".into());
+        app.session_id = Some("abc".into());
+        for method in [
+            "ask",
+            "model.list",
+            "model.set",
+            "tier.set",
+            "feedback",
+            "trust.list",
+            "trust.clear",
+        ] {
+            let params = app.scoped(method, json!({})).expect("sent");
+            assert_eq!(params["session"], "abc", "{method}");
+        }
+        // Requests about the daemon carry none.
+        for method in ["session.list", "session.new", "status", "tools.list"] {
+            assert!(
+                app.scoped(method, json!({}))
+                    .unwrap()
+                    .get("session")
+                    .is_none(),
+                "{method}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_conversation_request_before_the_window_has_one_is_held() {
+        let app = App::new("llama3.2:1b".into());
+        assert_eq!(app.scoped("ask", json!({ "prompt": "hi" })), None);
+    }
+
+    #[test]
+    fn switch_is_the_windows_choice() {
+        let mut app = App::new("llama3.2:1b".into());
+        app.session_id = Some("abc".into());
+        app.entries.push(Entry::assistant("old"));
+        let (method, params) = request_of(&app.run_command(Command::Switch("xyz".into())));
+        assert_eq!(method, "session.show", "no session.switch any more");
+        assert_eq!(params["session_id"], "xyz");
+        let request = Request::new("session.show", json!({}));
+        app.begin_request(request.id, Pending::ShowSession("xyz".into()));
+        app.on_response(Response::ok(
+            request.id,
+            json!({ "messages": [], "model": "qwen2.5:3b", "tier": "local" }),
+        ));
+        assert_eq!(app.session_id.as_deref(), Some("xyz"));
+        assert_eq!(
+            app.model, "qwen2.5:3b",
+            "the header shows that conversation's model"
+        );
+    }
+
+    #[test]
+    fn deleting_this_windows_conversation_starts_a_new_one() {
+        let mut app = App::new("llama3.2:1b".into());
+        app.session_id = Some("abc".into());
+        let request = Request::new("session.delete", json!({}));
+        app.begin_request(request.id, Pending::DeleteSession("abc".into()));
+        let actions = app.on_response(Response::ok(request.id, json!({ "ok": true })));
+        assert_eq!(request_of(&actions).0, "session.new");
+        // Another window's: this one carries on.
+        let request = Request::new("session.delete", json!({}));
+        app.begin_request(request.id, Pending::DeleteSession("other".into()));
+        assert!(app
+            .on_response(Response::ok(request.id, json!({ "ok": true })))
+            .is_empty());
     }
 }

@@ -33,6 +33,9 @@ async fn main() -> Result<()> {
     let config = Config::load();
     let socket = config.general.data_dir.join("jarvis.sock");
     let mut app = App::new(config.model.default_model.clone());
+    // `jarvis-tui --continue` (and `jarvis up --continue`): the conversation
+    // used last. Otherwise each window starts its own.
+    app.continue_last = std::env::args().any(|a| a == "--continue");
     let mut diag = diag::Diag::new(&config.general.data_dir);
     diag.line("started");
 
@@ -228,6 +231,13 @@ fn perform(
                 let Some(client) = client.as_ref() else {
                     diag.line(&format!("not sent {method}: no daemon connection"));
                     app.request_failed(offline_message(socket));
+                    continue;
+                };
+                let Some(params) = app.scoped(method, params) else {
+                    diag.line(&format!("not sent {method}: no conversation yet"));
+                    app.note(Entry::system(
+                        "This window is still opening its conversation - try again in a moment.",
+                    ));
                     continue;
                 };
                 let request = Request::new(method, params);
