@@ -363,6 +363,15 @@ async fn plan_refuses_a_write_with_the_copy() {
         "{}",
         typed.answer
     );
+    let log = std::fs::read_to_string(s.dir.join("data/turns.jsonl")).unwrap();
+    let last: Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
+    assert!(
+        last["signals"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("plan_refused")),
+        "{last}"
+    );
 }
 
 #[tokio::test]

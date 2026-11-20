@@ -103,6 +103,8 @@ pub struct TurnReport {
     /// A spill was tried, but what it would send may not go: answered
     /// locally instead.
     pub spill_withheld: bool,
+    /// Plan mode refused an action that would change something.
+    pub plan_refused: bool,
     /// The model did not respond (unreachable, rate limited); the answer is
     /// a fallback, not the model's.
     pub model_error: Option<String>,
@@ -217,6 +219,8 @@ pub(super) struct TurnRecorder<'c> {
     pub(super) spill_withheld: std::sync::atomic::AtomicBool,
     /// Prompts an Autopilot turn answered no to, because it never prompts.
     pub(super) not_done: std::sync::Mutex<Vec<String>>,
+    /// Plan mode refused an action of this turn.
+    pub(super) plan_refused: std::sync::atomic::AtomicBool,
 }
 
 impl<'c> TurnRecorder<'c> {
@@ -241,6 +245,7 @@ impl<'c> TurnRecorder<'c> {
             spilled: Default::default(),
             spill_withheld: Default::default(),
             not_done: Default::default(),
+            plan_refused: Default::default(),
         }
     }
 
@@ -366,6 +371,7 @@ impl TurnRecorder<'_> {
             spill_withheld: self
                 .spill_withheld
                 .load(std::sync::atomic::Ordering::Relaxed),
+            plan_refused: self.plan_refused.load(std::sync::atomic::Ordering::Relaxed),
             model,
             provider,
             remote: self.remote.load(std::sync::atomic::Ordering::Relaxed),
@@ -392,6 +398,7 @@ impl TurnRecorder<'_> {
             spill_withheld: self
                 .spill_withheld
                 .load(std::sync::atomic::Ordering::Relaxed),
+            plan_refused: self.plan_refused.load(std::sync::atomic::Ordering::Relaxed),
             model,
             provider,
             remote: self.remote.load(std::sync::atomic::Ordering::Relaxed),

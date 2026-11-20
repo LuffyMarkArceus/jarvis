@@ -322,6 +322,10 @@ impl Orchestrator {
                 rec.settings().mode,
             )
             .await;
+        if outcome.output.contains(crate::modes::PLAN_REFUSAL) {
+            rec.plan_refused
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         rec.tool_time(&outcome.name, started.elapsed());
         rec.tool(&outcome, status_label(&outcome.status));
         outcome

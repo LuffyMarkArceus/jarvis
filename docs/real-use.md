@@ -104,3 +104,10 @@ sending its listing to the remote model ("always allow" stops that).
 | --- | --- | --- |
 | One window at an "Allow? y/n" prompt froze every window - even `status` - because each request held the whole daemon for the whole turn | ours | No lock held for a turn; one turn at a time per conversation |
 | On a 4 GB GPU two windows' local turns cannot run together, and Ollama's own queue is invisible: the waiting turn looked hung | ours | A visible GPU queue, `[model] slots`; spill to the remote model after 5 s, with a notice |
+
+## 2026-11-20, Milestone 6.6
+
+| Finding | Whose | Done |
+| --- | --- | --- |
+| The owner wanted the controls they use daily (Copilot / VS Code / Claude): agent mode and permission level, and a sandbox switch | ours | Modes per conversation; Autopilot defers to `/approve` instead of prompting |
+| Designing Assisted: "contained" (the sandbox) is not "reversible" - the writable folders have no undo copies, so a sandboxed `rm -rf` of the code would have been approved | ours, caught in design | Commands approved without asking run read-only; writes need `writes: true` and a yes |

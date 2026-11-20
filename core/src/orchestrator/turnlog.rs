@@ -135,6 +135,9 @@ impl Orchestrator {
         if report.spill_withheld {
             found.push("spill_withheld");
         }
+        if report.plan_refused {
+            found.push("plan_refused");
+        }
         found
     }
 

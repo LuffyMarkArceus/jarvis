@@ -52,6 +52,10 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(format!("  {}", app.model), dim),
+        Span::styled(
+            format!("  {}", app.mode_label),
+            Style::new().fg(Color::Magenta),
+        ),
         Span::raw("   "),
         Span::styled(app.daemon_label(), state_style),
     ];
@@ -243,6 +247,20 @@ fn draw_help(frame: &mut Frame, area: Rect) {
             "/trust, /trust clear",
             "what this conversation trusts; forget it",
         ),
+        (
+            "/mode [autonomy]",
+            "show, or plan / interactive / autopilot",
+        ),
+        (
+            "/approval <level>",
+            "manual / assisted / allow-all: what needs a yes",
+        ),
+        ("/sandbox on|off", "where commands run"),
+        (
+            "/approve [all|none|n]",
+            "list or run what Autopilot left for you",
+        ),
+        ("/go [auto]", "carry out the plan above"),
         ("/clear, /quit, /help", "clear, leave, this list"),
     ];
 
