@@ -7,6 +7,7 @@
 mod app;
 mod client;
 mod diag;
+mod input;
 mod ui;
 mod wrap;
 
@@ -39,7 +40,8 @@ async fn main() -> Result<()> {
     let mut diag = diag::Diag::new(&config.general.data_dir);
     diag.line("started");
 
-    let mut terminal = setup_terminal()?;
+    let (mut terminal, enhanced) = setup_terminal()?;
+    app.keyboard_enhanced = enhanced;
     let _guard = TerminalGuard;
 
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
@@ -273,7 +275,14 @@ fn spawn_input_thread(tx: mpsc::UnboundedSender<Event>) {
     });
 }
 
-fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
+/// The keyboard protocol to ask for: with it, the terminal tells Shift+Enter
+/// from Enter and Ctrl+Backspace from Ctrl+H (6.7a).
+fn enhancement_flags(supported: bool) -> Option<crossterm::event::KeyboardEnhancementFlags> {
+    supported.then_some(crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+}
+
+/// The terminal, and whether it tells Shift+Enter from Enter.
+fn setup_terminal() -> Result<(Terminal<CrosstermBackend<Stdout>>, bool)> {
     enable_raw_mode()?;
     let mut out = stdout();
     crossterm::execute!(
@@ -283,11 +292,18 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
         // Wheel events scroll the conversation; selecting text is Shift+drag.
         crossterm::event::EnableMouseCapture
     )?;
+    let flags =
+        enhancement_flags(crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false));
+    if let Some(flags) = flags {
+        crossterm::execute!(out, crossterm::event::PushKeyboardEnhancementFlags(flags))?;
+    }
     let terminal = Terminal::new(CrosstermBackend::new(out))?;
-    Ok(terminal)
+    Ok((terminal, flags.is_some()))
 }
 
 fn restore_terminal() {
+    // Harmless where nothing was pushed.
+    let _ = crossterm::execute!(stdout(), crossterm::event::PopKeyboardEnhancementFlags);
     let _ = disable_raw_mode();
     let _ = crossterm::execute!(
         stdout(),
@@ -310,6 +326,16 @@ impl Drop for TerminalGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enhancement_only_when_supported() {
+        use crossterm::event::KeyboardEnhancementFlags;
+        assert_eq!(
+            enhancement_flags(true),
+            Some(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        );
+        assert_eq!(enhancement_flags(false), None);
+    }
     use jarvis_core::undo::UndoStore;
 
     /// A config whose data lives in a fresh folder, with one undoable change

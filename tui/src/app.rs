@@ -6,6 +6,7 @@
 //! a terminal.
 
 use crate::client::ClientEvent;
+pub use crate::input::Input;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use jarvis_common::ipc::{ConfirmationRequest, Response};
 use serde_json::{json, Value};
@@ -59,90 +60,6 @@ impl Entry {
             text: text.into(),
             footer: None,
         }
-    }
-}
-
-/// One editable line (or several, with Alt+Enter) of user input.
-#[derive(Debug, Default)]
-pub struct Input {
-    chars: Vec<char>,
-    cursor: usize,
-}
-
-impl Input {
-    pub fn text(&self) -> String {
-        self.chars.iter().collect()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.chars.is_empty()
-    }
-
-    pub fn cursor(&self) -> usize {
-        self.cursor
-    }
-
-    pub fn set(&mut self, text: &str) {
-        self.chars = text.chars().collect();
-        self.cursor = self.chars.len();
-    }
-
-    pub fn clear(&mut self) {
-        self.chars.clear();
-        self.cursor = 0;
-    }
-
-    pub fn insert(&mut self, ch: char) {
-        self.chars.insert(self.cursor, ch);
-        self.cursor += 1;
-    }
-
-    pub fn insert_str(&mut self, text: &str) {
-        for ch in text.chars() {
-            self.insert(ch);
-        }
-    }
-
-    pub fn newline(&mut self) {
-        self.insert('\n');
-    }
-
-    pub fn backspace(&mut self) {
-        if self.cursor > 0 {
-            self.cursor -= 1;
-            self.chars.remove(self.cursor);
-        }
-    }
-
-    pub fn delete(&mut self) {
-        if self.cursor < self.chars.len() {
-            self.chars.remove(self.cursor);
-        }
-    }
-
-    pub fn left(&mut self) {
-        self.cursor = self.cursor.saturating_sub(1);
-    }
-
-    pub fn right(&mut self) {
-        if self.cursor < self.chars.len() {
-            self.cursor += 1;
-        }
-    }
-
-    pub fn home(&mut self) {
-        self.cursor = 0;
-    }
-
-    pub fn end(&mut self) {
-        self.cursor = self.chars.len();
-    }
-
-    /// Take the text out of the box.
-    pub fn take(&mut self) -> String {
-        let text = self.text();
-        self.clear();
-        text
     }
 }
 
@@ -419,6 +336,8 @@ pub struct App {
     last_timing: Option<Value>,
     /// Open the conversation used last instead of a new one (`--continue`).
     pub continue_last: bool,
+    /// The terminal tells Shift+Enter (and Ctrl+Enter) from Enter.
+    pub keyboard_enhanced: bool,
     /// This window's conversation's mode, for the header (6.6).
     pub mode_label: String,
     /// Its autonomy, for Shift+Tab: `plan`, `interactive` or `autopilot`.
@@ -455,6 +374,7 @@ impl App {
             history_pos: None,
             last_timing: None,
             continue_last: false,
+            keyboard_enhanced: false,
             mode_label: "Interactive · Manual · Sandbox on".into(),
             autonomy: "interactive".into(),
             busy_since: None,
@@ -1277,6 +1197,7 @@ impl App {
     pub fn handle_key(&mut self, key: KeyEvent) -> Vec<Action> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
 
         if ctrl && key.code == KeyCode::Char('c') {
             // A confirmation belongs to the running turn. Cancelling should
@@ -1323,7 +1244,8 @@ impl App {
             return self.handle_overlay_key(key);
         }
 
-        if key.code == KeyCode::F(1) || (ctrl && key.code == KeyCode::Char('h')) {
+        // Help is F1 only: Ctrl+H is how most terminals send Ctrl+Backspace.
+        if key.code == KeyCode::F(1) {
             self.overlay = Some(Overlay::Help);
             return vec![];
         }
@@ -1348,11 +1270,22 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Enter if alt => self.input.newline(),
+            KeyCode::Enter if alt || shift => self.input.newline(),
             KeyCode::Enter => return self.submit(),
             KeyCode::Char(' ') if ctrl => {}
+            // Editing like a text field (6.7a), with the terminal habits
+            // that do not clash with it.
+            KeyCode::Char('a') if ctrl => self.input.line_start(),
+            KeyCode::Char('e') if ctrl => self.input.line_end(),
+            KeyCode::Char('h') | KeyCode::Char('w') if ctrl => self.input.delete_word_back(),
+            KeyCode::Char('k') if ctrl => self.input.kill_line_end(),
+            KeyCode::Char('b') if alt => self.input.word_left(),
+            KeyCode::Char('f') if alt => self.input.word_right(),
+            KeyCode::Char('d') if alt => self.input.delete_word_forward(),
             KeyCode::Char(c) if !ctrl && !alt => self.input.insert(c),
+            KeyCode::Backspace if ctrl || alt => self.input.delete_word_back(),
             KeyCode::Backspace => self.input.backspace(),
+            KeyCode::Delete if ctrl => self.input.delete_word_forward(),
             KeyCode::Delete => self.input.delete(),
             // Shift+Tab cycles autonomy, as in Claude Code.
             KeyCode::BackTab => {
@@ -1363,10 +1296,18 @@ impl App {
                 };
                 return self.mode_request("autonomy", next);
             }
+            KeyCode::Left if ctrl => self.input.word_left(),
+            KeyCode::Right if ctrl => self.input.word_right(),
             KeyCode::Left => self.input.left(),
             KeyCode::Right => self.input.right(),
-            KeyCode::Home => self.input.home(),
-            KeyCode::End => self.input.end(),
+            KeyCode::Home if ctrl => self.input.home(),
+            KeyCode::End if ctrl => self.input.end(),
+            KeyCode::Home => self.input.line_start(),
+            KeyCode::End => self.input.line_end(),
+            // In a message of several lines, Up/Down move between them;
+            // past the first or last line they walk history, as before.
+            KeyCode::Up if self.history_pos.is_none() && self.input.line_up() => {}
+            KeyCode::Down if self.history_pos.is_none() && self.input.line_down() => {}
             KeyCode::Up if self.input.is_empty() || self.history_pos.is_some() => {
                 self.history_previous()
             }
@@ -1583,6 +1524,68 @@ mod tests {
 
     fn press(app: &mut App, code: KeyCode) -> Vec<Action> {
         app.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Vec<Action> {
+        app.handle_key(KeyEvent::new(code, modifiers))
+    }
+
+    #[test]
+    fn ctrl_h_deletes_a_word_not_help() {
+        // Without the keyboard protocol, Ctrl+Backspace arrives as Ctrl+H.
+        let mut app = App::new("test".into());
+        app.input.set("rename the files");
+        key(&mut app, KeyCode::Char('h'), KeyModifiers::CONTROL);
+        assert_eq!(app.input.text(), "rename the ");
+        assert!(app.overlay.is_none(), "help opened mid-sentence");
+        key(&mut app, KeyCode::Backspace, KeyModifiers::CONTROL);
+        assert_eq!(app.input.text(), "rename ");
+    }
+
+    #[test]
+    fn ctrl_arrows_move_by_word() {
+        let mut app = App::new("test".into());
+        app.input.set("/mnt/storage/CS");
+        key(&mut app, KeyCode::Left, KeyModifiers::CONTROL);
+        assert_eq!(app.input.cursor(), 13);
+        key(&mut app, KeyCode::Home, KeyModifiers::NONE);
+        assert_eq!(app.input.cursor(), 0);
+        key(&mut app, KeyCode::Right, KeyModifiers::CONTROL);
+        assert_eq!(app.input.cursor(), 4);
+        key(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL);
+        assert_eq!(app.input.cursor(), 15);
+        key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
+        assert_eq!(app.input.cursor(), 0);
+    }
+
+    #[test]
+    fn up_on_a_later_line_moves_not_history() {
+        let mut app = App::new("test".into());
+        app.history.push("an old prompt".into());
+        app.input.set("first line\nsecond");
+        key(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(
+            app.input.text(),
+            "first line\nsecond",
+            "history replaced the message"
+        );
+        assert_eq!(app.input.cursor(), 6);
+        key(&mut app, KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(
+            app.input.text(),
+            "first line\nsecond",
+            "a message being written is not history"
+        );
+    }
+
+    #[test]
+    fn shift_enter_is_a_newline() {
+        let mut app = App::new("test".into());
+        app.session_id = Some("abc".into());
+        app.input.set("one");
+        let actions = key(&mut app, KeyCode::Enter, KeyModifiers::SHIFT);
+        assert!(actions.is_empty());
+        assert_eq!(app.input.text(), "one\n");
     }
 
     #[test]

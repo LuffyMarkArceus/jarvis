@@ -136,10 +136,19 @@ fn transcript_lines(entries: &[Entry], width: usize) -> Vec<Line<'static>> {
     lines
 }
 
+/// The keys that apply in the input box now.
+fn input_hint(app: &App) -> &'static str {
+    if app.keyboard_enhanced {
+        " Enter send · Shift+Enter newline · Ctrl+←/→ word "
+    } else {
+        " Enter send · Alt+Enter newline · Ctrl+←/→ word "
+    }
+}
+
 fn draw_input(frame: &mut Frame, app: &App, area: Rect) -> Option<Position> {
     let block = Block::bordered()
         .title(" Message ")
-        .title_bottom(Line::from(" Enter send · Alt+Enter newline ").right_aligned());
+        .title_bottom(Line::from(input_hint(app)).right_aligned());
     let inner = block.inner(area);
     if inner.height == 0 {
         frame.render_widget(block, area);
