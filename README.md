@@ -277,6 +277,32 @@ changes another. `jarvis ask` asks in a new conversation each time;
 `jarvis model` and `jarvis tier` act on the conversation used last, and say
 which. `jarvis session last` shows it.
 
+### Two windows at once
+
+Windows' turns run at the same time: a window waiting on a prompt, or on a
+long answer, does not hold up another. One conversation answers one question
+at a time; a second in the same conversation is refused until the first ends.
+
+The local GPU runs `[model] slots` calls at once (default 1). A window that
+has to wait says so - "waiting for the GPU: another window is using qwen2.5:3b"
+- and can be cancelled while it waits. If the wait passes `spill_after`
+seconds and a remote tier is set up, that turn is answered remotely instead,
+with a notice and "(GPU busy)" in its footer; the conversation stays local, and
+the privacy prompts for local files apply as for `/remote`.
+
+```toml
+[model]
+slots = 1            # a machine that holds several models: raise this,
+                     # and set OLLAMA_NUM_PARALLEL to match
+
+[remote]
+spill = "auto"       # "ask" first, or "never" to always wait
+spill_after = 5      # seconds
+```
+
+New conversations start local (unless `[remote] default = true`), with the
+model used last on each tier.
+
 ### Switching models
 
 List more models per tier with `models`, then switch at any point in a
@@ -299,7 +325,7 @@ model's tier comes with it, so picking a remote model sends the conversation
 through the same privacy rules as `/remote`. The header and each answer's
 footer name the model that answered. The choice belongs to that conversation and
 survives a restart; switch as often as you like - each answer records the
-model that wrote it. New conversations start with the model you used last. When a remote request is not sent, Jarvis asks whether the
+model that wrote it. New conversations start local, with the model you used last on each tier. When a remote request is not sent, Jarvis asks whether the
 local model should answer instead. "Always allow" answers and `jarvis egress
 allow <folder>` add a folder to the allow-list; `jarvis egress list` shows
 it.

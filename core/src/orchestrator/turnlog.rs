@@ -120,6 +120,23 @@ fn excerpt(text: &str, chars: usize) -> String {
 }
 
 impl Orchestrator {
+    /// A turn's signals, with "queued" when it waited for the GPU longer
+    /// than a spill would have waited.
+    pub(super) fn turn_signals(&self, report: &TurnReport) -> Vec<&'static str> {
+        let mut found = signals(report);
+        let spill_after = self.config.remote.as_ref().map_or(5, |r| r.spill_after);
+        if report.timing.queue_ms > spill_after * 1000 {
+            found.push("queued");
+        }
+        if report.spilled {
+            found.push("spilled");
+        }
+        if report.spill_withheld {
+            found.push("spill_withheld");
+        }
+        found
+    }
+
     fn turn_log_path(&self) -> std::path::PathBuf {
         self.config.general.data_dir.join("turns.jsonl")
     }
@@ -127,6 +144,10 @@ impl Orchestrator {
     /// Append one line. Measuring must never break a turn: failures are
     /// logged and dropped.
     fn append_turn_log(&self, line: &Value) {
+        // Turns run at once (6.5b): one writer at a time, so a rotation
+        // cannot race an append and no line is torn.
+        static TURN_LOG: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _append = TURN_LOG.lock().unwrap_or_else(|e| e.into_inner());
         let path = self.turn_log_path();
         let write = || -> std::io::Result<()> {
             use std::io::Write as _;

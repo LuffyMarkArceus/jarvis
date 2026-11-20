@@ -184,6 +184,9 @@ fn meaning(signal: &str) -> &'static str {
         "rephrased" => "asked again in other words within a minute",
         "cancelled" => "you cancelled the turn",
         "error" => "the turn ended with an error",
+        "queued" => "waited for the GPU behind another window",
+        "spilled" => "the GPU was busy, so the remote model answered",
+        "spill_withheld" => "the GPU was busy, but what the turn held could not go remote",
         _ => "",
     }
 }
@@ -212,6 +215,17 @@ fn excerpt(text: &str, chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_signals_have_plain_words() {
+        for signal in ["queued", "spilled", "spill_withheld"] {
+            let words = meaning(signal);
+            assert!(
+                !words.is_empty() && !words.contains('_'),
+                "{signal}: {words:?}"
+            );
+        }
+    }
     use serde_json::json;
 
     fn turn(id: &str, input: &str, model: &str, total: u64, you: u64, signals: &[&str]) -> String {

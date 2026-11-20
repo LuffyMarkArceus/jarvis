@@ -109,27 +109,13 @@ impl Orchestrator {
         sink: Option<&UnboundedSender<String>>,
         rec: &TurnRecorder<'_>,
     ) -> Result<String> {
-        let (system_prompt, recall_label) = self.with_recall(
-            rec.conversation,
-            input,
-            self.conversation_prompt_for(history),
-        );
-        let mut plan = context::assemble(&system_prompt, input, history, &self.config.context, 0);
+        let recalled = self.with_recall(rec, input, self.conversation_prompt_for(history));
+        let mut plan = context::assemble(&recalled.prompt, input, history, &self.config.context, 0);
         self.mark_history(&mut plan.messages);
         self.log_plan(&plan);
-        let mut system_label = plan.system_label.clone();
-        system_label.absorb(&recall_label);
+        let system = self.system_prompt(&recalled, &plan.system, &plan.system_label);
         let reply = self
-            .ask_model(
-                &plan.system,
-                &system_label,
-                &plan.messages,
-                None,
-                confirm,
-                cancel,
-                sink,
-                rec,
-            )
+            .ask_model(&system, &plan.messages, None, confirm, cancel, sink, rec)
             .await;
         let turn = match reply {
             Ok(ModelReply::Turn(turn)) => *turn,
@@ -140,7 +126,7 @@ impl Orchestrator {
             Err(e) => {
                 info!("Model unavailable: {}, using fallback", e);
                 rec.model_failed(&e);
-                return Ok(self.fallback_answer(rec.conversation, &e));
+                return Ok(self.fallback_answer(rec, &e));
             }
         };
         rec.model_turn(&turn);
@@ -171,14 +157,10 @@ impl Orchestrator {
         // The offered tools are the request's tools. There is no second
         // filter here, and no way for the prompt to mention anything else.
         let tools = plan.schemas();
-        let (system_prompt, recall_label) = self.with_recall(
-            rec.conversation,
-            input,
-            self.tool_system_prompt(&plan.tools),
-        );
+        let recalled = self.with_recall(rec, input, self.tool_system_prompt(&plan.tools));
         let reserved = self.tool_schema_tokens(&tools);
         let assembled = context::assemble(
-            &system_prompt,
+            &recalled.prompt,
             input,
             history,
             &self.config.context,
@@ -186,9 +168,8 @@ impl Orchestrator {
         );
         self.log_plan(&assembled);
 
+        let prompt = self.system_prompt(&recalled, &assembled.system, &assembled.system_label);
         let system = assembled.system;
-        let mut system_label = assembled.system_label;
-        system_label.absorb(&recall_label);
         let mut messages = assembled.messages;
         self.mark_history(&mut messages);
         // How many leading messages are history. Everything after them is the
@@ -222,7 +203,7 @@ impl Orchestrator {
         }
 
         let max_rounds = self
-            .tier(rec.conversation)
+            .turn_tier(rec)
             .0
             .max_rounds
             .unwrap_or(DEFAULT_MAX_ROUNDS)
@@ -239,16 +220,7 @@ impl Orchestrator {
             self.fit_prompt(&system, &mut messages, &mut history_len, reserved);
 
             let reply = self
-                .ask_model(
-                    &system,
-                    &system_label,
-                    &messages,
-                    Some(&tools),
-                    confirm,
-                    cancel,
-                    None,
-                    rec,
-                )
+                .ask_model(&prompt, &messages, Some(&tools), confirm, cancel, None, rec)
                 .await;
             let turn = match reply {
                 Ok(ModelReply::Turn(t)) => *t,
@@ -257,7 +229,7 @@ impl Orchestrator {
                 Err(e) => {
                     info!("Model unavailable: {}, using fallback", e);
                     rec.model_failed(&e);
-                    return Ok(self.fallback_answer(rec.conversation, &e));
+                    return Ok(self.fallback_answer(rec, &e));
                 }
             };
             rec.model_turn(&turn);
@@ -382,16 +354,7 @@ impl Orchestrator {
             messages.push(ChatMessage::text("user", CLOSING_REQUEST).with_label(Label::default()));
             self.fit_prompt(&system, &mut messages, &mut history_len, reserved);
             let reply = self
-                .ask_model(
-                    &system,
-                    &system_label,
-                    &messages,
-                    Some(&tools),
-                    confirm,
-                    cancel,
-                    None,
-                    rec,
-                )
+                .ask_model(&prompt, &messages, Some(&tools), confirm, cancel, None, rec)
                 .await;
             if let Ok(ModelReply::Turn(turn)) = reply {
                 rec.model_turn(&turn);

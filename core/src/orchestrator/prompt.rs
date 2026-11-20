@@ -14,6 +14,14 @@ pub(super) fn recalled_label(result: &memory::RecallResult) -> Label {
 ///
 /// The blank line keeps it visually separate from the instructions above;
 /// without it a small model reads the remembered text as another rule.
+/// A system prompt with recall added, and where the recalled text came
+/// from; `spill` is the same for a request a busy GPU sends remote.
+pub(super) struct Recalled {
+    pub(super) prompt: String,
+    pub(super) label: Label,
+    pub(super) spill: Option<(String, Label)>,
+}
+
 pub(super) fn append_recall(mut prompt: String, block: Option<String>) -> String {
     let Some(block) = block else {
         return prompt;
@@ -225,20 +233,64 @@ impl Orchestrator {
     /// Also returns where the recalled text came from: `memory`, plus the
     /// label each recalled message was stored with, so a file shown in an
     /// earlier session does not leave as "memory".
+    ///
+    /// When this turn could spill to the remote tier, also the prompt a
+    /// spill sends: recall as a remote request gets it.
     pub(super) fn with_recall(
         &self,
-        conv: &Conversation,
+        rec: &TurnRecorder<'_>,
         input: &str,
         prompt: String,
-    ) -> (String, Label) {
-        let (block, label) = self.recall_block(conv, input).unwrap_or_default();
-        (append_recall(prompt, block), label)
+    ) -> Recalled {
+        let remote = destination_of(&self.turn_tier(rec).0).is_remote();
+        let spill = self.can_spill(rec).then(|| {
+            let (block, label) = self
+                .recall_block(rec.conversation, input, true)
+                .unwrap_or_default();
+            (append_recall(prompt.clone(), block), label)
+        });
+        let (block, label) = self
+            .recall_block(rec.conversation, input, remote)
+            .unwrap_or_default();
+        Recalled {
+            prompt: append_recall(prompt, block),
+            label,
+            spill,
+        }
     }
 
+    /// The requests' system prompt, from the assembled one: `assemble`
+    /// appends history sections to the recalled prompt, and the spill
+    /// version gets the same sections after its own prompt.
+    pub(super) fn system_prompt(
+        &self,
+        recalled: &Recalled,
+        assembled: &str,
+        assembled_label: &Label,
+    ) -> SystemPrompt {
+        let with = |label: &Label| {
+            let mut all = assembled_label.clone();
+            all.absorb(label);
+            all
+        };
+        let spill = recalled.spill.as_ref().and_then(|(prompt, label)| {
+            let sections = assembled.strip_prefix(recalled.prompt.as_str())?;
+            Some((format!("{prompt}{sections}"), with(label)))
+        });
+        SystemPrompt {
+            text: assembled.to_string(),
+            label: with(&recalled.label),
+            spill,
+        }
+    }
+
+    /// `remote`: for a request to a remote destination, which leaves out
+    /// what the policy would not send.
     pub(super) fn recall_block(
         &self,
         conv: &Conversation,
         input: &str,
+        remote: bool,
     ) -> Option<(Option<String>, Label)> {
         if !self.config.memory.recall_enabled {
             return None;
@@ -258,7 +310,7 @@ impl Orchestrator {
         // prompt on every question (every message stored before labels is
         // unknown) would be answered by reflex. Required content - what the
         // user asked about - is still asked about in ask_model.
-        let results: Vec<_> = if self.destination(conv).is_remote() {
+        let results: Vec<_> = if remote {
             let policy = self.egress_policy();
             let before = results.len();
             let kept: Vec<_> = results
@@ -303,8 +355,8 @@ impl Orchestrator {
 
     /// The answer when the model did not respond. Names the model and where
     /// it is: "the local model" was wrong once a remote tier existed.
-    pub(super) fn fallback_answer(&self, conv: &Conversation, error: &JarvisError) -> String {
-        let (cfg, _) = self.tier(conv);
+    pub(super) fn fallback_answer(&self, rec: &TurnRecorder<'_>, error: &JarvisError) -> String {
+        let (cfg, _) = self.turn_tier(rec);
         format!(
             "I could not reach {} ({}), so I cannot answer that yet.\n\nReason: {}",
             cfg.default_model,

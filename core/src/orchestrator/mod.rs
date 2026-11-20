@@ -46,9 +46,9 @@
 //! present (a headless run) the call is denied, never silently allowed.
 
 use crate::cancel::Cancellation;
-use crate::config::{Config, ModelConfig};
+use crate::config::{Config, ModelConfig, Spill};
 use crate::context::{self, ContextPlan};
-use crate::conversation::{Conversation, LastTurn};
+use crate::conversation::{Conversation, LastTurn, Pinned};
 use crate::egress::redact::Redactor;
 use crate::egress::{
     self, Concern, DataPolicy, Destination, Label, Locality, Origin, Policy, Verdict,
@@ -130,6 +130,10 @@ pub const EGRESS_TOOL: &str = "egress.send";
 /// Asked when a remote request was not sent: answer with the local model?
 pub const EGRESS_LOCAL_TOOL: &str = "egress.local";
 
+/// Asked, with `[remote] spill = "ask"`, before a call the busy GPU would
+/// hold up goes to the remote tier instead.
+pub const EGRESS_SPILL_TOOL: &str = "egress.spill";
+
 /// Asked before a web call carries something this turn may not send.
 pub const EGRESS_WEB_TOOL: &str = "egress.web";
 
@@ -159,6 +163,8 @@ pub struct Orchestrator {
     undo: Option<UndoStore>,
     permissions: PermissionManager,
     mcp: McpClient,
+    /// The queue every local model call waits in (6.5b).
+    lane: Arc<crate::lane::LocalLane>,
 }
 
 impl Orchestrator {
@@ -226,6 +232,7 @@ impl Orchestrator {
             }
         };
         let memory = MemoryManager::new(config.clone()).ok();
+        let config_slots = config.model.slots;
         Self {
             config,
             client,
@@ -236,8 +243,21 @@ impl Orchestrator {
             undo,
             permissions,
             mcp: McpClient::new(),
+            lane: crate::lane::LocalLane::new(config_slots),
         }
     }
+
+    /// The local lane, for status and tests.
+    pub fn lane(&self) -> &Arc<crate::lane::LocalLane> {
+        &self.lane
+    }
+
+    /// An orchestrator is shared by every turn at once (6.5b).
+    #[allow(dead_code)]
+    const SHARED: fn() = || {
+        fn shared<T: Send + Sync>() {}
+        shared::<Orchestrator>();
+    };
 
     /// Attach the `[remote]` tier's provider. New sessions start on it only
     /// if `[remote] default = true`.
@@ -253,9 +273,13 @@ impl Orchestrator {
         if let Some(ref m) = self.memory {
             let _ = m.create_session(&id);
         }
-        let remote =
-            self.remote.is_some() && self.config.remote.as_ref().is_some_and(|r| r.default);
-        Conversation::new(id, remote)
+        Conversation::new(id, self.starts_remote())
+    }
+
+    /// Whether a new conversation starts on the remote tier: only when one
+    /// exists and `[remote] default` is set.
+    pub fn starts_remote(&self) -> bool {
+        self.remote.is_some() && self.config.remote.as_ref().is_some_and(|r| r.default)
     }
 
     /// Switch `conv` between the local and remote tier.
@@ -271,35 +295,42 @@ impl Orchestrator {
     }
 
     pub fn uses_remote(&self, conv: &Conversation) -> bool {
-        conv.remote() && self.remote.is_some()
+        self.on_remote(&conv.pin())
     }
 
-    /// The model settings and provider this session's turns go to, with
-    /// the model `/model` chose.
+    fn on_remote(&self, settings: &Pinned) -> bool {
+        settings.remote && self.remote.is_some()
+    }
+
+    /// The conversation's tier now: for settings and status. A turn uses
+    /// [`Orchestrator::turn_tier`], fixed when it started.
     fn tier(&self, conv: &Conversation) -> (ModelConfig, Arc<dyn Provider>) {
-        let remote = self.uses_remote(conv);
+        self.tier_of(&conv.pin())
+    }
+
+    /// The tier a turn's requests go to.
+    fn turn_tier(&self, rec: &TurnRecorder<'_>) -> (ModelConfig, Arc<dyn Provider>) {
+        self.tier_of(&rec.settings())
+    }
+
+    /// The model settings and provider `settings` name, with the model
+    /// `/model` chose.
+    fn tier_of(&self, settings: &Pinned) -> (ModelConfig, Arc<dyn Provider>) {
+        let remote = self.on_remote(settings);
         let (cfg, client) = match (&self.config.remote, &self.remote) {
             (Some(cfg), Some(client)) if remote => (&cfg.model, client),
             _ => (&self.config.model, &self.client),
         };
-        (self.with_choice(conv, cfg, remote), client.clone())
-    }
-
-    /// `cfg` with the model chosen for its tier.
-    fn with_choice(&self, conv: &Conversation, cfg: &ModelConfig, remote: bool) -> ModelConfig {
-        let mut cfg = cfg.clone();
-        if let Some(model) = conv.chosen()[remote as usize].clone() {
-            cfg.default_model = model;
-        }
-        cfg
+        (with_choice(settings, cfg, remote), client.clone())
     }
 
     /// The model to offer when a remote request was not sent: `[model]`,
-    /// if this session is on the remote tier and `[model]` is local.
-    fn local_fallback(&self, conv: &Conversation) -> Option<(ModelConfig, Arc<dyn Provider>)> {
-        (self.uses_remote(conv) && !destination_of(&self.config.model).is_remote()).then(|| {
+    /// if this turn is on the remote tier and `[model]` is local.
+    fn local_fallback(&self, rec: &TurnRecorder<'_>) -> Option<(ModelConfig, Arc<dyn Provider>)> {
+        let settings = rec.settings();
+        (self.on_remote(&settings) && !destination_of(&self.config.model).is_remote()).then(|| {
             (
-                self.with_choice(conv, &self.config.model, false),
+                with_choice(&settings, &self.config.model, false),
                 self.client.clone(),
             )
         })
@@ -309,7 +340,9 @@ impl Orchestrator {
     /// the next question does not wait for it (measured: 25-42 s). Nothing
     /// on the remote tier; without a runtime (a plain test), nothing.
     pub fn warm_up(&self, conv: &Conversation) {
-        if self.uses_remote(conv) {
+        // Loading another model while every slot is in use would evict the
+        // one a turn is using.
+        if self.uses_remote(conv) || self.lane.available() == 0 {
             return;
         }
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
@@ -546,7 +579,8 @@ impl Orchestrator {
                 let mut report = rec.finish(answer, &plan);
                 report.timing.total_ms = total_ms;
                 report.timing.you_ms = you_ms;
-                self.log_turn(conv, input, &report, signals(&report));
+                let found = self.turn_signals(&report);
+                self.log_turn(conv, input, &report, found);
                 Ok(report)
             }
             Err(e) => {
@@ -554,7 +588,7 @@ impl Orchestrator {
                 let mut report = rec.finish_unplanned(planned);
                 report.timing.total_ms = total_ms;
                 report.timing.you_ms = you_ms;
-                let mut found = signals(&report);
+                let mut found = self.turn_signals(&report);
                 found.push(if matches!(e, JarvisError::Cancelled) {
                     "cancelled"
                 } else {
@@ -676,3 +710,12 @@ impl Orchestrator {
 
 #[cfg(test)]
 mod tests;
+
+/// `cfg` with the model chosen for its tier.
+fn with_choice(settings: &Pinned, cfg: &ModelConfig, remote: bool) -> ModelConfig {
+    let mut cfg = cfg.clone();
+    if let Some(model) = settings.chosen[remote as usize].clone() {
+        cfg.default_model = model;
+    }
+    cfg
+}

@@ -12,6 +12,7 @@ pub mod egress;
 pub mod error;
 pub mod eval;
 pub mod ipc;
+pub mod lane;
 pub mod mcp;
 pub mod memory;
 pub mod model;

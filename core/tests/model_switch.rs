@@ -44,6 +44,7 @@ fn setup() -> Setup {
             ..ModelConfig::default()
         },
         default: false,
+        ..RemoteConfig::default()
     });
     let permissions =
         PermissionManager::with_paths(dir.join("permissions.toml"), dir.join("audit.db")).unwrap();

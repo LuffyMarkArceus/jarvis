@@ -15,6 +15,9 @@ pub enum JarvisError {
     /// The user asked to stop the turn.
     #[error("cancelled")]
     Cancelled,
+    /// The conversation is answering already: the user's message as is.
+    #[error("{0}")]
+    Busy(String),
     #[error("Permission denied: {0}")]
     Permission(String),
     #[error("IO error: {0}")]

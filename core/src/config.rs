@@ -126,6 +126,38 @@ pub struct RemoteConfig {
     /// Start new sessions on the remote model. Off: local stays the default.
     #[serde(default)]
     pub default: bool,
+    /// A local call that waited `spill_after` seconds for the GPU goes here
+    /// instead (`auto`, the default), after asking (`ask`), or keeps
+    /// waiting (`never`). Always with a notice and the egress check.
+    #[serde(default)]
+    pub spill: Spill,
+    #[serde(default = "default_spill_after")]
+    pub spill_after: u64,
+}
+
+impl Default for RemoteConfig {
+    fn default() -> Self {
+        RemoteConfig {
+            model: ModelConfig::default(),
+            default: false,
+            spill: Spill::default(),
+            spill_after: default_spill_after(),
+        }
+    }
+}
+
+/// What a busy GPU does with a local call (`[remote] spill`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Spill {
+    #[default]
+    Auto,
+    Ask,
+    Never,
+}
+
+fn default_spill_after() -> u64 {
+    5
 }
 
 /// What may be sent to a remote model provider. Local providers are not
@@ -217,6 +249,10 @@ pub struct ModelConfig {
     /// repeating itself is stopped sooner, by the orchestrator noticing the
     /// repeat, so this need not be set low for small models.
     pub max_rounds: Option<usize>,
+    /// Local model calls at once (`[model]` only). 1 on a GPU that holds
+    /// one model; raise it, with OLLAMA_NUM_PARALLEL, on one that holds
+    /// several.
+    pub slots: usize,
 }
 
 fn default_true() -> bool {
@@ -240,6 +276,7 @@ impl Default for ModelConfig {
             locality: None,
             data_policy: None,
             max_rounds: None,
+            slots: 1,
         }
     }
 }
@@ -375,6 +412,18 @@ impl ContextConfig {
 }
 
 impl Config {
+    /// Correct settings that cannot work, saying what was changed. The
+    /// config file is otherwise kept: refusing it all for one bad value
+    /// would drop every other setting.
+    pub fn correct(&mut self) -> Vec<String> {
+        let mut problems = Vec::new();
+        if self.model.slots == 0 {
+            self.model.slots = 1;
+            problems.push("[model] slots = 0 would run no local model; using 1".to_string());
+        }
+        problems
+    }
+
     pub fn load() -> Self {
         let mut config = Config::default();
 
@@ -438,6 +487,9 @@ impl Config {
         }
 
         config.resolve_sidecar_paths();
+        for problem in config.correct() {
+            tracing::warn!("config: {}", problem);
+        }
         config
     }
 
@@ -535,6 +587,32 @@ fn expand_sidecar_arg(arg: &str, root: Option<&std::path::Path>) -> Option<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spill_defaults() {
+        let config: Config = toml::from_str(
+            "[remote]\nprovider = \"openai\"\nbase_url = \"https://x\"\ndefault_model = \"m\"\n",
+        )
+        .unwrap();
+        let remote = config.remote.unwrap();
+        assert_eq!(remote.spill, Spill::Auto);
+        assert_eq!(remote.spill_after, 5);
+        assert_eq!(config.model.slots, 1);
+        let ask: Config = toml::from_str(
+            "[remote]\nprovider = \"openai\"\nbase_url = \"https://x\"\ndefault_model = \"m\"\nspill = \"ask\"\n",
+        )
+        .unwrap();
+        assert_eq!(ask.remote.unwrap().spill, Spill::Ask);
+    }
+
+    #[test]
+    fn zero_slots_is_corrected_to_one_with_a_message_naming_slots() {
+        let mut config: Config = toml::from_str("[model]\nslots = 0\n").unwrap();
+        let problems = config.correct();
+        assert_eq!(config.model.slots, 1);
+        assert!(problems.iter().any(|p| p.contains("slots")), "{problems:?}");
+        assert!(Config::default().correct().is_empty());
+    }
 
     #[test]
     fn a_partial_config_keeps_every_other_default() {

@@ -4,20 +4,72 @@
 //! window did not show. Never against the owner's daemon: a temp data folder
 //! and scripted models.
 
-use jarvis_common::ipc::{Message, Request, Response};
+mod common;
+
+use jarvis_common::ipc::{ConfirmationReply, Message, Request, Response};
 use jarvis_core::config::{Config, ModelConfig, RemoteConfig};
 use jarvis_core::daemon::Daemon;
 use jarvis_core::eval::RecordingProvider;
 use jarvis_core::ipc::server::IpcServer;
 use jarvis_core::memory::MemoryManager;
+use jarvis_core::model::ChatTurn;
 use jarvis_core::orchestrator::Orchestrator;
+use jarvis_core::permissions::PermissionAction;
 use jarvis_core::permissions::PermissionManager;
+use jarvis_core::provider::{ChatRequest, Provider};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
-use tokio::sync::Mutex;
+
+/// Answers by what was asked: a request naming notes.md writes it (which
+/// prompts), "fail" is a model error, anything else is "an answer".
+struct ByPrompt {
+    dir: PathBuf,
+}
+
+#[async_trait::async_trait]
+impl Provider for ByPrompt {
+    fn name(&self) -> &'static str {
+        "by-prompt"
+    }
+
+    async fn chat_turn(
+        &self,
+        request: ChatRequest<'_>,
+        _cancel: Option<&jarvis_core::cancel::Cancellation>,
+    ) -> jarvis_core::error::Result<ChatTurn> {
+        let last = request.messages.last();
+        let content = last.map(|m| m.content.as_str()).unwrap_or_default();
+        if last.is_some_and(|m| m.role == "tool") {
+            return Ok(common::answer("done"));
+        }
+        if content.contains("fail") {
+            return Err(jarvis_core::error::JarvisError::Config(
+                "the model fell over".into(),
+            ));
+        }
+        if content.contains("notes.md") && request.tools.is_some() {
+            return Ok(common::call(
+                "filesystem.write",
+                json!({ "path": self.dir.join("notes.md"), "content": "hi" }),
+            ));
+        }
+        Ok(common::answer("an answer"))
+    }
+
+    async fn chat_turn_streaming(
+        &self,
+        request: ChatRequest<'_>,
+        cancel: Option<&jarvis_core::cancel::Cancellation>,
+        _sink: &tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> jarvis_core::error::Result<ChatTurn> {
+        self.chat_turn(request, cancel).await
+    }
+}
+
+const WRITE: &str = "create a file called notes.md containing the word hi";
 
 struct Home {
     dir: PathBuf,
@@ -39,6 +91,7 @@ fn config_in(dir: &std::path::Path) -> Config {
     config.general.data_dir = dir.to_path_buf();
     config.memory.db_path = dir.join("memory.db");
     config.memory.recall_enabled = false;
+    config.tools.work_dir = Some(dir.to_path_buf());
     config.model.default_model = "llama3.2:1b".into();
     config.model.models = vec!["qwen2.5:3b".into()];
     config.remote = Some(RemoteConfig {
@@ -50,6 +103,7 @@ fn config_in(dir: &std::path::Path) -> Config {
             ..ModelConfig::default()
         },
         default: false,
+        ..RemoteConfig::default()
     });
     config
 }
@@ -60,9 +114,12 @@ async fn start(dir: PathBuf) -> Home {
     let config = config_in(&dir);
     let permissions =
         PermissionManager::with_paths(dir.join("permissions.toml"), dir.join("audit.db")).unwrap();
+    permissions
+        .set_rule("filesystem.write", PermissionAction::Ask)
+        .unwrap();
     let orch = Orchestrator::with_parts(
         config.clone(),
-        Arc::new(RecordingProvider::replying("an answer")),
+        Arc::new(ByPrompt { dir: dir.clone() }),
         permissions,
     )
     .with_remote(Some(Arc::new(RecordingProvider::replying(
@@ -71,7 +128,7 @@ async fn start(dir: PathBuf) -> Home {
     let daemon = Daemon::with_orchestrator(config.clone(), orch).unwrap();
     let socket = dir.join("jarvis.sock");
     let _ = std::fs::remove_file(&socket);
-    let server = IpcServer::new(Arc::new(Mutex::new(daemon)), socket.clone());
+    let server = IpcServer::new(Arc::new(daemon), socket.clone());
     let task = tokio::spawn(async move {
         let _ = server.start().await;
     });
@@ -128,6 +185,59 @@ impl Window {
             let mut line = String::new();
             self.reader.read_line(&mut line).await.unwrap();
             if let Ok(Message::Response(r)) = Message::decode(line.trim()) {
+                if r.id == id {
+                    return r;
+                }
+            }
+        }
+    }
+
+    /// Send without waiting for the answer.
+    async fn send(&mut self, method: &str, mut params: Value) -> uuid::Uuid {
+        params["session"] = json!(self.session);
+        let request = Request::new(method, params);
+        let id = request.id;
+        let line = Message::Request(request).encode() + "\n";
+        self.writer.write_all(line.as_bytes()).await.unwrap();
+        id
+    }
+
+    async fn next_message(&mut self) -> Message {
+        loop {
+            let mut line = String::new();
+            self.reader.read_line(&mut line).await.unwrap();
+            if let Ok(message) = Message::decode(line.trim()) {
+                return message;
+            }
+        }
+    }
+
+    /// Ask for a write and stop at its prompt; the prompt's id.
+    async fn stop_at_a_prompt(&mut self) -> (uuid::Uuid, uuid::Uuid) {
+        let ask = self.send("ask", json!({ "prompt": WRITE })).await;
+        loop {
+            match self.next_message().await {
+                Message::ConfirmationRequest(c) => return (ask, c.id),
+                Message::Response(r) if r.id == ask => panic!("no prompt: {r:?}"),
+                _ => {}
+            }
+        }
+    }
+
+    async fn reply(&mut self, prompt: uuid::Uuid, approved: bool) {
+        let line = Message::ConfirmationReply(ConfirmationReply {
+            id: prompt,
+            approved,
+            choice: None,
+        })
+        .encode()
+            + "\n";
+        self.writer.write_all(line.as_bytes()).await.unwrap();
+    }
+
+    async fn response_to(&mut self, id: uuid::Uuid) -> Response {
+        loop {
+            if let Message::Response(r) = self.next_message().await {
                 if r.id == id {
                     return r;
                 }
@@ -351,4 +461,85 @@ async fn status_reports_the_default_tier_and_last_conversation() {
     let status = a.call("status", json!({})).await.result.unwrap();
     assert_eq!(status["tier"], "local");
     assert_eq!(status["last_session"], json!(a.session));
+}
+
+fn soon() -> std::time::Duration {
+    std::time::Duration::from_secs(2)
+}
+
+#[tokio::test]
+async fn a_window_at_a_prompt_does_not_block_another() {
+    let home = fresh().await;
+    let mut a = Window::open(&home).await;
+    let mut b = Window::open(&home).await;
+    let (ask, prompt) = a.stop_at_a_prompt().await;
+    for (method, params) in [
+        ("model.list", json!({})),
+        ("ask", json!({ "prompt": "what is 2 + 2?" })),
+    ] {
+        let r = tokio::time::timeout(soon(), b.in_mine(method, params))
+            .await
+            .unwrap_or_else(|_| panic!("{method} waited for A's prompt"));
+        assert!(r.ok, "{method}: {:?}", r.error);
+    }
+    let status = tokio::time::timeout(soon(), b.call("status", json!({})))
+        .await
+        .expect("status waited for A's prompt");
+    assert!(status.ok);
+    a.reply(prompt, false).await;
+    let answered = tokio::time::timeout(soon(), a.response_to(ask))
+        .await
+        .expect("A's turn ends after its prompt");
+    assert!(answered.ok, "{:?}", answered.error);
+}
+
+#[tokio::test]
+async fn a_second_question_in_an_answering_conversation_is_refused() {
+    let home = fresh().await;
+    let mut a = Window::open(&home).await;
+    let mut b = Window::open(&home).await;
+    b.session = a.session.clone();
+    let (ask, prompt) = a.stop_at_a_prompt().await;
+    let refused = tokio::time::timeout(soon(), b.in_mine("ask", json!({ "prompt": "hello" })))
+        .await
+        .expect("refused at once");
+    assert_eq!(
+        refused.error.as_deref(),
+        Some("This conversation is answering another question. Wait for it, or open another with /new.")
+    );
+    a.reply(prompt, false).await;
+    assert!(a.response_to(ask).await.ok);
+    assert!(b.in_mine("ask", json!({ "prompt": "hello" })).await.ok);
+}
+
+#[tokio::test]
+async fn an_answering_conversation_cannot_be_deleted() {
+    let home = fresh().await;
+    let mut a = Window::open(&home).await;
+    let mut b = Window::open(&home).await;
+    let (ask, prompt) = a.stop_at_a_prompt().await;
+    let id = a.session.clone();
+    let refused = tokio::time::timeout(
+        soon(),
+        b.call("session.delete", json!({ "session_id": id })),
+    )
+    .await
+    .expect("answered at once");
+    assert_eq!(
+        refused.error,
+        Some(format!(
+            "Conversation {id} is answering a question; delete it after."
+        ))
+    );
+    a.reply(prompt, false).await;
+    assert!(a.response_to(ask).await.ok);
+}
+
+#[tokio::test]
+async fn the_marker_is_released_when_a_turn_fails() {
+    let home = fresh().await;
+    let mut a = Window::open(&home).await;
+    let _ = a.in_mine("ask", json!({ "prompt": "fail now" })).await;
+    let again = a.in_mine("ask", json!({ "prompt": "hello" })).await;
+    assert!(again.ok, "{:?}", again.error);
 }

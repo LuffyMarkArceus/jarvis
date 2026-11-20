@@ -97,3 +97,10 @@ sending its listing to the remote model ("always allow" stops that).
 | Two windows shared one conversation: `/new` in one moved both, and a question landed in a conversation its window did not show (a test against the live daemon did this to the owner's session) | ours | Each window is its own conversation; checked live with two TUIs against a throw-away daemon |
 | Deleting a conversation with messages always failed ("SQL logic error"): the search-index triggers used FTS5's 'delete' command on a table that is not external-content | ours, latent since the start | Triggers recreated correctly on every start; repairs existing databases |
 
+
+## 2026-11-20, Milestone 6.5b
+
+| Finding | Whose | Done |
+| --- | --- | --- |
+| One window at an "Allow? y/n" prompt froze every window - even `status` - because each request held the whole daemon for the whole turn | ours | No lock held for a turn; one turn at a time per conversation |
+| On a 4 GB GPU two windows' local turns cannot run together, and Ollama's own queue is invisible: the waiting turn looked hung | ours | A visible GPU queue, `[model] slots`; spill to the remote model after 5 s, with a notice |

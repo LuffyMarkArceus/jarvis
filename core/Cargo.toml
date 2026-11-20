@@ -21,3 +21,6 @@ regex = "1"
 uuid = { version = "1.10", features = ["v4", "serde"] }
 sha2 = "0.10"
 jarvis-common = { path = "../common" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

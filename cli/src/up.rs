@@ -252,6 +252,7 @@ mod tests {
                 ..ModelConfig::default()
             },
             default: false,
+            ..RemoteConfig::default()
         });
         assert_eq!(local_ollama(&config).as_deref(), Some("localhost:11500"));
     }
