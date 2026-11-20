@@ -9,6 +9,15 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+/// A conversation's stored settings: the model chosen on each tier (`None`:
+/// the tier's default) and whether it is on the remote tier.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConversationSettings {
+    pub local: Option<String>,
+    pub remote_model: Option<String>,
+    pub remote: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub id: i64,
@@ -131,7 +140,26 @@ impl MemoryManager {
         if !has("messages", "model")? {
             migrate("ALTER TABLE messages ADD COLUMN model TEXT")?;
         }
-        migrate("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        migrate("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")?;
+        // 6.5b: a model choice per tier. 6.5a kept only the active tier's
+        // model in `model`; once, when the column arrives, a conversation on
+        // remote moves it to `remote_model`, and the last-used setting
+        // splits the same way. After that `model` is always the local one.
+        if !has("sessions", "remote_model")? {
+            conn.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE sessions ADD COLUMN remote_model TEXT;
+                 UPDATE sessions SET remote_model = model, model = NULL WHERE remote = 1;
+                 INSERT OR IGNORE INTO settings (key, value)
+                     SELECT CASE WHEN COALESCE((SELECT value FROM settings WHERE key = 'last_remote'), '0') = '1'
+                                 THEN 'last_remote_model' ELSE 'last_local_model' END, value
+                     FROM settings WHERE key = 'last_model';
+                 DELETE FROM settings WHERE key IN ('last_model', 'last_remote');
+                 COMMIT;",
+            )
+            .map_err(|e| JarvisError::Memory(format!("Migration failed: {}", e)))?;
+        }
+        Ok(())
     }
 
     /// The delete and update triggers keep the search index in step with
@@ -171,14 +199,20 @@ impl MemoryManager {
         .map_err(|e| JarvisError::Memory(format!("Migration failed: {}", e)))
     }
 
-    /// A conversation's model (on its tier) and tier; `None` if there is no
-    /// such conversation.
-    pub fn session_settings(&self, session_id: &str) -> Result<Option<(Option<String>, bool)>> {
+    /// A conversation's chosen models and tier; `None` if there is no such
+    /// conversation.
+    pub fn session_settings(&self, session_id: &str) -> Result<Option<ConversationSettings>> {
         let conn = self.conn.lock().unwrap();
         let row = conn.query_row(
-            "SELECT model, remote FROM sessions WHERE id = ?1",
+            "SELECT model, remote_model, remote FROM sessions WHERE id = ?1",
             params![session_id],
-            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)? != 0)),
+            |row| {
+                Ok(ConversationSettings {
+                    local: row.get(0)?,
+                    remote_model: row.get(1)?,
+                    remote: row.get::<_, i64>(2)? != 0,
+                })
+            },
         );
         match row {
             Ok(found) => Ok(Some(found)),
@@ -190,13 +224,17 @@ impl MemoryManager {
     pub fn save_session_settings(
         &self,
         session_id: &str,
-        model: Option<&str>,
-        remote: bool,
+        settings: &ConversationSettings,
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE sessions SET model = ?2, remote = ?3 WHERE id = ?1",
-            params![session_id, model, remote as i64],
+            "UPDATE sessions SET model = ?2, remote_model = ?3, remote = ?4 WHERE id = ?1",
+            params![
+                session_id,
+                settings.local,
+                settings.remote_model,
+                settings.remote as i64
+            ],
         )
         .map(|_| ())
         .map_err(|e| JarvisError::Memory(format!("Failed to save session settings: {}", e)))

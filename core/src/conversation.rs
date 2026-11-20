@@ -4,7 +4,7 @@
 //! nothing one window does can change another (Milestone 6.5a).
 
 use crate::error::{JarvisError, Result};
-use crate::memory::MemoryManager;
+use crate::memory::{ConversationSettings, MemoryManager};
 use crate::orchestrator::Orchestrator;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -117,8 +117,8 @@ pub struct Conversations {
 
 /// Settings keys: the model and tier used most recently, and the
 /// conversation used most recently (`jarvis up --continue`).
-const LAST_MODEL: &str = "last_model";
-const LAST_REMOTE: &str = "last_remote";
+const LAST_LOCAL_MODEL: &str = "last_local_model";
+const LAST_REMOTE_MODEL: &str = "last_remote_model";
 const LAST_SESSION: &str = "last_session";
 
 impl Conversations {
@@ -135,14 +135,16 @@ impl Conversations {
         if let Some(conv) = self.loaded.lock().unwrap().get(id) {
             return Ok(conv.clone());
         }
-        let Some((model, remote)) = self.memory.session_settings(id)? else {
+        let Some(stored) = self.memory.session_settings(id)? else {
             return Err(JarvisError::Config(format!(
                 "There is no conversation {id}."
             )));
         };
-        let mut chosen = [None, None];
-        chosen[remote as usize] = model;
-        let conv = Conversation::restore(id.to_string(), remote, chosen);
+        let conv = Conversation::restore(
+            id.to_string(),
+            stored.remote,
+            [stored.local, stored.remote_model],
+        );
         // Whoever loaded it first wins: two windows on one conversation
         // must share one `Conversation`, or a model switch in one would miss
         // the other.
@@ -155,17 +157,11 @@ impl Conversations {
             .clone())
     }
 
-    /// A new conversation, on the model and tier used most recently.
+    /// A new conversation: on the local tier unless `[remote] default` is
+    /// set (owner, 2026-11-19), with the model used last on each tier.
     pub fn create(&self, orch: &Orchestrator) -> Arc<Conversation> {
         let fresh = orch.new_conversation();
-        let model = self.memory.setting(LAST_MODEL).ok().flatten();
-        let remote = match self.memory.setting(LAST_REMOTE).ok().flatten() {
-            Some(flag) => flag == "1",
-            None => fresh.remote(),
-        };
-        let mut chosen = [None, None];
-        chosen[remote as usize] = model;
-        let conv = Conversation::restore(fresh.id.clone(), remote, chosen);
+        let conv = Conversation::restore(fresh.id.clone(), fresh.remote(), self.last_models());
         self.saved(&conv);
         self.loaded
             .lock()
@@ -177,17 +173,25 @@ impl Conversations {
     /// Store `conv`'s model and tier, and make them the ones new
     /// conversations start with.
     pub fn saved(&self, conv: &Conversation) {
-        let remote = conv.remote();
-        let model = conv.chosen()[remote as usize].clone();
-        let _ = self
-            .memory
-            .save_session_settings(&conv.id, model.as_deref(), remote);
-        if let Some(model) = &model {
-            let _ = self.memory.set_setting(LAST_MODEL, model);
+        let [local, remote_model] = conv.chosen();
+        let _ = self.memory.save_session_settings(
+            &conv.id,
+            &ConversationSettings {
+                local: local.clone(),
+                remote_model: remote_model.clone(),
+                remote: conv.remote(),
+            },
+        );
+        for (key, model) in [(LAST_LOCAL_MODEL, local), (LAST_REMOTE_MODEL, remote_model)] {
+            if let Some(model) = model {
+                let _ = self.memory.set_setting(key, &model);
+            }
         }
-        let _ = self
-            .memory
-            .set_setting(LAST_REMOTE, if remote { "1" } else { "0" });
+    }
+
+    /// The model used last on each tier, `[local, remote]`.
+    fn last_models(&self) -> [Option<String>; 2] {
+        [LAST_LOCAL_MODEL, LAST_REMOTE_MODEL].map(|key| self.memory.setting(key).ok().flatten())
     }
 
     /// `conv` was just used: `--continue` opens it.
@@ -207,12 +211,8 @@ impl Conversations {
     /// The settings a new conversation would start with - for `status` and
     /// for loading that model on start. Not a conversation: never stored,
     /// never sent a turn.
-    pub fn preferred(&self) -> Arc<Conversation> {
-        let model = self.memory.setting(LAST_MODEL).ok().flatten();
-        let remote = self.memory.setting(LAST_REMOTE).ok().flatten().as_deref() == Some("1");
-        let mut chosen = [None, None];
-        chosen[remote as usize] = model;
-        Conversation::restore(String::new(), remote, chosen)
+    pub fn preferred(&self, orch: &Orchestrator) -> Arc<Conversation> {
+        Conversation::restore(String::new(), orch.starts_remote(), self.last_models())
     }
 
     /// The conversations in use since the daemon started: `/prune` leaves

@@ -273,9 +273,13 @@ impl Orchestrator {
         if let Some(ref m) = self.memory {
             let _ = m.create_session(&id);
         }
-        let remote =
-            self.remote.is_some() && self.config.remote.as_ref().is_some_and(|r| r.default);
-        Conversation::new(id, remote)
+        Conversation::new(id, self.starts_remote())
+    }
+
+    /// Whether a new conversation starts on the remote tier: only when one
+    /// exists and `[remote] default` is set.
+    pub fn starts_remote(&self) -> bool {
+        self.remote.is_some() && self.config.remote.as_ref().is_some_and(|r| r.default)
     }
 
     /// Switch `conv` between the local and remote tier.

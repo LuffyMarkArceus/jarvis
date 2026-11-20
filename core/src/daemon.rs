@@ -205,7 +205,7 @@ impl Daemon {
     /// What a new conversation would start with, for `status`.
     pub async fn default_model(&self) -> (String, String, String) {
         let orch = &self.orchestrator;
-        let preferred = self.conversations.preferred();
+        let preferred = self.conversations.preferred(&self.orchestrator);
         let (provider, model, url) = orch.model_info(&preferred);
         (provider.to_string(), model, url)
     }
@@ -234,7 +234,7 @@ impl Daemon {
 
     /// Load the model a new conversation would use (on start).
     pub async fn warm_up_default(&self) {
-        let preferred = self.conversations.preferred();
+        let preferred = self.conversations.preferred(&self.orchestrator);
         self.orchestrator.warm_up(&preferred);
     }
 
@@ -283,7 +283,7 @@ impl Daemon {
 
     /// Whether a new conversation starts on the remote tier, for `status`.
     pub fn default_remote(&self) -> bool {
-        self.conversations.preferred().remote()
+        self.conversations.preferred(&self.orchestrator).remote()
     }
 
     /// The footer under a stored answer: the model that wrote it and the
@@ -297,7 +297,7 @@ impl Daemon {
 
     /// The privacy notice for a new conversation's tier, for `status`.
     pub async fn default_privacy(&self) -> String {
-        let preferred = self.conversations.preferred();
+        let preferred = self.conversations.preferred(&self.orchestrator);
         let orch = &self.orchestrator;
         orch.destination(&preferred).notice().to_string()
     }

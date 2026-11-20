@@ -5,7 +5,7 @@
 use jarvis_core::config::{Config, ModelConfig, RemoteConfig};
 use jarvis_core::conversation::Conversations;
 use jarvis_core::eval::RecordingProvider;
-use jarvis_core::memory::MemoryManager;
+use jarvis_core::memory::{ConversationSettings, MemoryManager};
 use jarvis_core::orchestrator::{ConfirmationHandler, Orchestrator};
 use jarvis_core::permissions::PermissionManager;
 use serde_json::Value;
@@ -106,7 +106,10 @@ fn migrations_run_twice_and_old_messages_have_no_model() {
         let messages = memory.get_recent_messages("s", 10).unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model, None);
-        assert_eq!(memory.session_settings("s").unwrap(), Some((None, false)));
+        assert_eq!(
+            memory.session_settings("s").unwrap(),
+            Some(ConversationSettings::default())
+        );
     }
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -125,7 +128,7 @@ fn a_conversations_model_and_tier_survive_a_restart() {
 }
 
 #[test]
-fn a_new_conversation_starts_with_the_model_used_last() {
+fn a_new_conversation_starts_with_the_local_model_used_last() {
     let s = setup();
     let convs = registry(&s);
     let first = convs.create(&s.jarvis);
@@ -139,6 +142,111 @@ fn a_new_conversation_starts_with_the_model_used_last() {
     s.jarvis.set_model(&first, "llama").unwrap();
     convs.saved(&first);
     assert_eq!(s.jarvis.model_info(&untouched).1, "qwen2.5:3b");
+}
+
+#[test]
+fn a_new_conversation_starts_local_after_a_remote_one() {
+    let s = setup();
+    let convs = registry(&s);
+    let first = convs.create(&s.jarvis);
+    s.jarvis.set_model(&first, "qwen").unwrap();
+    convs.saved(&first);
+    s.jarvis.set_model(&first, "north").unwrap();
+    convs.saved(&first);
+    assert!(first.remote());
+    let second = convs.create(&s.jarvis);
+    assert!(
+        !second.remote(),
+        "new windows start local (owner, 2026-11-19)"
+    );
+    assert_eq!(s.jarvis.model_info(&second).1, "qwen2.5:3b");
+    // ... and keep the remote model used last for when they go remote.
+    s.jarvis.set_remote(&second, true).unwrap();
+    assert_eq!(
+        s.jarvis.model_info(&second).1,
+        "cohere/north-mini-code:free"
+    );
+}
+
+#[test]
+fn a_remote_default_starts_remote() {
+    let mut s = setup();
+    s.config.remote.as_mut().unwrap().default = true;
+    let permissions =
+        PermissionManager::with_paths(s.dir.join("permissions.toml"), s.dir.join("audit.db"))
+            .unwrap();
+    s.jarvis = Orchestrator::with_parts(
+        s.config.clone(),
+        Arc::new(RecordingProvider::replying("local answer")),
+        permissions,
+    )
+    .with_remote(Some(s.remote.clone()));
+    assert!(registry(&s).create(&s.jarvis).remote());
+}
+
+#[test]
+fn the_local_choice_survives_a_trip_to_remote_and_a_restart() {
+    let s = setup();
+    let convs = registry(&s);
+    let conv = convs.create(&s.jarvis);
+    s.jarvis.set_model(&conv, "qwen").unwrap();
+    s.jarvis.set_remote(&conv, true).unwrap();
+    convs.saved(&conv);
+    let again = registry(&s).get(&conv.id).unwrap();
+    assert!(again.remote());
+    s.jarvis.set_remote(&again, false).unwrap();
+    assert_eq!(s.jarvis.model_info(&again).1, "qwen2.5:3b");
+}
+
+#[test]
+fn an_old_row_with_a_remote_model_loads() {
+    // 6.5a stored only the active tier's model in `sessions.model`.
+    let dir = std::env::temp_dir().join(format!("jarvis-convs-65a-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("memory.db");
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT,
+                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                 model TEXT, remote INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO sessions (id, title, model, remote)
+                 VALUES ('r', 'old', 'nvidia/nemotron-3-ultra-550b-a55b:free', 1),
+                        ('l', 'old', 'qwen2.5:3b', 0);
+             INSERT INTO settings VALUES ('last_model', 'nvidia/nemotron-3-ultra-550b-a55b:free'),
+                                         ('last_remote', '1');",
+        )
+        .unwrap();
+    }
+    let mut config = config_in(&dir);
+    config.memory.db_path = db;
+    for _ in 0..2 {
+        let memory = MemoryManager::new(config.clone()).unwrap();
+        assert_eq!(
+            memory.session_settings("r").unwrap(),
+            Some(ConversationSettings {
+                local: None,
+                remote_model: Some("nvidia/nemotron-3-ultra-550b-a55b:free".into()),
+                remote: true,
+            })
+        );
+        assert_eq!(
+            memory
+                .session_settings("l")
+                .unwrap()
+                .unwrap()
+                .local
+                .as_deref(),
+            Some("qwen2.5:3b")
+        );
+        assert_eq!(
+            memory.setting("last_remote_model").unwrap().as_deref(),
+            Some("nvidia/nemotron-3-ultra-550b-a55b:free")
+        );
+        assert_eq!(memory.setting("last_local_model").unwrap(), None);
+    }
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test]
