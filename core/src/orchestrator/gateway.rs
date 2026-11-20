@@ -36,6 +36,21 @@ pub(super) fn short_model(name: &str) -> &str {
     name.strip_suffix(":free").unwrap_or(name)
 }
 
+/// The system prompt of a turn's requests, with the version a spill to the
+/// remote tier sends: recall the policy would block left out, as a remote
+/// conversation's prompt would have it (6.5b).
+pub(super) struct SystemPrompt {
+    pub(super) text: String,
+    pub(super) label: Label,
+    pub(super) spill: Option<(String, Label)>,
+}
+
+/// A local call's way forward.
+enum Local {
+    Slot(LanePermit),
+    Spilled(ModelReply),
+}
+
 /// What came back from [`Orchestrator::ask_model`].
 pub(super) enum ModelReply {
     /// Boxed: a turn is much larger than a refusal's text.
@@ -66,8 +81,7 @@ impl Orchestrator {
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn ask_model(
         &self,
-        system: &str,
-        system_label: &Label,
+        system: &SystemPrompt,
         messages: &[ChatMessage],
         tools: Option<&[Value]>,
         confirm: Option<&dyn ConfirmationHandler>,
@@ -75,23 +89,65 @@ impl Orchestrator {
         sink: Option<&UnboundedSender<String>>,
         rec: &TurnRecorder<'_>,
     ) -> Result<ModelReply> {
-        rec.saw_request(system, system_label, messages);
+        rec.saw_request(&system.text, &system.label, messages);
         let (cfg, client) = self.turn_tier(rec);
         let (cfg, client) = (&cfg, &client);
         let request = Request {
-            system,
+            system: &system.text,
             messages,
             tools,
         };
         if !destination_of(cfg).is_remote() {
+            let slot = match self
+                .local_or_spill(system, messages, tools, confirm, cancel, sink, rec)
+                .await?
+            {
+                Local::Slot(slot) => slot,
+                Local::Spilled(reply) => return Ok(reply),
+            };
             return self
-                .send(cfg, client, request, false, cancel, sink, rec)
+                .send(cfg, client, request, false, Some(slot), cancel, sink, rec)
                 .await;
         }
 
+        let Some(why) = self
+            .refusal(cfg, client, &system.label, messages, confirm, rec)
+            .await
+        else {
+            return self
+                .send(cfg, client, request, true, None, cancel, sink, rec)
+                .await;
+        };
+        // The owner's rule: when nothing could be sent, ask each time whether
+        // the local model should answer instead. Nobody to ask means no.
+        if let (Some((local_cfg, local)), Some(confirm)) = (self.local_fallback(rec), confirm) {
+            let (local_cfg, local) = (&local_cfg, &local);
+            let args = json!({ "model": local_cfg.default_model, "reason": why });
+            if confirm.confirm(EGRESS_LOCAL_TOOL, &args).await {
+                return self
+                    .send(local_cfg, local, request, false, None, cancel, sink, rec)
+                    .await;
+            }
+        }
+        rec.withheld
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        Ok(ModelReply::Withheld(why))
+    }
+
+    /// Why a request to a remote tier may not be sent (the answer to show),
+    /// or `None` when it may: by policy, or because the user approved.
+    async fn refusal(
+        &self,
+        cfg: &ModelConfig,
+        client: &Arc<dyn Provider>,
+        system_label: &Label,
+        messages: &[ChatMessage],
+        confirm: Option<&dyn ConfirmationHandler>,
+        rec: &TurnRecorder<'_>,
+    ) -> Option<String> {
         let mut labels = vec![system_label.clone()];
         labels.extend(egress::label(messages));
-        let refused = match egress::check(&labels, &self.egress_policy()) {
+        match egress::check(&labels, &self.egress_policy()) {
             Verdict::Send => None,
             Verdict::Never(concerns) => Some(self.withheld(cfg, client, &concerns, true)),
             Verdict::Ask(concerns) => {
@@ -109,27 +165,121 @@ impl Orchestrator {
                     Some(self.withheld(cfg, client, &new, false))
                 }
             }
+        }
+    }
+
+    /// Whether a local call that finds the GPU busy may go to the remote
+    /// tier instead: the turn is local, a remote tier exists and really is
+    /// remote, spilling is on, and this turn has not spilled or been
+    /// refused a spill already.
+    pub(super) fn can_spill(&self, rec: &TurnRecorder<'_>) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        let Some(remote) = self.config.remote.as_ref() else {
+            return false;
+        };
+        !self.on_remote(&rec.settings())
+            && self.remote.is_some()
+            && destination_of(&remote.model).is_remote()
+            && remote.spill != Spill::Never
+            && !rec.spilled.load(Relaxed)
+            && !rec.spill_withheld.load(Relaxed)
+    }
+
+    /// A GPU slot for a local call, or - when the GPU stays busy past
+    /// `spill_after` and spilling is allowed - the remote tier's answer.
+    /// A call that waits keeps its place in line throughout, including
+    /// while the user is asked something (6.5b).
+    #[allow(clippy::too_many_arguments)]
+    async fn local_or_spill(
+        &self,
+        system: &SystemPrompt,
+        messages: &[ChatMessage],
+        tools: Option<&[Value]>,
+        confirm: Option<&dyn ConfirmationHandler>,
+        cancel: Option<&Cancellation>,
+        sink: Option<&UnboundedSender<String>>,
+        rec: &TurnRecorder<'_>,
+    ) -> Result<Local> {
+        let (cfg, _) = self.turn_tier(rec);
+        let model = cfg.default_model.as_str();
+        let remote = self.config.remote.as_ref();
+        if !self.can_spill(rec) {
+            return Ok(Local::Slot(self.local_slot(model, cancel, rec).await?));
+        }
+        let wait = std::time::Duration::from_secs(remote.map_or(5, |r| r.spill_after));
+        self.say_waiting(rec);
+        let waiter = match self.lane.acquire(model, Some(wait), cancel).await {
+            Admit::Slot(permit) => {
+                rec.queued(permit.waited());
+                return Ok(Local::Slot(permit));
+            }
+            Admit::Cancelled => return Err(JarvisError::Cancelled),
+            Admit::Busy(waiter) => waiter,
         };
 
-        let Some(why) = refused else {
-            return self
-                .send(cfg, client, request, true, cancel, sink, rec)
-                .await;
+        use std::sync::atomic::Ordering::Relaxed;
+        rec.spilled.store(true, Relaxed);
+        let (remote_cfg, remote_client) = self.turn_tier(rec);
+        let asked = remote.is_some_and(|r| r.spill == Spill::Ask);
+        let agreed = !asked
+            || match confirm {
+                Some(confirm) => {
+                    let args = json!({
+                        "model": remote_cfg.default_model,
+                        "waited_s": waiter.waited().as_secs(),
+                    });
+                    confirm.confirm(EGRESS_SPILL_TOOL, &args).await
+                }
+                None => false,
+            };
+        let (text, label) = system
+            .spill
+            .clone()
+            .unwrap_or_else(|| (system.text.clone(), system.label.clone()));
+        let refused = if agreed {
+            self.refusal(&remote_cfg, &remote_client, &label, messages, confirm, rec)
+                .await
+        } else {
+            None
         };
-        // The owner's rule: when nothing could be sent, ask each time whether
-        // the local model should answer instead. Nobody to ask means no.
-        if let (Some((local_cfg, local)), Some(confirm)) = (self.local_fallback(rec), confirm) {
-            let (local_cfg, local) = (&local_cfg, &local);
-            let args = json!({ "model": local_cfg.default_model, "reason": why });
-            if confirm.confirm(EGRESS_LOCAL_TOOL, &args).await {
-                return self
-                    .send(local_cfg, local, request, false, cancel, sink, rec)
-                    .await;
-            }
+        if agreed && refused.is_none() {
+            drop(waiter);
+            rec.step(format!(
+                "GPU busy: answering with {} (remote)",
+                short_model(&remote_cfg.default_model)
+            ));
+            let request = Request {
+                system: &text,
+                messages,
+                tools,
+            };
+            let reply = self
+                .send(
+                    &remote_cfg,
+                    &remote_client,
+                    request,
+                    true,
+                    None,
+                    cancel,
+                    sink,
+                    rec,
+                )
+                .await?;
+            return Ok(Local::Spilled(reply));
         }
-        rec.withheld
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        Ok(ModelReply::Withheld(why))
+        // Not sent: the user said no, or what it holds may not go. Back to
+        // the queue, from the same place, and no more spills this turn.
+        rec.spilled.store(false, Relaxed);
+        if agreed {
+            rec.spill_withheld.store(true, Relaxed);
+        }
+        match waiter.wait(cancel).await {
+            Some(permit) => {
+                rec.queued(permit.waited());
+                Ok(Local::Slot(permit))
+            }
+            None => Err(JarvisError::Cancelled),
+        }
     }
 
     /// Ask whether `concerns` may be sent: once, or (for files) always from
@@ -182,6 +332,7 @@ impl Orchestrator {
         client: &Arc<dyn Provider>,
         request: Request<'_>,
         remote: bool,
+        slot: Option<LanePermit>,
         cancel: Option<&Cancellation>,
         sink: Option<&UnboundedSender<String>>,
         rec: &TurnRecorder<'_>,
@@ -216,10 +367,10 @@ impl Orchestrator {
         let stream_to = sink.filter(|_| !redacted.as_ref().is_some_and(|r| r.2));
         // A local model call takes a GPU slot first, and says so when it
         // has to wait behind another window's (6.5b).
-        let _slot = if remote {
-            None
-        } else {
-            Some(self.local_slot(&cfg.default_model, cancel, rec).await?)
+        let _slot = match slot {
+            Some(slot) => Some(slot),
+            None if remote => None,
+            None => Some(self.local_slot(&cfg.default_model, cancel, rec).await?),
         };
         rec.step(format!(
             "asking {} (step {})",
@@ -260,13 +411,7 @@ impl Orchestrator {
         cancel: Option<&Cancellation>,
         rec: &TurnRecorder<'_>,
     ) -> Result<LanePermit> {
-        if self.lane.available() == 0 {
-            if let Some(running) = self.lane.running() {
-                rec.step(format!(
-                    "waiting for the GPU: another window is using {running}"
-                ));
-            }
-        }
+        self.say_waiting(rec);
         match self.lane.acquire(model, None, cancel).await {
             Admit::Slot(permit) => {
                 rec.queued(permit.waited());
@@ -280,6 +425,17 @@ impl Orchestrator {
                 None => Err(JarvisError::Cancelled),
             },
             Admit::Cancelled => Err(JarvisError::Cancelled),
+        }
+    }
+
+    /// "waiting for the GPU" when every slot is taken.
+    fn say_waiting(&self, rec: &TurnRecorder<'_>) {
+        if self.lane.available() == 0 {
+            if let Some(running) = self.lane.running() {
+                rec.step(format!(
+                    "waiting for the GPU: another window is using {running}"
+                ));
+            }
         }
     }
 

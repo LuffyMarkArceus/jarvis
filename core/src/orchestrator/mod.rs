@@ -46,7 +46,7 @@
 //! present (a headless run) the call is denied, never silently allowed.
 
 use crate::cancel::Cancellation;
-use crate::config::{Config, ModelConfig};
+use crate::config::{Config, ModelConfig, Spill};
 use crate::context::{self, ContextPlan};
 use crate::conversation::{Conversation, LastTurn, Pinned};
 use crate::egress::redact::Redactor;
@@ -129,6 +129,10 @@ pub const EGRESS_TOOL: &str = "egress.send";
 
 /// Asked when a remote request was not sent: answer with the local model?
 pub const EGRESS_LOCAL_TOOL: &str = "egress.local";
+
+/// Asked, with `[remote] spill = "ask"`, before a call the busy GPU would
+/// hold up goes to the remote tier instead.
+pub const EGRESS_SPILL_TOOL: &str = "egress.spill";
 
 /// Asked before a web call carries something this turn may not send.
 pub const EGRESS_WEB_TOOL: &str = "egress.web";

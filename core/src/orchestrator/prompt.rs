@@ -14,6 +14,14 @@ pub(super) fn recalled_label(result: &memory::RecallResult) -> Label {
 ///
 /// The blank line keeps it visually separate from the instructions above;
 /// without it a small model reads the remembered text as another rule.
+/// A system prompt with recall added, and where the recalled text came
+/// from; `spill` is the same for a request a busy GPU sends remote.
+pub(super) struct Recalled {
+    pub(super) prompt: String,
+    pub(super) label: Label,
+    pub(super) spill: Option<(String, Label)>,
+}
+
 pub(super) fn append_recall(mut prompt: String, block: Option<String>) -> String {
     let Some(block) = block else {
         return prompt;
@@ -225,17 +233,55 @@ impl Orchestrator {
     /// Also returns where the recalled text came from: `memory`, plus the
     /// label each recalled message was stored with, so a file shown in an
     /// earlier session does not leave as "memory".
+    ///
+    /// When this turn could spill to the remote tier, also the prompt a
+    /// spill sends: recall as a remote request gets it.
     pub(super) fn with_recall(
         &self,
         rec: &TurnRecorder<'_>,
         input: &str,
         prompt: String,
-    ) -> (String, Label) {
+    ) -> Recalled {
         let remote = destination_of(&self.turn_tier(rec).0).is_remote();
+        let spill = self.can_spill(rec).then(|| {
+            let (block, label) = self
+                .recall_block(rec.conversation, input, true)
+                .unwrap_or_default();
+            (append_recall(prompt.clone(), block), label)
+        });
         let (block, label) = self
             .recall_block(rec.conversation, input, remote)
             .unwrap_or_default();
-        (append_recall(prompt, block), label)
+        Recalled {
+            prompt: append_recall(prompt, block),
+            label,
+            spill,
+        }
+    }
+
+    /// The requests' system prompt, from the assembled one: `assemble`
+    /// appends history sections to the recalled prompt, and the spill
+    /// version gets the same sections after its own prompt.
+    pub(super) fn system_prompt(
+        &self,
+        recalled: &Recalled,
+        assembled: &str,
+        assembled_label: &Label,
+    ) -> SystemPrompt {
+        let with = |label: &Label| {
+            let mut all = assembled_label.clone();
+            all.absorb(label);
+            all
+        };
+        let spill = recalled.spill.as_ref().and_then(|(prompt, label)| {
+            let sections = assembled.strip_prefix(recalled.prompt.as_str())?;
+            Some((format!("{prompt}{sections}"), with(label)))
+        });
+        SystemPrompt {
+            text: assembled.to_string(),
+            label: with(&recalled.label),
+            spill,
+        }
     }
 
     /// `remote`: for a request to a remote destination, which leaves out

@@ -7,10 +7,11 @@ mod common;
 
 use common::{gated, Gate};
 use jarvis_core::cancel::TurnRegistry;
+use jarvis_core::config::Spill;
 use jarvis_core::config::{Config, ModelConfig, RemoteConfig};
 use jarvis_core::conversation::Conversation;
 use jarvis_core::eval::RecordingProvider;
-use jarvis_core::orchestrator::{Orchestrator, TurnReport};
+use jarvis_core::orchestrator::{footer, ConfirmationHandler, Orchestrator, TurnReport};
 use jarvis_core::permissions::{PermissionAction, PermissionManager};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,6 +19,7 @@ use std::time::Duration;
 
 struct Setup {
     dir: PathBuf,
+    config: Config,
     jarvis: Arc<Orchestrator>,
     gate: Gate,
     gated: Arc<common::Gated>,
@@ -52,6 +54,7 @@ fn setup_with(edit: impl FnOnce(&mut Config)) -> Setup {
         ..RemoteConfig::default()
     });
     edit(&mut config);
+    let kept = config.clone();
     let permissions =
         PermissionManager::with_paths(dir.join("permissions.toml"), dir.join("audit.db")).unwrap();
     // The turns with a tool write in this throw-away folder, unasked.
@@ -66,10 +69,17 @@ fn setup_with(edit: impl FnOnce(&mut Config)) -> Setup {
     );
     Setup {
         dir,
+        config: kept,
         jarvis,
         gate,
         gated,
         remote,
+    }
+}
+
+impl Setup {
+    fn jarvis_config(&self) -> Config {
+        self.config.clone()
     }
 }
 
@@ -87,19 +97,94 @@ fn ask(
     progress: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     cancel: Option<jarvis_core::cancel::Cancellation>,
 ) -> Turn {
+    ask_with(s, conv, input, progress, cancel, None)
+}
+
+fn ask_with(
+    s: &Setup,
+    conv: &Arc<Conversation>,
+    input: &str,
+    progress: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    cancel: Option<jarvis_core::cancel::Cancellation>,
+    owner: Option<Arc<Owner>>,
+) -> Turn {
     let (jarvis, conv, input) = (s.jarvis.clone(), conv.clone(), input.to_string());
     tokio::spawn(async move {
+        let confirm = owner.as_deref().map(|o| o as &dyn ConfirmationHandler);
         jarvis
             .run_turn_observed(
                 &conv,
                 &input,
-                None,
+                confirm,
                 cancel.as_ref(),
                 None,
                 progress.as_ref(),
             )
             .await
     })
+}
+
+/// Answers every prompt `yes` or `no`, and keeps what it was asked.
+struct Owner {
+    yes: bool,
+    asked: std::sync::Mutex<Vec<String>>,
+}
+
+impl Owner {
+    fn saying(yes: bool) -> Arc<Owner> {
+        Arc::new(Owner {
+            yes,
+            asked: Default::default(),
+        })
+    }
+
+    fn asked(&self) -> Vec<String> {
+        self.asked.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl ConfirmationHandler for Owner {
+    async fn confirm(&self, tool: &str, _args: &serde_json::Value) -> bool {
+        self.asked.lock().unwrap().push(tool.to_string());
+        self.yes
+    }
+}
+
+fn spilling(spill: Spill) -> impl FnOnce(&mut Config) {
+    move |c| {
+        let remote = c.remote.as_mut().unwrap();
+        remote.spill = spill;
+        remote.spill_after = 1;
+    }
+}
+
+/// Run a turn that may or may not reach the model, opening the gate if it
+/// does.
+async fn finish(s: &mut Setup, turn: Turn) -> TurnReport {
+    tokio::pin!(turn);
+    tokio::select! {
+        done = &mut turn => return done.unwrap().unwrap(),
+        _ = s.gate.reached() => s.gate.open_once(),
+    }
+    turn.await.unwrap().unwrap()
+}
+
+fn log_signals(s: &Setup) -> Vec<Vec<String>> {
+    std::fs::read_to_string(s.dir.join("turns.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .filter(|l| l["type"] == "turn")
+        .map(|l| {
+            l["signals"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect()
+        })
+        .collect()
 }
 
 async fn line_containing(
@@ -290,4 +375,263 @@ async fn no_model_is_loaded_ahead_while_the_gpu_is_busy() {
     s.jarvis.warm_up(&b);
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(*s.gated.warmed.lock().unwrap(), vec!["qwen2.5:3b"]);
+}
+
+#[tokio::test]
+async fn a_busy_gpu_spills_to_remote_after_the_wait() {
+    let mut s = setup_with(spilling(Spill::Auto));
+    let (a, b) = (s.jarvis.new_conversation(), s.jarvis.new_conversation());
+    let first = ask(&s, &a, "tell me a joke", None, None);
+    s.gate.reached().await;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let second = ask(&s, &b, "tell me a riddle", Some(tx), None);
+    let line = line_containing(&mut rx, "GPU busy").await;
+    assert_eq!(
+        line,
+        "GPU busy: answering with nemotron-3-ultra-550b-a55b (remote)"
+    );
+    let report = tokio::time::timeout(Duration::from_secs(5), second)
+        .await
+        .expect("the spilled turn does not wait for A")
+        .unwrap()
+        .unwrap();
+    assert_eq!(report.answer, "a remote answer");
+    assert!(
+        footer(&report).ends_with(" (GPU busy)"),
+        "{}",
+        footer(&report)
+    );
+    assert!(!b.remote(), "the conversation stays local");
+    let stored = jarvis_core::memory::MemoryManager::new(s.jarvis_config())
+        .unwrap()
+        .get_recent_messages(&b.id, 10)
+        .unwrap();
+    assert_eq!(
+        stored.last().unwrap().model.as_deref(),
+        Some("nvidia/nemotron-3-ultra-550b-a55b:free")
+    );
+    s.gate.open_once();
+    first.await.unwrap().unwrap();
+    assert!(log_signals(&s)
+        .iter()
+        .any(|l| l.contains(&"spilled".to_string())));
+    let next = ask(&s, &b, "tell me another riddle", None, None);
+    assert_eq!(
+        s.gate.reached().await,
+        "llama3.2:1b",
+        "the next turn tries local"
+    );
+    s.gate.open_once();
+    next.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn a_spill_still_asks_before_sending_a_local_file() {
+    let mut s = setup_with(spilling(Spill::Auto));
+    let (a, b) = (s.jarvis.new_conversation(), s.jarvis.new_conversation());
+    let secret = s.dir.join("outside.txt");
+    std::fs::write(&secret, "my private notes").unwrap();
+    let read = ask(&s, &b, &format!("read {}", secret.display()), None, None);
+    finish(&mut s, read).await;
+    let first = ask(&s, &a, "tell me a joke", None, None);
+    s.gate.reached().await;
+    let no = Owner::saying(false);
+    let second = ask_with(
+        &s,
+        &b,
+        "what was in that file?",
+        None,
+        None,
+        Some(no.clone()),
+    );
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(
+        no.asked().contains(&"egress.send".to_string()),
+        "{:?}",
+        no.asked()
+    );
+    assert!(s.remote.requests().is_empty(), "nothing was sent");
+    s.gate.open_once();
+    first.await.unwrap().unwrap();
+    assert_eq!(s.gate.reached().await, "llama3.2:1b");
+    s.gate.open_once();
+    let report = second.await.unwrap().unwrap();
+    assert!(!footer(&report).contains("GPU busy"), "{}", footer(&report));
+    let signals = log_signals(&s);
+    assert!(
+        signals
+            .last()
+            .unwrap()
+            .contains(&"spill_withheld".to_string()),
+        "{signals:?}"
+    );
+    assert!(!signals.last().unwrap().contains(&"spilled".to_string()));
+}
+
+#[tokio::test]
+async fn a_spill_leaves_out_recall_the_policy_would_block() {
+    let mut s = setup_with(|c| {
+        spilling(Spill::Auto)(c);
+        c.memory.recall_enabled = true;
+    });
+    jarvis_core::memory::MemoryManager::new(s.jarvis_config())
+        .unwrap()
+        .add_message(
+            "old",
+            "assistant",
+            "the zebra plans are secret, per notes.txt",
+        )
+        .unwrap();
+    let (a, b) = (s.jarvis.new_conversation(), s.jarvis.new_conversation());
+    let first = ask(&s, &a, "tell me a joke", None, None);
+    s.gate.reached().await;
+    let owner = Owner::saying(true);
+    let second = ask_with(
+        &s,
+        &b,
+        "what are the zebra plans?",
+        None,
+        None,
+        Some(owner.clone()),
+    );
+    let report = tokio::time::timeout(Duration::from_secs(5), second)
+        .await
+        .expect("spilled")
+        .unwrap()
+        .unwrap();
+    assert_eq!(report.answer, "a remote answer");
+    let sent = s.remote.requests().join("\n");
+    assert!(
+        !sent.contains("per notes.txt"),
+        "recall the policy blocks was sent: {sent}"
+    );
+    assert!(owner.asked().is_empty(), "{:?}", owner.asked());
+    s.gate.open_once();
+    first.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn spill_never_waits_for_the_gpu() {
+    let mut s = setup_with(spilling(Spill::Never));
+    let (a, b) = (s.jarvis.new_conversation(), s.jarvis.new_conversation());
+    let first = ask(&s, &a, "tell me a joke", None, None);
+    s.gate.reached().await;
+    let second = ask(&s, &b, "tell me a riddle", None, None);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(s.remote.requests().is_empty());
+    s.gate.open_once();
+    first.await.unwrap().unwrap();
+    s.gate.reached().await;
+    s.gate.open_once();
+    assert_eq!(
+        second.await.unwrap().unwrap().answer,
+        "answered by llama3.2:1b"
+    );
+}
+
+#[tokio::test]
+async fn spill_ask_with_a_no_keeps_its_place() {
+    let mut s = setup_with(spilling(Spill::Ask));
+    let (a, b, c) = (
+        s.jarvis.new_conversation(),
+        s.jarvis.new_conversation(),
+        s.jarvis.new_conversation(),
+    );
+    let first = ask(&s, &a, "tell me a joke", None, None);
+    s.gate.reached().await;
+    let no = Owner::saying(false);
+    let second = ask_with(&s, &b, "tell me a riddle", None, None, Some(no.clone()));
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(no.asked(), vec!["egress.spill"]);
+    let third = ask(&s, &c, "tell me a story", None, None);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    s.gate.open_once();
+    first.await.unwrap().unwrap();
+    s.gate.reached().await;
+    s.gate.open_once();
+    let b_done = tokio::time::timeout(Duration::from_secs(2), second)
+        .await
+        .expect("B ran before C");
+    assert!(b_done.unwrap().is_ok());
+    s.gate.reached().await;
+    s.gate.open_once();
+    third.await.unwrap().unwrap();
+    assert!(s.remote.requests().is_empty());
+}
+
+#[tokio::test]
+async fn a_spill_to_a_failing_remote_reports_the_error() {
+    let mut s = setup_with(spilling(Spill::Auto));
+    let failing = Arc::new(Failing);
+    let jarvis = Orchestrator::with_parts(
+        s.jarvis_config(),
+        s.gated.clone(),
+        PermissionManager::with_paths(s.dir.join("permissions.toml"), s.dir.join("audit.db"))
+            .unwrap(),
+    )
+    .with_remote(Some(failing));
+    s.jarvis = Arc::new(jarvis);
+    let (a, b) = (s.jarvis.new_conversation(), s.jarvis.new_conversation());
+    let first = ask(&s, &a, "tell me a joke", None, None);
+    s.gate.reached().await;
+    let second = ask(&s, &b, "tell me a riddle", None, None);
+    let report = tokio::time::timeout(Duration::from_secs(5), second)
+        .await
+        .expect("a failing remote does not hang the turn")
+        .unwrap()
+        .unwrap();
+    assert!(report.model_error.is_some(), "{report:?}");
+    s.gate.open_once();
+    first.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn a_local_remote_tier_is_not_a_spill() {
+    let mut s = setup_with(|c| {
+        spilling(Spill::Auto)(c);
+        c.remote.as_mut().unwrap().model.base_url = "http://127.0.0.1:11434".into();
+    });
+    let (a, b) = (s.jarvis.new_conversation(), s.jarvis.new_conversation());
+    let first = ask(&s, &a, "tell me a joke", None, None);
+    s.gate.reached().await;
+    let second = ask(&s, &b, "tell me a riddle", None, None);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(
+        s.remote.requests().is_empty(),
+        "a local [remote] is no spill"
+    );
+    s.gate.open_once();
+    first.await.unwrap().unwrap();
+    s.gate.reached().await;
+    s.gate.open_once();
+    second.await.unwrap().unwrap();
+}
+
+/// A remote model that is down.
+struct Failing;
+
+#[async_trait::async_trait]
+impl jarvis_core::provider::Provider for Failing {
+    fn name(&self) -> &'static str {
+        "failing"
+    }
+
+    async fn chat_turn(
+        &self,
+        _r: jarvis_core::provider::ChatRequest<'_>,
+        _c: Option<&jarvis_core::cancel::Cancellation>,
+    ) -> jarvis_core::error::Result<jarvis_core::model::ChatTurn> {
+        Err(jarvis_core::error::JarvisError::Model(
+            "503 upstream".into(),
+        ))
+    }
+
+    async fn chat_turn_streaming(
+        &self,
+        r: jarvis_core::provider::ChatRequest<'_>,
+        c: Option<&jarvis_core::cancel::Cancellation>,
+        _s: &tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> jarvis_core::error::Result<jarvis_core::model::ChatTurn> {
+        self.chat_turn(r, c).await
+    }
 }

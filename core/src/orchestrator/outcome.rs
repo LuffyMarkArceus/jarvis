@@ -94,6 +94,11 @@ pub struct TurnReport {
     pub remote: bool,
     /// A request was not sent to the remote model and nothing answered.
     pub withheld: bool,
+    /// A busy GPU sent this turn to the remote tier.
+    pub spilled: bool,
+    /// A spill was tried, but what it would send may not go: answered
+    /// locally instead.
+    pub spill_withheld: bool,
     /// The model did not respond (unreachable, rate limited); the answer is
     /// a fallback, not the model's.
     pub model_error: Option<String>,
@@ -204,6 +209,8 @@ pub(super) struct TurnRecorder<'c> {
     pub(super) pinned: crate::conversation::Pinned,
     /// A busy GPU sent this turn to the remote tier (6.5b).
     pub(super) spilled: std::sync::atomic::AtomicBool,
+    /// A spill could not send what it had to: no more spills this turn.
+    pub(super) spill_withheld: std::sync::atomic::AtomicBool,
 }
 
 impl<'c> TurnRecorder<'c> {
@@ -226,6 +233,7 @@ impl<'c> TurnRecorder<'c> {
             progress: Default::default(),
             pinned: conversation.pin(),
             spilled: Default::default(),
+            spill_withheld: Default::default(),
         }
     }
 
@@ -347,6 +355,10 @@ impl TurnRecorder<'_> {
         TurnReport {
             model_error: self.model_error.lock().unwrap().take(),
             withheld: self.withheld.load(std::sync::atomic::Ordering::Relaxed),
+            spilled: self.spilled.load(std::sync::atomic::Ordering::Relaxed),
+            spill_withheld: self
+                .spill_withheld
+                .load(std::sync::atomic::Ordering::Relaxed),
             model,
             provider,
             remote: self.remote.load(std::sync::atomic::Ordering::Relaxed),
@@ -369,6 +381,10 @@ impl TurnRecorder<'_> {
         TurnReport {
             model_error: self.model_error.lock().unwrap().take(),
             withheld: self.withheld.load(std::sync::atomic::Ordering::Relaxed),
+            spilled: self.spilled.load(std::sync::atomic::Ordering::Relaxed),
+            spill_withheld: self
+                .spill_withheld
+                .load(std::sync::atomic::Ordering::Relaxed),
             model,
             provider,
             remote: self.remote.load(std::sync::atomic::Ordering::Relaxed),
@@ -417,7 +433,11 @@ pub fn footer(report: &TurnReport) -> String {
     if report.redacted > 0 {
         parts.push(format!("{} redacted", report.redacted));
     }
-    parts.join(" · ")
+    let mut line = parts.join(" · ");
+    if report.spilled {
+        line.push_str(" (GPU busy)");
+    }
+    line
 }
 
 /// 950 -> "950", 1234 -> "1.2k", 15000 -> "15k".

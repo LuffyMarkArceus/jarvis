@@ -128,6 +128,12 @@ impl Orchestrator {
         if report.timing.queue_ms > spill_after * 1000 {
             found.push("queued");
         }
+        if report.spilled {
+            found.push("spilled");
+        }
+        if report.spill_withheld {
+            found.push("spill_withheld");
+        }
         found
     }
 
