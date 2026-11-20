@@ -652,7 +652,20 @@ impl Orchestrator {
         // the exact tool set this turn may use. Both the provider request and
         // the system prompt are rendered from `plan.tools`, so the model can
         // never be told about a tool it cannot call.
-        let plan = planner::plan(input, route, &self.tools, &self.mcp.list_tools());
+        let mut plan = planner::plan(input, route, &self.tools, &self.mcp.list_tools());
+        // Plan mode is offered only what looks: the shell too, read-only,
+        // where the sandbox runs (6.6).
+        let mode = rec.pinned.mode;
+        if mode.autonomy == crate::modes::Autonomy::Plan {
+            let read_only = mode.sandbox && crate::sandbox::ready(&self.config);
+            plan.tools.retain(|t| {
+                if t.name == "shell.run" {
+                    read_only
+                } else {
+                    !taint::is_action(&t.name)
+                }
+            });
+        }
         info!("route: {:?} tools: {:?}", plan.route, plan.names());
         *rec.planned.lock().unwrap() = Some((
             route_label(&plan.route),

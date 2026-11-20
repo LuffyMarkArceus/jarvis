@@ -331,6 +331,8 @@ async fn allow_all_with_sandbox_off_refuses_outside_after_untrusted_content() {
 
 #[tokio::test]
 async fn plan_refuses_a_write_with_the_copy() {
+    // The model is not offered a write in Plan mode, and a typed command
+    // that would change something is refused with the Plan copy.
     let s = setup(
         mode(Autonomy::Plan, Approval::AllowAll, true),
         |d| vec![write(&d.join("project/new.txt")), answer("done")],
@@ -340,8 +342,27 @@ async fn plan_refuses_a_write_with_the_copy() {
     let report = s.ask(&owner).await;
     assert!(owner.asked().is_empty());
     assert!(!s.path("project/new.txt").exists());
-    assert_eq!(outcome(&report, "filesystem.write").status, "denied");
-    assert!(report.answer.contains(PLAN_REFUSAL), "{}", report.answer);
+    assert_eq!(outcome(&report, "filesystem.write").status, "not_offered");
+
+    let out = s.path("project/typed");
+    let typed = s
+        .jarvis
+        .run_turn(
+            &s.conv,
+            &format!("run outside the sandbox: echo x > {}", out.display()),
+            Some(&owner),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(!out.exists());
+    assert!(typed.answer.contains(PLAN_REFUSAL), "{}", typed.answer);
+    assert!(
+        !typed.answer.contains("jarvis permissions allow"),
+        "{}",
+        typed.answer
+    );
 }
 
 #[tokio::test]
@@ -588,4 +609,47 @@ async fn autopilot_gets_more_rounds() {
     let report = auto.ask(&Owner::saying(true)).await;
     assert!(auto.script.sent.lock().unwrap().len() >= 11, "{report:?}");
     assert!(report.answer.contains("all looked at"), "{}", report.answer);
+}
+
+#[tokio::test]
+async fn plan_offers_only_tools_that_look() {
+    let s = setup(
+        mode(Autonomy::Plan, Approval::Manual, true),
+        |_| vec![answer("1. read the readme\n2. install it")],
+        |_| {},
+    );
+    let report = s.ask(&Owner::saying(true)).await;
+    for change in ["filesystem.write", "filesystem.edit", "filesystem.delete"] {
+        assert!(
+            !report.offered.contains(&change.to_string()),
+            "{:?}",
+            report.offered
+        );
+    }
+    assert!(
+        report.offered.contains(&"filesystem.read".to_string()),
+        "{:?}",
+        report.offered
+    );
+    assert_eq!(
+        report.offered.contains(&"shell.run".to_string()),
+        jarvis_core::sandbox::ready(&s.config),
+        "the shell, read-only, only where the sandbox runs: {:?}",
+        report.offered
+    );
+}
+
+#[tokio::test]
+async fn plan_prompt_asks_for_a_numbered_plan() {
+    let s = setup(
+        mode(Autonomy::Plan, Approval::Manual, true),
+        |_| vec![answer("1. read the readme")],
+        |_| {},
+    );
+    s.ask(&Owner::saying(true)).await;
+    assert!(
+        s.model_saw().contains("Answer with a numbered plan"),
+        "{}",
+        s.model_saw()
+    );
 }

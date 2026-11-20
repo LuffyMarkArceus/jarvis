@@ -451,6 +451,8 @@ pub(super) fn render_blocked_report(trace: &[ToolOutcome]) -> String {
         .copied()
         .filter(|t| {
             t.pattern.is_none()
+                // Plan mode, not a rule, stopped it: loosening rules won't help.
+                && !t.output.contains(crate::modes::PLAN_REFUSAL)
                 && !matches!(
                     t.status,
                     OutcomeStatus::Declined | OutcomeStatus::Withheld | OutcomeStatus::Untrusted

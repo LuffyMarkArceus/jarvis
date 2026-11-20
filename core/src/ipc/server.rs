@@ -630,6 +630,12 @@ async fn handle_ask(
         Ok(s) => s,
         Err(r) => return r,
     };
+    // `/go`: leave Plan mode for this turn and the ones after (6.6).
+    if let Some(autonomy) = request.params.get("autonomy") {
+        if let Err(e) = daemon.set_mode(&session, &serde_json::json!({ "autonomy": autonomy })) {
+            return Response::err(request.id, e.to_string());
+        }
+    }
 
     let id = request.id;
     // Normally registered by the reader loop. The fallback keeps the function

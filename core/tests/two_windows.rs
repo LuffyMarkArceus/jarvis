@@ -598,3 +598,33 @@ async fn approve_is_a_conversation_request() {
     let no_session = a.call("approve", json!({ "which": "all" })).await;
     assert!(!no_session.ok);
 }
+
+#[tokio::test]
+async fn go_switches_out_of_plan_and_carries_on() {
+    let home = fresh().await;
+    let mut a = Window::open(&home).await;
+    assert!(
+        a.in_mine("mode.set", json!({ "autonomy": "plan" }))
+            .await
+            .ok
+    );
+    // `/go`: the same conversation, now Interactive - so the write asks
+    // (Plan would have refused it without a prompt).
+    let ask = a
+        .send("ask", json!({ "prompt": WRITE, "autonomy": "interactive" }))
+        .await;
+    let prompt = loop {
+        match a.next_message().await {
+            Message::ConfirmationRequest(c) => break c.id,
+            Message::Response(r) if r.id == ask => panic!("no prompt: {r:?}"),
+            _ => {}
+        }
+    };
+    a.reply(prompt, false).await;
+    assert!(a.response_to(ask).await.ok);
+    let session = a.session.clone();
+    let shown = a
+        .in_mine("session.show", json!({ "session_id": session }))
+        .await;
+    assert_eq!(shown.result.unwrap()["mode"]["autonomy"], "interactive");
+}
