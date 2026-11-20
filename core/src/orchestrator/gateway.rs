@@ -110,14 +110,48 @@ impl Orchestrator {
                 .await;
         }
 
+        // Every step of a spilled turn gets what a remote conversation would
+        // send, and a refusal sends it back to the GPU queue - never to the
+        // "answer locally?" prompt, since local is what was busy.
+        use std::sync::atomic::Ordering::Relaxed;
+        let spilled = rec.spilled.load(Relaxed);
+        let (text, label) = match (&system.spill, spilled) {
+            (Some(spill), true) => spill.clone(),
+            _ => (system.text.clone(), system.label.clone()),
+        };
         let Some(why) = self
-            .refusal(cfg, client, &system.label, messages, confirm, rec)
+            .refusal(cfg, client, &label, messages, confirm, rec)
             .await
         else {
+            let request = Request {
+                system: &text,
+                messages,
+                tools,
+            };
             return self
                 .send(cfg, client, request, true, None, cancel, sink, rec)
                 .await;
         };
+        if spilled {
+            rec.spilled.store(false, Relaxed);
+            rec.spill_withheld.store(true, Relaxed);
+            let (local_cfg, local) = self.turn_tier(rec);
+            let slot = self
+                .local_slot(&local_cfg.default_model, cancel, rec)
+                .await?;
+            return self
+                .send(
+                    &local_cfg,
+                    &local,
+                    request,
+                    false,
+                    Some(slot),
+                    cancel,
+                    sink,
+                    rec,
+                )
+                .await;
+        }
         // The owner's rule: when nothing could be sent, ask each time whether
         // the local model should answer instead. Nobody to ask means no.
         if let (Some((local_cfg, local)), Some(confirm)) = (self.local_fallback(rec), confirm) {

@@ -127,6 +127,8 @@ fn ask_with(
 /// Answers every prompt `yes` or `no`, and keeps what it was asked.
 struct Owner {
     yes: bool,
+    /// The one prompt answered the other way.
+    except: Option<&'static str>,
     asked: std::sync::Mutex<Vec<String>>,
 }
 
@@ -134,6 +136,16 @@ impl Owner {
     fn saying(yes: bool) -> Arc<Owner> {
         Arc::new(Owner {
             yes,
+            except: None,
+            asked: Default::default(),
+        })
+    }
+
+    /// Yes to everything but `tool`.
+    fn refusing(tool: &'static str) -> Arc<Owner> {
+        Arc::new(Owner {
+            yes: true,
+            except: Some(tool),
             asked: Default::default(),
         })
     }
@@ -147,7 +159,7 @@ impl Owner {
 impl ConfirmationHandler for Owner {
     async fn confirm(&self, tool: &str, _args: &serde_json::Value) -> bool {
         self.asked.lock().unwrap().push(tool.to_string());
-        self.yes
+        self.yes != (self.except == Some(tool))
     }
 }
 
@@ -634,4 +646,137 @@ impl jarvis_core::provider::Provider for Failing {
     ) -> jarvis_core::error::Result<jarvis_core::model::ChatTurn> {
         self.chat_turn(r, c).await
     }
+}
+
+#[tokio::test]
+async fn every_step_of_a_spilled_turn_gets_the_remote_prompt() {
+    // Review of 6.5b: only the first spilled call used the prompt with
+    // recall filtered for remote; step 2 sent the local one and asked.
+    let mut s = setup_with(|c| {
+        spilling(Spill::Auto)(c);
+        c.memory.recall_enabled = true;
+    });
+    jarvis_core::memory::MemoryManager::new(s.jarvis_config())
+        .unwrap()
+        .add_message(
+            "old",
+            "assistant",
+            "the zebra plans are secret, per notes.txt",
+        )
+        .unwrap();
+    let remote = Arc::new(common::Script::new(vec![
+        common::call(
+            "filesystem.write",
+            serde_json::json!({ "path": s.dir.join("notes.md"), "content": "zebra" }),
+        ),
+        common::answer("written"),
+    ]));
+    s.jarvis = Arc::new(
+        Orchestrator::with_parts(
+            s.jarvis_config(),
+            s.gated.clone(),
+            PermissionManager::with_paths(s.dir.join("permissions.toml"), s.dir.join("audit.db"))
+                .unwrap(),
+        )
+        .with_remote(Some(remote.clone())),
+    );
+    let (a, b) = (s.jarvis.new_conversation(), s.jarvis.new_conversation());
+    let first = ask(&s, &a, "tell me a joke", None, None);
+    s.gate.reached().await;
+    let owner = Owner::saying(true);
+    let second = ask_with(
+        &s,
+        &b,
+        "create a file called notes.md with the zebra plans",
+        None,
+        None,
+        Some(owner.clone()),
+    );
+    let report = tokio::time::timeout(Duration::from_secs(5), second)
+        .await
+        .expect("spilled")
+        .unwrap()
+        .unwrap();
+    let sent = remote.sent.lock().unwrap().clone();
+    assert_eq!(sent.len(), 2, "both steps went remote: {report:?}");
+    assert!(
+        sent.iter().all(|r| !r.contains("per notes.txt")),
+        "a spilled step carried recall the policy blocks"
+    );
+    // Prompts about this turn's own write are fine; one about memory, or
+    // the "answer locally?" offer a spill must never make, is not.
+    assert!(
+        !owner.asked().contains(&"egress.local".to_string()),
+        "{:?}",
+        owner.asked()
+    );
+    s.gate.open_once();
+    first.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn a_refused_later_step_of_a_spill_waits_for_the_gpu() {
+    // Step 2 of a spill may not go (the owner says no): back to the GPU
+    // queue, not the "answer locally?" offer, and logged spill_withheld.
+    let mut s = setup_with(|c| {
+        spilling(Spill::Auto)(c);
+        c.memory.recall_enabled = true;
+    });
+    jarvis_core::memory::MemoryManager::new(s.jarvis_config())
+        .unwrap()
+        .add_message(
+            "old",
+            "assistant",
+            "the zebra plans are secret, per notes.txt",
+        )
+        .unwrap();
+    let remote = Arc::new(common::Script::new(vec![
+        common::call(
+            "filesystem.write",
+            serde_json::json!({ "path": s.dir.join("notes.md"), "content": "zebra" }),
+        ),
+        common::answer("written"),
+    ]));
+    s.jarvis = Arc::new(
+        Orchestrator::with_parts(
+            s.jarvis_config(),
+            s.gated.clone(),
+            PermissionManager::with_paths(s.dir.join("permissions.toml"), s.dir.join("audit.db"))
+                .unwrap(),
+        )
+        .with_remote(Some(remote.clone())),
+    );
+    let (a, b) = (s.jarvis.new_conversation(), s.jarvis.new_conversation());
+    let first = ask(&s, &a, "tell me a joke", None, None);
+    s.gate.reached().await;
+    let owner = Owner::refusing("egress.send");
+    let second = ask_with(
+        &s,
+        &b,
+        "create a file called notes.md with the zebra plans",
+        None,
+        None,
+        Some(owner.clone()),
+    );
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert_eq!(remote.sent.lock().unwrap().len(), 1, "step 2 was not sent");
+    assert!(!second.is_finished(), "it waits for the GPU");
+    s.gate.open_once();
+    first.await.unwrap().unwrap();
+    assert_eq!(s.gate.reached().await, "llama3.2:1b");
+    s.gate.open_once();
+    second.await.unwrap().unwrap();
+    assert!(
+        !owner.asked().contains(&"egress.local".to_string()),
+        "{:?}",
+        owner.asked()
+    );
+    let signals = log_signals(&s);
+    assert!(
+        signals
+            .last()
+            .unwrap()
+            .contains(&"spill_withheld".to_string()),
+        "{signals:?}"
+    );
 }

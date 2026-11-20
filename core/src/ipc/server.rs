@@ -34,8 +34,8 @@ use uuid::Uuid;
 
 /// How long the daemon waits for a client to answer a confirmation prompt.
 ///
+/// A client that has gone away (closed laptop, killed terminal) must not
 /// leave its conversation answering forever, and the safe default is "no".
-/// hold the orchestrator lock forever, and the safe default is "no".
 const CONFIRM_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub struct IpcServer {

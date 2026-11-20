@@ -606,7 +606,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_slots_is_refused_with_a_message_naming_slots() {
+    fn zero_slots_is_corrected_to_one_with_a_message_naming_slots() {
         let mut config: Config = toml::from_str("[model]\nslots = 0\n").unwrap();
         let problems = config.correct();
         assert_eq!(config.model.slots, 1);
