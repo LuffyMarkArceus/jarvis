@@ -185,6 +185,8 @@ fn meaning(signal: &str) -> &'static str {
         "cancelled" => "you cancelled the turn",
         "error" => "the turn ended with an error",
         "queued" => "waited for the GPU behind another window",
+        "deferred" => "Autopilot left an action waiting for your /approve",
+        "plan_refused" => "Plan mode refused an action that would change something",
         "spilled" => "the GPU was busy, so the remote model answered",
         "spill_withheld" => "the GPU was busy, but what the turn held could not go remote",
         _ => "",
@@ -215,6 +217,17 @@ fn excerpt(text: &str, chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mode_signals_have_plain_words() {
+        for signal in ["deferred", "plan_refused"] {
+            let words = meaning(signal);
+            assert!(
+                !words.is_empty() && !words.contains('_'),
+                "{signal}: {words:?}"
+            );
+        }
+    }
 
     #[test]
     fn new_signals_have_plain_words() {

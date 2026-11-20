@@ -16,6 +16,7 @@ pub mod lane;
 pub mod mcp;
 pub mod memory;
 pub mod model;
+pub mod modes;
 pub mod openai;
 pub mod orchestrator;
 pub mod permissions;

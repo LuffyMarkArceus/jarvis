@@ -135,7 +135,7 @@ fn set_permission(
             anyhow::bail!("unknown tool '{}'. Known tools: {}", tool, known.join(", "));
         }
     }
-    manager.set_rule(tool, action.clone())?;
+    manager.set_rule(tool, action)?;
     println!("{} will {}.", tool, action.label());
     Ok(())
 }
@@ -233,6 +233,12 @@ enum Commands {
     Tier { tier: Option<String> },
     /// List the models, or switch to one: its name or a unique part of it
     Model { name: Option<String> },
+    /// Show or change the last conversation's mode: `jarvis mode approval
+    /// assisted`, `jarvis mode sandbox off`, `jarvis mode autopilot`
+    Mode {
+        what: Option<String>,
+        value: Option<String>,
+    },
     /// What real use looked like: how slow, where the time went, what went
     /// wrong, what you flagged (from the turn log)
     Report,
@@ -1323,6 +1329,28 @@ async fn main() -> anyhow::Result<()> {
                         .error
                         .unwrap_or_else(|| "could not switch model".into())
                 ),
+            }
+        }
+        Commands::Mode { what, value } => {
+            let session = last_conversation().await?;
+            let params = match what {
+                None => json!({}),
+                Some(what) => jarvis_common::mode_change(&what, value.as_deref().unwrap_or(""))
+                    .map_err(|e| anyhow::anyhow!(e))?,
+            };
+            let mut params = params;
+            params["session"] = json!(session);
+            let response = send_request(Request::new("mode.set", params)).await?;
+            let result = response
+                .result
+                .ok_or_else(|| anyhow::anyhow!("{}", response.error.unwrap_or_default()))?;
+            println!(
+                "Conversation {}: {}",
+                short_id(&session),
+                result["mode_label"].as_str().unwrap_or("?")
+            );
+            if let Some(note) = result["note"].as_str() {
+                println!("{note}");
             }
         }
         Commands::Undo { id, list, force } => {

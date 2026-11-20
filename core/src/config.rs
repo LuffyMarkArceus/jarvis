@@ -31,6 +31,9 @@ pub struct Config {
     /// What `jarvis up` starts.
     #[serde(default)]
     pub up: UpConfig,
+    /// The mode new conversations start in.
+    #[serde(default)]
+    pub modes: ModesConfig,
 }
 
 /// `[up]`: `jarvis up` starts Ollama, loads keys, starts the daemon and
@@ -142,6 +145,28 @@ impl Default for RemoteConfig {
             default: false,
             spill: Spill::default(),
             spill_after: default_spill_after(),
+        }
+    }
+}
+
+/// The mode new conversations start in (`[modes]`, Milestone 6.6).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModesConfig {
+    pub autonomy: crate::modes::Autonomy,
+    pub approval: crate::modes::Approval,
+    pub sandbox: bool,
+    /// Model rounds an Autopilot turn may take (Interactive: `max_rounds`).
+    pub autopilot_rounds: usize,
+}
+
+impl Default for ModesConfig {
+    fn default() -> Self {
+        ModesConfig {
+            autonomy: Default::default(),
+            approval: Default::default(),
+            sandbox: true,
+            autopilot_rounds: 24,
         }
     }
 }
@@ -587,6 +612,19 @@ fn expand_sidecar_arg(arg: &str, root: Option<&std::path::Path>) -> Option<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn modes_defaults() {
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.modes.autonomy, crate::modes::Autonomy::Interactive);
+        assert_eq!(config.modes.approval, crate::modes::Approval::Manual);
+        assert!(config.modes.sandbox);
+        assert_eq!(config.modes.autopilot_rounds, 24);
+        let set: Config =
+            toml::from_str("[modes]\nautonomy = \"autopilot\"\napproval = \"allow_all\"\n")
+                .unwrap();
+        assert_eq!(set.modes.approval, crate::modes::Approval::AllowAll);
+    }
 
     #[test]
     fn spill_defaults() {

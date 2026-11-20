@@ -95,14 +95,23 @@ Two conversations at once: a quick question must not wait for a long one.
 * New conversations start local; a model choice per tier.
 * [Spec](superpowers/specs/2026-11-19-parallel-turns-design.md).
 
-## Milestone 6.6 - modes (next)
+## Milestone 6.6 - modes (done, 2026-11-20)
 
 Autonomy (Plan / Interactive / Autopilot), approval (Manual / Assisted /
-Allow all) and the sandbox, per conversation. Assisted approves what can be
-undone or is contained, and asks the rest. Fixed whatever the mode: nothing
-runs outside the sandbox after untrusted content, deny rules win, Jarvis's
-files stay hidden, everything is audited. A Phase 7 job runs at a mode as its
-ceiling. Spec first.
+Allow all) and the sandbox, per conversation, decided by one pure function
+after the protections no mode can reach.
+
+* Assisted approves what can be undone (a copy that lasts the run) or only
+  looks (a read-only sandbox), and asks the rest.
+* Autopilot never prompts: what needs a yes waits for `/approve`.
+* Plan offers only what looks, and answers with a plan; `/go` carries it out.
+* `Mode::within` is the ceiling a Phase 7 job will run under.
+* [Spec](superpowers/specs/2026-11-20-modes-design.md).
+
+## Milestone 6.7 - TUI essentials (next)
+
+Tool steps as events, diffs in approval prompts, queued messages, markdown,
+a `/mode` picker. Spec first.
 
 ## Milestone 6.3 - OS sandbox (done, 2026-11-09)
 

@@ -20,6 +20,9 @@ pub(super) enum OutcomeStatus {
     /// An action the model asked for after reading untrusted content, with
     /// nobody to ask. `output` names the sources.
     Untrusted,
+    /// Autopilot did not take it: it needs the owner's yes, and waits for
+    /// `/approve`. Not blocked: the turn carries on with the rest.
+    Deferred,
 }
 
 impl OutcomeStatus {
@@ -47,6 +50,7 @@ impl OutcomeStatus {
             OutcomeStatus::Untrusted => {
                 "not run: it followed untrusted content and nobody could be asked"
             }
+            OutcomeStatus::Deferred => "waiting for /approve",
         }
     }
 }
@@ -99,6 +103,8 @@ pub struct TurnReport {
     /// A spill was tried, but what it would send may not go: answered
     /// locally instead.
     pub spill_withheld: bool,
+    /// Plan mode refused an action that would change something.
+    pub plan_refused: bool,
     /// The model did not respond (unreachable, rate limited); the answer is
     /// a fallback, not the model's.
     pub model_error: Option<String>,
@@ -211,6 +217,10 @@ pub(super) struct TurnRecorder<'c> {
     pub(super) spilled: std::sync::atomic::AtomicBool,
     /// A spill could not send what it had to: no more spills this turn.
     pub(super) spill_withheld: std::sync::atomic::AtomicBool,
+    /// Prompts an Autopilot turn answered no to, because it never prompts.
+    pub(super) not_done: std::sync::Mutex<Vec<String>>,
+    /// Plan mode refused an action of this turn.
+    pub(super) plan_refused: std::sync::atomic::AtomicBool,
 }
 
 impl<'c> TurnRecorder<'c> {
@@ -234,6 +244,8 @@ impl<'c> TurnRecorder<'c> {
             pinned: conversation.pin(),
             spilled: Default::default(),
             spill_withheld: Default::default(),
+            not_done: Default::default(),
+            plan_refused: Default::default(),
         }
     }
 
@@ -359,6 +371,7 @@ impl TurnRecorder<'_> {
             spill_withheld: self
                 .spill_withheld
                 .load(std::sync::atomic::Ordering::Relaxed),
+            plan_refused: self.plan_refused.load(std::sync::atomic::Ordering::Relaxed),
             model,
             provider,
             remote: self.remote.load(std::sync::atomic::Ordering::Relaxed),
@@ -385,6 +398,7 @@ impl TurnRecorder<'_> {
             spill_withheld: self
                 .spill_withheld
                 .load(std::sync::atomic::Ordering::Relaxed),
+            plan_refused: self.plan_refused.load(std::sync::atomic::Ordering::Relaxed),
             model,
             provider,
             remote: self.remote.load(std::sync::atomic::Ordering::Relaxed),
@@ -467,5 +481,6 @@ pub(super) fn status_label(status: &OutcomeStatus) -> &'static str {
         OutcomeStatus::NeedsConfirmation => "needs_confirmation",
         OutcomeStatus::Withheld => "withheld",
         OutcomeStatus::Untrusted => "untrusted",
+        OutcomeStatus::Deferred => "deferred",
     }
 }

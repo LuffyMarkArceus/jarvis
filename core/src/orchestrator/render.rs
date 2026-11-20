@@ -107,6 +107,11 @@ pub(super) fn compact_output(tool: &str, res: &Value) -> String {
             if out.is_empty() {
                 out.push_str(&format!("exit status {}", status));
             }
+            // What the sandbox (or a read-only run) says to do next.
+            if let Some(hint) = res.get("hint").and_then(|h| h.as_str()) {
+                out.push('\n');
+                out.push_str(hint);
+            }
             out
         }
         "filesystem.search" => {
@@ -240,7 +245,15 @@ pub(super) fn render_tool_output(outcome: &ToolOutcome) -> String {
                     .result
                     .as_ref()
                     .is_some_and(|r| r.get("hint").is_some());
-                if stopped {
+                let read_only = outcome
+                    .result
+                    .as_ref()
+                    .is_some_and(|r| r["read_only"].as_bool().unwrap_or(false));
+                if stopped && read_only {
+                    out.push_str(
+                        "This ran read-only (approved without asking) and needs to write: ask again and you will be asked first.\n",
+                    );
+                } else if stopped {
                     out.push_str(&format!(
                         "The sandbox stopped this: commands can write only the work folder and have no network. To run it without the sandbox, say: run outside the sandbox: {}\n",
                         cmd
@@ -386,7 +399,15 @@ pub(super) fn render_blocked_report(trace: &[ToolOutcome]) -> String {
         let only_declined = blocked.iter().all(|t| t.status == OutcomeStatus::Declined);
         let only_withheld = blocked.iter().all(|t| t.status == OutcomeStatus::Withheld);
         let only_untrusted = blocked.iter().all(|t| t.status == OutcomeStatus::Untrusted);
-        if only_declined {
+        let plan = blocked
+            .iter()
+            .any(|t| t.output.contains(crate::modes::PLAN_REFUSAL));
+        if plan {
+            out.push_str(&format!(
+                "I did not run that - {}\n\n",
+                crate::modes::PLAN_REFUSAL
+            ));
+        } else if only_declined {
             out.push_str("I did not run that - you declined the confirmation prompt.\n\n");
         } else if only_untrusted {
             out.push_str("I did not run that - the model asked for it after reading content you have not marked as trusted, and nobody could be asked.\n\n");
@@ -430,6 +451,8 @@ pub(super) fn render_blocked_report(trace: &[ToolOutcome]) -> String {
         .copied()
         .filter(|t| {
             t.pattern.is_none()
+                // Plan mode, not a rule, stopped it: loosening rules won't help.
+                && !t.output.contains(crate::modes::PLAN_REFUSAL)
                 && !matches!(
                     t.status,
                     OutcomeStatus::Declined | OutcomeStatus::Withheld | OutcomeStatus::Untrusted

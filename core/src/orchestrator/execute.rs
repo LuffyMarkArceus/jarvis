@@ -1,6 +1,8 @@
 //! Running a tool call: the web check, the permission and untrusted-content gates, undo.
 
 use super::*;
+use crate::conversation::Deferred;
+use crate::modes::{decide, Approval, Call, Change, Decision, Mode};
 
 /// The real arguments, when a model nested them inside an echo of the tool
 /// schema: `{"parameters": {...}}` or `{"properties": {...}, "type": "object"}`.
@@ -311,8 +313,19 @@ impl Orchestrator {
         rec.step(describe_step(&name, &args));
         let started = std::time::Instant::now();
         let outcome = self
-            .gate_and_run(rec.conversation, name, args, confirm, untrusted)
+            .gate_and_run(
+                rec.conversation,
+                name,
+                args,
+                confirm,
+                untrusted,
+                rec.settings().mode,
+            )
             .await;
+        if outcome.output.contains(crate::modes::PLAN_REFUSAL) {
+            rec.plan_refused
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         rec.tool_time(&outcome.name, started.elapsed());
         rec.tool(&outcome, status_label(&outcome.status));
         outcome
@@ -338,6 +351,7 @@ impl Orchestrator {
         args: Value,
         confirm: Option<&dyn ConfirmationHandler>,
         untrusted: &[Source],
+        mode: Mode,
     ) -> ToolOutcome {
         let mut args = self.sanitize_args(&name, args);
         // A call missing what it needs goes back to the model, which can
@@ -359,17 +373,99 @@ impl Orchestrator {
                 pattern: None,
             };
         }
-        let mut verdict = self.permissions.check_permission(&name, &args);
-
-        // Outside the sandbox: asked every time, never on a page's say-so,
-        // and not at all when the owner switched it off. Deny still wins.
-        if self.runs_outside(&name, &args) && verdict.action != PermissionAction::Deny {
+        let verdict = self.permissions.check_permission(&name, &args);
+        // What the call itself asked for, before the mode adds to it: a
+        // deferred call keeps only this, so /approve decides by the mode then.
+        let as_asked = args.clone();
+        let outside = self.runs_outside(&name, &args) || (name == "shell.run" && !mode.sandbox);
+        if outside {
             if let Some(map) = args.as_object_mut() {
                 map.insert("outside_sandbox".into(), json!(true));
             }
-            if !self.config.sandbox.allow_outside {
+        }
+        let call = Call {
+            rule: verdict.action,
+            change: self.change_of(&name, &args, outside),
+            untrusted: !untrusted.is_empty(),
+            allow_outside: self.config.sandbox.allow_outside,
+            sandbox_ready: crate::sandbox::ready(&self.config),
+        };
+        let auto = verdict.action == PermissionAction::Ask;
+        match decide(&mode, &call) {
+            Decision::Run => {
+                let how = match (auto, mode.approval) {
+                    (false, _) => "allowed",
+                    (true, Approval::AllowAll) => "auto_approved_allow_all",
+                    (true, _) => "auto_approved_undoable",
+                };
+                self.run_tool(conv, name, args, how, verdict.pattern).await
+            }
+            Decision::RunReadOnly => {
+                if let Some(map) = args.as_object_mut() {
+                    map.insert("_read_only".into(), json!(true));
+                }
+                let how = if auto {
+                    "auto_approved_read_only"
+                } else {
+                    "allowed"
+                };
+                self.run_tool(conv, name, args, how, verdict.pattern).await
+            }
+            Decision::Refuse(why) => {
+                let (status, audit, msg) = if verdict.action == PermissionAction::Deny {
+                    let msg = match &verdict.pattern {
+                        Some(p) => format!(
+                            "Tool {} denied by pattern \"{}\". Args: {}",
+                            name,
+                            p,
+                            compact_args(&args)
+                        ),
+                        None => format!(
+                            "Tool {} denied by policy. Args: {}",
+                            name,
+                            compact_args(&args)
+                        ),
+                    };
+                    (OutcomeStatus::Denied, "denied", msg)
+                } else if outside && !untrusted.is_empty() {
+                    let names: Vec<&str> = untrusted.iter().map(|s| s.name.as_str()).collect();
+                    let msg = format!(
+                        "Tool {} was not run: the model asked to run outside the sandbox after reading content you have not marked as trusted ({}). If you want it, run it yourself.",
+                        name,
+                        names.join(", ")
+                    );
+                    (OutcomeStatus::Untrusted, "outside_sandbox_untrusted", msg)
+                } else if outside && !self.config.sandbox.allow_outside {
+                    let msg = format!(
+                        "Tool {} was not run: running a command outside the sandbox is switched off ([sandbox] allow_outside). Args: {}",
+                        name,
+                        compact_args(&args)
+                    );
+                    (OutcomeStatus::Denied, "outside_sandbox_off", msg)
+                } else {
+                    let msg = format!(
+                        "Tool {} was not run: {} Args: {}",
+                        name,
+                        why,
+                        compact_args(&args)
+                    );
+                    (OutcomeStatus::Denied, "refused_plan", msg)
+                };
+                let _ = self
+                    .permissions
+                    .log_audit(Some(&conv.id), &name, &args, audit, Some(&msg));
+                ToolOutcome {
+                    name,
+                    args,
+                    status,
+                    output: msg,
+                    result: None,
+                    pattern: verdict.pattern,
+                }
+            }
+            Decision::Defer(why) => {
                 let msg = format!(
-                    "Tool {} was not run: running a command outside the sandbox is switched off ([sandbox] allow_outside). Args: {}",
+                    "Not done yet: {} needs the owner's yes, so it waits for /approve (Autopilot). Carry on with the rest of the task. Args: {}",
                     name,
                     compact_args(&args)
                 );
@@ -377,78 +473,29 @@ impl Orchestrator {
                     Some(&conv.id),
                     &name,
                     &args,
-                    "outside_sandbox_off",
+                    "deferred",
                     Some(&msg),
                 );
-                return ToolOutcome {
-                    name,
-                    args,
-                    status: OutcomeStatus::Denied,
-                    output: msg,
-                    result: None,
-                    pattern: verdict.pattern,
-                };
-            }
-            if !untrusted.is_empty() {
-                let names: Vec<&str> = untrusted.iter().map(|s| s.name.as_str()).collect();
-                let msg = format!(
-                    "Tool {} was not run: the model asked to run outside the sandbox after reading content you have not marked as trusted ({}). If you want it, run it yourself.",
-                    name,
-                    names.join(", ")
-                );
-                let _ = self.permissions.log_audit(
-                    Some(&conv.id),
-                    &name,
-                    &args,
-                    "outside_sandbox_untrusted",
-                    Some(&msg),
-                );
-                return ToolOutcome {
-                    name,
-                    args,
-                    status: OutcomeStatus::Untrusted,
-                    output: msg,
-                    result: None,
-                    pattern: verdict.pattern,
-                };
-            }
-            verdict.action = PermissionAction::Ask;
-        }
-
-        if !untrusted.is_empty() && verdict.action != PermissionAction::Deny {
-            return self
-                .ask_after_untrusted(conv, name, args, confirm, untrusted, verdict.pattern)
-                .await;
-        }
-
-        match verdict.action {
-            PermissionAction::Deny => {
-                let msg = match &verdict.pattern {
-                    Some(p) => format!(
-                        "Tool {} denied by pattern \"{}\". Args: {}",
-                        name,
-                        p,
-                        compact_args(&args)
-                    ),
-                    None => format!(
-                        "Tool {} denied by policy. Args: {}",
-                        name,
-                        compact_args(&args)
-                    ),
-                };
-                let _ =
-                    self.permissions
-                        .log_audit(Some(&conv.id), &name, &args, "denied", Some(&msg));
+                conv.defer(Deferred {
+                    name: name.clone(),
+                    args: as_asked,
+                    why,
+                    untrusted: untrusted.to_vec(),
+                });
                 ToolOutcome {
                     name,
                     args,
-                    status: OutcomeStatus::Denied,
+                    status: OutcomeStatus::Deferred,
                     output: msg,
                     result: None,
                     pattern: verdict.pattern,
                 }
             }
-            PermissionAction::Ask => match confirm {
+            Decision::Ask if !untrusted.is_empty() => {
+                self.ask_after_untrusted(conv, name, args, confirm, untrusted, verdict.pattern)
+                    .await
+            }
+            Decision::Ask => match confirm {
                 Some(handler) => {
                     if handler.confirm(&name, &args).await {
                         self.run_tool(conv, name, args, "confirmed", verdict.pattern)
@@ -499,10 +546,28 @@ impl Orchestrator {
                     }
                 }
             },
-            PermissionAction::Allow => {
-                self.run_tool(conv, name, args, "allowed", verdict.pattern)
-                    .await
+        }
+    }
+
+    /// What a call would change, for the mode's decision.
+    pub(super) fn change_of(&self, name: &str, args: &Value, outside: bool) -> Change {
+        match name {
+            "shell.run" if outside => Change::Outside,
+            "shell.run" => Change::Shell {
+                writes: args["writes"].as_bool().unwrap_or(false),
+            },
+            "filesystem.write" | "filesystem.edit" | "filesystem.delete" => {
+                let path = args
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .map(std::path::Path::new);
+                match (&self.undo, path) {
+                    (Some(store), Some(path)) if store.can_keep(path) => Change::Undoable,
+                    _ => Change::NotUndoable,
+                }
             }
+            n if taint::is_action(n) => Change::NotUndoable,
+            _ => Change::None,
         }
     }
 
@@ -705,7 +770,54 @@ impl Orchestrator {
                     ) =>
                 {
                     match store.before_change(std::path::Path::new(path), &name, &conv.id) {
+                        // Approved only because it could be undone, but the
+                        // file grew past the limit since: no copy, no write.
+                        Ok(pending) if decision == "auto_approved_undoable" && !pending.kept() => {
+                            store.discard(pending);
+                            let msg = format!(
+                                "Tool {} was not run: the file is now too large to keep an undo copy, so it was not written automatically. Ask again to be asked.",
+                                name
+                            );
+                            let _ = self.permissions.log_audit(
+                                Some(&conv.id),
+                                &name,
+                                &args,
+                                "no_undo_copy",
+                                Some(&msg),
+                            );
+                            return ToolOutcome {
+                                name,
+                                args,
+                                status: OutcomeStatus::Failed,
+                                output: msg,
+                                result: None,
+                                pattern,
+                            };
+                        }
                         Ok(pending) => Some(pending),
+                        // Approved only because it could be undone: with no
+                        // copy, it is not made (6.6).
+                        Err(e) if decision == "auto_approved_undoable" => {
+                            let msg = format!(
+                                "Tool {} was not run: no undo copy could be kept ({}), so it was not written automatically. Ask again to be asked.",
+                                name, e
+                            );
+                            let _ = self.permissions.log_audit(
+                                Some(&conv.id),
+                                &name,
+                                &args,
+                                "no_undo_copy",
+                                Some(&msg),
+                            );
+                            return ToolOutcome {
+                                name,
+                                args,
+                                status: OutcomeStatus::Failed,
+                                output: msg,
+                                result: None,
+                                pattern,
+                            };
+                        }
                         Err(e) => {
                             warn!("no undo copy of {}: {}", path, e);
                             None

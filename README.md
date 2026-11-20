@@ -303,6 +303,42 @@ spill_after = 5      # seconds
 New conversations start local (unless `[remote] default = true`), with the
 model used last on each tier.
 
+### Modes
+
+Each conversation has three settings, shown in the TUI header
+(`Interactive · Manual · Sandbox on`):
+
+* **Autonomy** - who drives. **Plan** looks and proposes a numbered plan,
+  changing nothing; `/go` carries it out (`/go auto` on Autopilot).
+  **Interactive** checks in along the way. **Autopilot** carries the task to
+  the end without a prompt: what needs your yes is left for `/approve`
+  (`/approve` lists, `/approve all`, `/approve 2`, `/approve none`), and is
+  dropped when you ask something else.
+* **Approval** - which actions need your yes. **Manual**: your
+  `permissions.toml` rules as written. **Assisted**: a file change that can
+  be undone runs without asking, and a command that only looks runs in a
+  read-only sandbox; anything else asks. **Allow all**: whatever your rules
+  would ask about runs.
+* **Sandbox** - `/sandbox off` runs this conversation's commands outside it.
+
+`/mode autopilot`, `/approval assisted`, `/sandbox off`, Shift+Tab to cycle
+autonomy; `jarvis mode approval assisted` from the shell. Defaults:
+
+```toml
+[modes]
+autonomy = "interactive"   # plan | interactive | autopilot
+approval = "manual"        # manual | assisted | allow_all
+sandbox = true
+autopilot_rounds = 24
+```
+
+Whatever the mode: deny rules win; after Jarvis reads something you have not
+vouched for (a web page, a file outside your allowed folders), nothing runs
+outside the sandbox and actions ask; Jarvis's own files stay hidden; every
+action is audited; sending your data to a remote model still asks. A command
+that should change files says `writes: true`; one that does not, and tries,
+fails read-only and is told to ask.
+
 ### Switching models
 
 List more models per tier with `models`, then switch at any point in a

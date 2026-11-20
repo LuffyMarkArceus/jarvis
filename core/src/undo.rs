@@ -73,10 +73,21 @@ pub enum UndoPlan {
     Refuse { change: Change, reason: String },
 }
 
+/// Copies younger than this are never dropped to stay under the total cap.
+const FRESH: chrono::Duration = chrono::Duration::hours(24);
+
 pub struct UndoStore {
     dir: PathBuf,
     limits: UndoConfig,
     now: fn() -> DateTime<Utc>,
+}
+
+impl Pending {
+    /// Whether a copy of the file was kept: false when it was over the size
+    /// limit at the time.
+    pub fn kept(&self) -> bool {
+        self.kept
+    }
 }
 
 impl UndoStore {
@@ -101,6 +112,44 @@ impl UndoStore {
     /// Would a change to `path` keep a copy? A missing file needs none.
     pub fn would_keep(&self, path: &Path) -> bool {
         std::fs::metadata(path).map_or(true, |m| m.len() <= self.limits.max_file_bytes)
+    }
+
+    /// Would a change to `path` keep a copy that lasts: under the size
+    /// limit, and with room under the total without dropping a copy from
+    /// the last day (Milestone 6.6: what Assisted calls undoable).
+    pub fn can_keep(&self, path: &Path) -> bool {
+        if !self.would_keep(path) {
+            return false;
+        }
+        let size = std::fs::metadata(resolve(path)).map_or(0, |m| m.len());
+        let now = (self.now)();
+        let entries = self.finished();
+        let total: u64 = entries.iter().map(|(_, _, size)| size).sum();
+        let droppable: u64 = entries
+            .iter()
+            .filter(|(_, time, _)| now - *time > FRESH)
+            .map(|(_, _, size)| size)
+            .sum();
+        total.saturating_sub(droppable) + size <= self.limits.max_total_bytes
+    }
+
+    /// Finished copies: id, when, and size of the copy.
+    fn finished(&self) -> Vec<(String, DateTime<Utc>, u64)> {
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return Vec::new();
+        };
+        let mut out: Vec<(String, DateTime<Utc>, u64)> = entries
+            .flatten()
+            .filter(|e| e.path().join("meta.json").exists())
+            .filter_map(|e| {
+                let id = e.file_name().to_string_lossy().to_string();
+                let time = time_of(&id)?;
+                let size = std::fs::metadata(e.path().join("before")).map_or(0, |m| m.len());
+                Some((id, time, size))
+            })
+            .collect();
+        out.sort();
+        out
     }
 
     /// Take the copy, before the file is written.
@@ -288,6 +337,11 @@ impl UndoStore {
         for (id, size) in kept.iter().take(kept.len().saturating_sub(1)) {
             if total <= self.limits.max_total_bytes {
                 break;
+            }
+            // A copy from the last day stays, over the cap if need be: a
+            // run that changes many files must not push out its own copies.
+            if time_of(id).is_some_and(|time| now - time <= FRESH) {
+                continue;
             }
             let _ = std::fs::remove_dir_all(self.dir.join(id));
             total -= size;
@@ -770,25 +824,82 @@ mod tests {
         assert_eq!(left[0].path, other.canonicalize().unwrap());
     }
 
+    fn two_days_ago() -> DateTime<Utc> {
+        Utc::now() - chrono::Duration::days(2)
+    }
+
     #[test]
     fn the_total_cap_drops_the_oldest() {
         let s = sandbox_with(UndoConfig {
             max_total_bytes: 10,
             ..UndoConfig::default()
         });
+        let old = UndoStore::open(
+            s.root.join("undo"),
+            &UndoConfig {
+                max_total_bytes: 10,
+                ..UndoConfig::default()
+            },
+        )
+        .unwrap()
+        .with_clock(two_days_ago);
         let mut ids = Vec::new();
-        for name in ["a", "b", "c"] {
+        for name in ["a", "b"] {
             let path = s.file(name);
             std::fs::write(&path, "123456").unwrap();
-            ids.push(s.change(&path, b"x").id);
+            let pending = old.before_change(&path, "filesystem.write", "s1").unwrap();
+            std::fs::write(&path, "x").unwrap();
+            ids.push(old.after_change(pending).unwrap().id);
         }
+        let c = s.file("c");
+        std::fs::write(&c, "123456").unwrap();
+        ids.push(s.change(&c, b"x").id);
 
         let left: Vec<String> = s.store.list().unwrap().into_iter().map(|c| c.id).collect();
         assert_eq!(
             left,
             [ids[2].clone()],
-            "6 + 6 bytes is over 10: the oldest go"
+            "6 + 6 + 6 bytes is over 10: the oldest go"
         );
+    }
+
+    #[test]
+    fn pruning_keeps_copies_from_the_last_day() {
+        // An Assisted run that writes many files must not push out its own
+        // earlier copies (6.6): the cap is not applied to the last 24 hours.
+        let s = sandbox_with(UndoConfig {
+            max_total_bytes: 10,
+            ..UndoConfig::default()
+        });
+        for name in ["a", "b", "c"] {
+            let path = s.file(name);
+            std::fs::write(&path, "123456").unwrap();
+            s.change(&path, b"x");
+        }
+        assert_eq!(s.store.list().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn can_keep_is_false_when_only_fresh_copies_could_make_room() {
+        let s = sandbox_with(UndoConfig {
+            max_total_bytes: 10,
+            ..UndoConfig::default()
+        });
+        let a = s.file("a");
+        std::fs::write(&a, "123456").unwrap();
+        assert!(s.store.can_keep(&a), "an empty store has room");
+        s.change(&a, b"x");
+        let b = s.file("b");
+        std::fs::write(&b, "123456").unwrap();
+        assert!(
+            !s.store.can_keep(&b),
+            "6 + 6 is over 10, and the only copy to drop is today's"
+        );
+        let small = s.file("small");
+        std::fs::write(&small, "12").unwrap();
+        assert!(s.store.can_keep(&small), "6 + 2 fits");
+        let new = s.file("new");
+        assert!(s.store.can_keep(&new), "a new file needs no copy");
     }
 
     #[test]

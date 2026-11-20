@@ -543,3 +543,88 @@ async fn the_marker_is_released_when_a_turn_fails() {
     let again = a.in_mine("ask", json!({ "prompt": "hello" })).await;
     assert!(again.ok, "{:?}", again.error);
 }
+
+#[tokio::test]
+async fn a_mode_change_stays_in_its_conversation() {
+    let home = fresh().await;
+    let mut a = Window::open(&home).await;
+    let mut b = Window::open(&home).await;
+    let set = a
+        .in_mine("mode.set", json!({ "approval": "assisted" }))
+        .await;
+    assert!(set.ok, "{:?}", set.error);
+    assert_eq!(
+        set.result.as_ref().unwrap()["mode_label"],
+        "Interactive · Assisted · Sandbox on"
+    );
+    let a_session = a.session.clone();
+    let shown_a = a
+        .in_mine("session.show", json!({ "session_id": a_session }))
+        .await;
+    assert_eq!(shown_a.result.unwrap()["mode"]["approval"], "assisted");
+    let b_session = b.session.clone();
+    let shown_b = b
+        .in_mine("session.show", json!({ "session_id": b_session }))
+        .await;
+    assert_eq!(shown_b.result.unwrap()["mode"]["approval"], "manual");
+    let status = a.call("status", json!({})).await.result.unwrap();
+    assert_eq!(status["mode_label"], "Interactive · Manual · Sandbox on");
+    let bad = a.in_mine("mode.set", json!({ "approval": "yolo" })).await;
+    assert!(!bad.ok);
+}
+
+#[tokio::test]
+async fn a_new_window_is_told_its_mode() {
+    let home = fresh().await;
+    let mut a = Window::open(&home).await;
+    let new = a.call("session.new", json!({})).await.result.unwrap();
+    assert_eq!(new["mode"]["autonomy"], "interactive");
+    assert_eq!(new["mode_label"], "Interactive · Manual · Sandbox on");
+}
+
+#[tokio::test]
+async fn approve_is_a_conversation_request() {
+    let home = fresh().await;
+    let mut a = Window::open(&home).await;
+    let listed = a.in_mine("approve", json!({ "which": "list" })).await;
+    assert!(listed.ok, "{:?}", listed.error);
+    assert_eq!(
+        listed.result.as_ref().unwrap()["text"],
+        "Nothing is waiting for /approve."
+    );
+    assert_eq!(listed.result.unwrap()["remaining"], 0);
+    let bad = a.in_mine("approve", json!({ "which": "some" })).await;
+    assert!(!bad.ok);
+    let no_session = a.call("approve", json!({ "which": "all" })).await;
+    assert!(!no_session.ok);
+}
+
+#[tokio::test]
+async fn go_switches_out_of_plan_and_carries_on() {
+    let home = fresh().await;
+    let mut a = Window::open(&home).await;
+    assert!(
+        a.in_mine("mode.set", json!({ "autonomy": "plan" }))
+            .await
+            .ok
+    );
+    // `/go`: the same conversation, now Interactive - so the write asks
+    // (Plan would have refused it without a prompt).
+    let ask = a
+        .send("ask", json!({ "prompt": WRITE, "autonomy": "interactive" }))
+        .await;
+    let prompt = loop {
+        match a.next_message().await {
+            Message::ConfirmationRequest(c) => break c.id,
+            Message::Response(r) if r.id == ask => panic!("no prompt: {r:?}"),
+            _ => {}
+        }
+    };
+    a.reply(prompt, false).await;
+    assert!(a.response_to(ask).await.ok);
+    let session = a.session.clone();
+    let shown = a
+        .in_mine("session.show", json!({ "session_id": session }))
+        .await;
+    assert_eq!(shown.result.unwrap()["mode"]["autonomy"], "interactive");
+}

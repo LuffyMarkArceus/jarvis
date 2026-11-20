@@ -15,6 +15,9 @@ pub struct Sandbox {
     pub writable: Vec<PathBuf>,
     pub hidden: Vec<PathBuf>,
     pub network: bool,
+    /// The writable folders are mounted read-only (6.6: a command approved
+    /// without asking).
+    pub read_only: bool,
 }
 
 impl Sandbox {
@@ -49,10 +52,22 @@ impl Sandbox {
             writable,
             hidden,
             network: config.sandbox.network,
+            read_only: false,
         }
     }
 
     /// `bwrap` arguments up to, not including, the command.
+    /// The same sandbox with nothing writable but its private /tmp, and no
+    /// network: what a command approved without asking runs in (6.6).
+    pub fn read_only(&self) -> Sandbox {
+        Sandbox {
+            writable: self.writable.clone(),
+            hidden: self.hidden.clone(),
+            network: false,
+            read_only: true,
+        }
+    }
+
     pub fn bwrap_args(&self, work_dir: Option<&Path>, background: bool) -> Vec<OsString> {
         let mut args: Vec<OsString> = Vec::new();
         let mut push =
@@ -61,8 +76,17 @@ impl Sandbox {
         push(&["--dev".as_ref(), "/dev".as_ref()]);
         push(&["--proc".as_ref(), "/proc".as_ref()]);
         push(&["--tmpfs".as_ref(), "/tmp".as_ref()]);
+        // Read-only does not stop connect() on a socket (/run/docker.sock,
+        // a bus): a run nobody was asked about gets no /run at all.
+        if self.read_only {
+            push(&["--tmpfs".as_ref(), "/run".as_ref()]);
+        }
         for (dir, writable) in self.mounts() {
-            let how = if writable { "--bind" } else { "--ro-bind" };
+            let how = if writable && !self.read_only {
+                "--bind"
+            } else {
+                "--ro-bind"
+            };
             push(&[how.as_ref(), dir.as_os_str(), dir.as_os_str()]);
         }
         // After the binds: in bwrap the later mount wins, so a hidden folder
@@ -218,6 +242,43 @@ mod tests {
     }
 
     #[test]
+    fn read_only_binds_every_writable_folder_read_only() {
+        let work = temp();
+        let data = work.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let sandbox = Sandbox {
+            writable: vec![work.clone()],
+            hidden: vec![data.clone()],
+            network: true,
+            read_only: false,
+        };
+        let args = s(&sandbox.read_only().bwrap_args(Some(&work), false));
+        assert!(
+            !args.contains(&"--bind".to_string()),
+            "nothing writable: {args:?}"
+        );
+        let w = work.display().to_string();
+        assert!(
+            position(&args, &["--ro-bind", &w, &w]).is_some(),
+            "the workspace is still there, read-only: {args:?}"
+        );
+        assert!(
+            args.contains(&"--unshare-net".to_string()),
+            "no network: {args:?}"
+        );
+        // Review of 6.6: a read-only bind does not stop connect() on a
+        // socket (/run/docker.sock); run with no /run at all.
+        let run = position(&args, &["--tmpfs", "/run"]).expect("/run replaced");
+        assert!(run > position(&args, &["--ro-bind", "/", "/"]).unwrap());
+        let d = data.display().to_string();
+        assert!(
+            position(&args, &["--tmpfs", &d]).is_some(),
+            "still hidden: {args:?}"
+        );
+        let _ = std::fs::remove_dir_all(work);
+    }
+
+    #[test]
     fn args_bind_writable_before_hiding() {
         // An eval workspace contains the data folder: hidden must still win,
         // and in bwrap the later mount wins.
@@ -228,6 +289,7 @@ mod tests {
             writable: vec![work.clone()],
             hidden: vec![data.clone()],
             network: false,
+            read_only: false,
         };
         let args = s(&sandbox.bwrap_args(Some(&work), false));
         let w = work.display().to_string();
@@ -246,6 +308,7 @@ mod tests {
             writable: vec![],
             hidden: vec![],
             network: false,
+            read_only: false,
         };
         let fg = s(&sandbox.bwrap_args(None, false));
         let bg = s(&sandbox.bwrap_args(None, true));
@@ -264,6 +327,7 @@ mod tests {
             writable: vec![],
             hidden: vec![],
             network: false,
+            read_only: false,
         };
         assert!(s(&sandbox.bwrap_args(None, false)).contains(&"--unshare-net".to_string()));
         sandbox.network = true;
@@ -279,6 +343,7 @@ mod tests {
             writable: vec![],
             hidden: vec![dir.clone(), file.clone()],
             network: false,
+            read_only: false,
         };
         let args = s(&sandbox.bwrap_args(None, false));
         let f = file.display().to_string();
@@ -299,6 +364,7 @@ mod tests {
             writable: vec![gone.clone()],
             hidden: vec![gone.join("x")],
             network: false,
+            read_only: false,
         };
         let args = s(&sandbox.bwrap_args(None, false));
         let g = gone.display().to_string();
@@ -391,6 +457,7 @@ mod tests {
             writable: vec![home.clone()],
             hidden: vec![home.join("not-yet/jarvis")],
             network: false,
+            read_only: false,
         };
         let args = s(&sandbox.bwrap_args(None, false));
         let h = home.display().to_string();

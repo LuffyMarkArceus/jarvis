@@ -1,6 +1,9 @@
 //! Common types and IPC protocol definitions
 
 pub mod ipc;
+pub mod mode_args;
+
+pub use mode_args::mode_change;
 
 use serde::{Deserialize, Serialize};
 

@@ -103,7 +103,7 @@ fn setup_with(dir: PathBuf, script: Vec<ChatTurn>, rules: &[(&str, PermissionAct
     let permissions =
         PermissionManager::with_paths(dir.join("permissions.toml"), dir.join("audit.db")).unwrap();
     for (tool, action) in rules {
-        permissions.set_rule(tool, action.clone()).unwrap();
+        permissions.set_rule(tool, *action).unwrap();
     }
     let jarvis = Orchestrator::with_parts(config, Arc::new(Script::new(script)), permissions);
     let conv = jarvis.new_conversation();

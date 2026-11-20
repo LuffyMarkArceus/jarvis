@@ -80,6 +80,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+mod autopilot;
 mod execute;
 mod gateway;
 mod outcome;
@@ -94,6 +95,7 @@ use render::*;
 use turn::*;
 use turnlog::*;
 
+pub use autopilot::Approve;
 use outcome::*;
 pub use outcome::{
     footer, route_label, ModelTiming, ToolCallRecord, ToolTiming, TurnReport, TurnTiming,
@@ -274,6 +276,11 @@ impl Orchestrator {
             let _ = m.create_session(&id);
         }
         Conversation::new(id, self.starts_remote())
+    }
+
+    /// The mode a new conversation starts in (`[modes]`).
+    pub fn default_mode(&self) -> crate::modes::Mode {
+        crate::modes::Mode::from_config(&self.config.modes)
     }
 
     /// Whether a new conversation starts on the remote tier: only when one
@@ -565,10 +572,19 @@ impl Orchestrator {
         // Measured here, around everything, so every way a turn ends -
         // answered, cancelled, failed - is logged with its timing.
         let started = std::time::Instant::now();
-        let timed = confirm.map(TimedConfirm::new);
-        let confirm = timed.as_ref().map(|t| t as &dyn ConfirmationHandler);
         let mut rec = TurnRecorder::new(conv);
         rec.progress = progress.cloned();
+        // Autopilot never prompts: whatever would, is answered no and listed.
+        let no_prompts = autopilot::NoPrompts {
+            not_done: &rec.not_done,
+        };
+        let confirm = if rec.pinned.mode.autonomy == crate::modes::Autonomy::Autopilot {
+            Some(&no_prompts as &dyn ConfirmationHandler)
+        } else {
+            confirm
+        };
+        let timed = confirm.map(TimedConfirm::new);
+        let confirm = timed.as_ref().map(|t| t as &dyn ConfirmationHandler);
         let result = self
             .run_turn_inner(conv, input, confirm, cancel, sink, &rec)
             .await;
@@ -618,6 +634,10 @@ impl Orchestrator {
         // Bound the log line: a pasted document should not fill the log.
         info!("Processing: {}", context::truncate_with_marker(input, 200));
 
+        // What the last turn left for /approve is about that turn, not this
+        // one (6.6).
+        conv.set_deferred(Vec::new());
+
         // Snapshot history *before* persisting the new user message so the
         // prompt never contains the request twice.
         let history = self.history_for_prompt(conv);
@@ -632,7 +652,20 @@ impl Orchestrator {
         // the exact tool set this turn may use. Both the provider request and
         // the system prompt are rendered from `plan.tools`, so the model can
         // never be told about a tool it cannot call.
-        let plan = planner::plan(input, route, &self.tools, &self.mcp.list_tools());
+        let mut plan = planner::plan(input, route, &self.tools, &self.mcp.list_tools());
+        // Plan mode is offered only what looks: the shell too, read-only,
+        // where the sandbox runs (6.6).
+        let mode = rec.pinned.mode;
+        if mode.autonomy == crate::modes::Autonomy::Plan {
+            let read_only = mode.sandbox && crate::sandbox::ready(&self.config);
+            plan.tools.retain(|t| {
+                if t.name == "shell.run" {
+                    read_only
+                } else {
+                    !taint::is_action(&t.name)
+                }
+            });
+        }
         info!("route: {:?} tools: {:?}", plan.route, plan.names());
         *rec.planned.lock().unwrap() = Some((
             route_label(&plan.route),
@@ -655,8 +688,14 @@ impl Orchestrator {
                 // The tool is the whole turn: once it has run, its result is
                 // the answer even if the user has just cancelled. Dropping it
                 // would hide an action that really happened.
+                // A command the owner typed has no model to say whether it
+                // writes: it counts as writing (6.6).
+                let mut args = args.clone();
+                if name == "shell.run" {
+                    args["writes"] = json!(true);
+                }
                 let outcome = self
-                    .execute_call(name.clone(), args.clone(), confirm, &[], rec)
+                    .execute_call(name.clone(), args, confirm, &[], rec)
                     .await;
                 // A confirmation that was denied *because* the user cancelled
                 // is not a tool result worth persisting: the turn never ran.
@@ -682,7 +721,13 @@ impl Orchestrator {
             .unwrap()
             .iter()
             .any(|c| c.status == "executed");
-        let answer = taint::scrub_markers(&answer, ran);
+        let mut answer = taint::scrub_markers(&answer, ran);
+        if rec.pinned.mode.autonomy == crate::modes::Autonomy::Autopilot {
+            let not_done = rec.not_done.lock().unwrap().clone();
+            if let Some(report) = autopilot::report(&conv.deferred(), &not_done) {
+                answer = format!("{}\n\n{}", answer.trim_end(), report.trim_end());
+            }
+        }
         let model = rec
             .used
             .lock()

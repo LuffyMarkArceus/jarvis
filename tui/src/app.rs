@@ -168,6 +168,10 @@ pub enum Pending {
     Model(Option<String>),
     /// `/bad` or `/good`.
     Feedback,
+    /// `mode.set`: `/mode`, `/approval`, `/sandbox`, Shift+Tab.
+    Mode,
+    /// `/approve`.
+    Approve,
 }
 
 /// What `main` has to do after a key press or daemon event.
@@ -269,6 +273,16 @@ pub enum Command {
     Undo(String),
     /// `/trust`, `/trust clear`.
     Trust(String),
+    /// `/mode`, `/mode <what> <value>`, `/mode autopilot` (6.6).
+    Mode(String),
+    /// `/approval manual|assisted|allow-all`.
+    Approval(String),
+    /// `/sandbox on|off`.
+    Sandbox(String),
+    /// `/approve [all|none|<n>]`: what Autopilot left.
+    Approve(String),
+    /// `/go [auto]`: carry out the plan above.
+    Go(String),
     Clear,
     Quit,
     /// `/word` that is no command: shown as a mistake, not sent to the
@@ -350,6 +364,11 @@ pub fn parse_command(text: &str) -> Option<Command> {
         "/good" => Command::Feedback("good".into(), rest),
         "/undo" => Command::Undo(rest),
         "/trust" => Command::Trust(rest),
+        "/mode" => Command::Mode(rest),
+        "/approval" => Command::Approval(rest),
+        "/sandbox" => Command::Sandbox(rest),
+        "/approve" => Command::Approve(rest),
+        "/go" => Command::Go(rest),
         "/tools" => Command::Tools,
         "/session" => Command::Session,
         "/clear" => Command::Clear,
@@ -400,6 +419,10 @@ pub struct App {
     last_timing: Option<Value>,
     /// Open the conversation used last instead of a new one (`--continue`).
     pub continue_last: bool,
+    /// This window's conversation's mode, for the header (6.6).
+    pub mode_label: String,
+    /// Its autonomy, for Shift+Tab: `plan`, `interactive` or `autopilot`.
+    autonomy: String,
     /// When the pending request was sent.
     busy_since: Option<Instant>,
     /// What the pending turn says it is doing now.
@@ -432,6 +455,8 @@ impl App {
             history_pos: None,
             last_timing: None,
             continue_last: false,
+            mode_label: "Interactive · Manual · Sandbox on".into(),
+            autonomy: "interactive".into(),
             busy_since: None,
             progress: None,
             diag: Vec::new(),
@@ -556,6 +581,8 @@ impl App {
             "feedback",
             "trust.list",
             "trust.clear",
+            "mode.set",
+            "approve",
         ];
         if !CONVERSATION.contains(&method) {
             return Some(params);
@@ -696,6 +723,32 @@ impl App {
         }]
     }
 
+    /// `mode.set` for one part of the mode, or an error line.
+    fn mode_request(&mut self, what: &str, value: &str) -> Vec<Action> {
+        match jarvis_common::mode_change(what, value) {
+            Ok(params) => vec![Action::Request {
+                method: "mode.set",
+                params,
+                pending: Pending::Mode,
+            }],
+            Err(e) => {
+                self.note(Entry::error(e));
+                vec![]
+            }
+        }
+    }
+
+    /// Take the mode a reply carries (`session.new`, `session.show`,
+    /// `mode.set`).
+    fn take_mode(&mut self, result: &Value) {
+        if let Some(label) = result.get("mode_label").and_then(Value::as_str) {
+            self.mode_label = label.to_string();
+        }
+        if let Some(autonomy) = result["mode"]["autonomy"].as_str() {
+            self.autonomy = autonomy.to_string();
+        }
+    }
+
     fn run_command(&mut self, command: Command) -> Vec<Action> {
         let needs_daemon = !matches!(
             command,
@@ -719,6 +772,49 @@ impl App {
             Command::Quit => {
                 self.should_quit = true;
                 vec![Action::Quit]
+            }
+            Command::Mode(rest) if rest.is_empty() => {
+                self.note(Entry::system(format!(
+                    "Mode: {}. Change it with /mode plan|interactive|autopilot, /approval manual|assisted|allow-all, /sandbox on|off; Shift+Tab cycles plan, interactive, autopilot.",
+                    self.mode_label
+                )));
+                vec![]
+            }
+            Command::Mode(rest) => {
+                let mut words = rest.splitn(2, char::is_whitespace);
+                let what = words.next().unwrap_or("");
+                let value = words.next().unwrap_or("").trim();
+                self.mode_request(what, value)
+            }
+            Command::Approval(value) => self.mode_request("approval", &value),
+            Command::Sandbox(value) => self.mode_request("sandbox", &value),
+            Command::Approve(which) => {
+                let which = if which.is_empty() {
+                    "list".to_string()
+                } else {
+                    which
+                };
+                vec![Action::Request {
+                    method: "approve",
+                    params: json!({ "which": which }),
+                    pending: Pending::Approve,
+                }]
+            }
+            Command::Go(rest) => {
+                let autonomy = if rest.trim() == "auto" {
+                    "autopilot"
+                } else {
+                    "interactive"
+                };
+                self.note(Entry::user(format!("/go {rest}").trim_end().to_string()));
+                vec![Action::Request {
+                    method: "ask",
+                    params: json!({
+                        "prompt": "Carry out the plan above, step by step.",
+                        "autonomy": autonomy,
+                    }),
+                    pending: Pending::Turn,
+                }]
             }
             Command::Timing => {
                 let text = match &self.last_timing {
@@ -971,6 +1067,7 @@ impl App {
                 None => vec![Self::new_session_request()],
             },
             Some(Pending::ShowSession(id)) => {
+                self.take_mode(&result);
                 self.session_id = Some(id);
                 if let Some(model) = result.get("model").and_then(Value::as_str) {
                     self.model = model.to_string();
@@ -987,6 +1084,7 @@ impl App {
                 vec![]
             }
             Some(Pending::NewSession) => {
+                self.take_mode(&result);
                 let id = result
                     .get("session_id")
                     .and_then(Value::as_str)
@@ -1116,6 +1214,20 @@ impl App {
                 actions
             }
             Some(Pending::Tier) => self.on_response_tier(&result),
+            Some(Pending::Mode) => {
+                self.take_mode(&result);
+                let mut text = format!("Mode: {}.", self.mode_label);
+                if let Some(note) = result.get("note").and_then(Value::as_str) {
+                    text.push_str(&format!(" ({note})"));
+                }
+                self.note(Entry::system(text));
+                vec![]
+            }
+            Some(Pending::Approve) => {
+                let text = result.get("text").and_then(Value::as_str).unwrap_or("");
+                self.note(Entry::system(text.trim_end().to_string()));
+                vec![]
+            }
             Some(Pending::Tools) => {
                 let tools = result
                     .get("tools")
@@ -1242,6 +1354,15 @@ impl App {
             KeyCode::Char(c) if !ctrl && !alt => self.input.insert(c),
             KeyCode::Backspace => self.input.backspace(),
             KeyCode::Delete => self.input.delete(),
+            // Shift+Tab cycles autonomy, as in Claude Code.
+            KeyCode::BackTab => {
+                let next = match self.autonomy.as_str() {
+                    "interactive" => "autopilot",
+                    "autopilot" => "plan",
+                    _ => "interactive",
+                };
+                return self.mode_request("autonomy", next);
+            }
             KeyCode::Left => self.input.left(),
             KeyCode::Right => self.input.right(),
             KeyCode::Home => self.input.home(),
@@ -2193,6 +2314,104 @@ mod tests {
             [Action::Request { method, params, .. }] => (*method, params.clone()),
             other => panic!("expected one request, got {other:?}"),
         }
+    }
+
+    fn with_session() -> App {
+        let mut app = App::new("llama3.2:1b".into());
+        app.session_id = Some("abc".into());
+        app
+    }
+
+    fn command(app: &mut App, text: &str) -> (&'static str, Value) {
+        app.input.set(text);
+        let actions = press(app, KeyCode::Enter);
+        let (method, params) = request_of(&actions);
+        (method, app.scoped(method, params).expect("scoped"))
+    }
+
+    #[test]
+    fn mode_commands_send_mode_set() {
+        let mut app = with_session();
+        let cases = [
+            ("/mode approval assisted", json!({ "approval": "assisted" })),
+            ("/approval allow-all", json!({ "approval": "allow_all" })),
+            ("/sandbox off", json!({ "sandbox": false })),
+            ("/mode autopilot", json!({ "autonomy": "autopilot" })),
+        ];
+        for (text, change) in cases {
+            let (method, params) = command(&mut app, text);
+            assert_eq!(method, "mode.set", "{text}");
+            for (k, v) in change.as_object().unwrap() {
+                assert_eq!(&params[k], v, "{text}");
+            }
+            assert_eq!(params["session"], "abc", "{text}");
+            app.pending = None;
+            app.pending_id = None;
+        }
+        app.input.set("/sandbox maybe");
+        let actions = press(&mut app, KeyCode::Enter);
+        assert!(actions.is_empty());
+        assert_eq!(app.entries.last().unwrap().role, Role::Error);
+    }
+
+    #[test]
+    fn backtab_cycles_autonomy() {
+        let mut app = with_session();
+        let (method, params) = request_of(&press(&mut app, KeyCode::BackTab));
+        assert_eq!(method, "mode.set");
+        assert_eq!(params["autonomy"], "autopilot");
+        let request = Request::new("mode.set", json!({}));
+        app.begin_request(request.id, Pending::Mode);
+        app.on_response(Response::ok(
+            request.id,
+            json!({ "mode": { "autonomy": "autopilot", "approval": "manual", "sandbox": true },
+                    "mode_label": "Autopilot · Manual · Sandbox on" }),
+        ));
+        let (_, params) = request_of(&press(&mut app, KeyCode::BackTab));
+        assert_eq!(params["autonomy"], "plan");
+    }
+
+    #[test]
+    fn approve_and_go_send_their_requests() {
+        let mut app = with_session();
+        let (method, params) = command(&mut app, "/approve all");
+        assert_eq!((method, params["which"].clone()), ("approve", json!("all")));
+        app.pending = None;
+        let (_, params) = command(&mut app, "/approve");
+        assert_eq!(params["which"], "list");
+        app.pending = None;
+        let (_, params) = command(&mut app, "/approve 2");
+        assert_eq!(params["which"], "2");
+        app.pending = None;
+        let (method, params) = command(&mut app, "/go");
+        assert_eq!(method, "ask");
+        assert_eq!(params["autonomy"], "interactive");
+        assert!(params["prompt"].as_str().unwrap().contains("plan above"));
+        app.pending = None;
+        let (_, params) = command(&mut app, "/go auto");
+        assert_eq!(params["autonomy"], "autopilot");
+    }
+
+    #[test]
+    fn the_header_label_follows_replies() {
+        let mut app = App::new("llama3.2:1b".into());
+        assert_eq!(app.mode_label, "Interactive · Manual · Sandbox on");
+        let request = Request::new("session.new", json!({}));
+        app.begin_request(request.id, Pending::NewSession);
+        app.on_response(Response::ok(
+            request.id,
+            json!({ "session_id": "abc", "model": "x",
+                    "mode": { "autonomy": "plan", "approval": "assisted", "sandbox": true },
+                    "mode_label": "Plan · Assisted · Sandbox on" }),
+        ));
+        assert_eq!(app.mode_label, "Plan · Assisted · Sandbox on");
+        let request = Request::new("approve", json!({}));
+        app.begin_request(request.id, Pending::Approve);
+        app.on_response(Response::ok(
+            request.id,
+            json!({ "text": "1. running: git push: done\n", "remaining": 0 }),
+        ));
+        assert!(app.entries.last().unwrap().text.contains("git push: done"));
     }
 
     #[test]
