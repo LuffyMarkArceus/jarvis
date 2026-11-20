@@ -227,6 +227,7 @@ fn home_setup() -> (Dirs, PathBuf, RunShellTool) {
         writable: vec![home.clone()],
         hidden: vec![config.clone(), home.join(".local/share/jarvis")],
         network: false,
+        read_only: false,
     };
     let t = RunShellTool {
         work_dir: Some(home.clone()),

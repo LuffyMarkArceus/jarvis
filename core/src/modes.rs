@@ -159,6 +159,14 @@ pub fn decide(mode: &Mode, call: &Call) -> Decision {
             _ => Decision::Refuse(PLAN_REFUSAL.into()),
         };
     }
+    // Outside the sandbox asks even where the rule allows (as before 6.6);
+    // only Allow all runs it unasked.
+    let rule = if call.change == Change::Outside && mode.approval != Approval::AllowAll {
+        PermissionAction::Ask
+    } else {
+        call.rule
+    };
+    let call = &Call { rule, ..*call };
     // 6: after untrusted content, an action asks whatever the approval.
     if call.untrusted && call.change != Change::None {
         return verdict(mode, PermissionAction::Ask);
@@ -362,12 +370,34 @@ mod tests {
         let m = Mode::default();
         for change in CHANGES {
             assert_eq!(decide(&m, &call(Ask, change)), Decision::Ask, "{change:?}");
+            if change != Change::Outside {
+                assert_eq!(
+                    decide(&m, &call(Allow, change)),
+                    Decision::Run,
+                    "{change:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn outside_the_sandbox_asks_unless_allow_all() {
+        // As before 6.6: running outside asks even where the rule allows.
+        for approval in [Approval::Manual, Approval::Assisted] {
+            let m = mode(Autonomy::Interactive, approval);
             assert_eq!(
-                decide(&m, &call(Allow, change)),
-                Decision::Run,
-                "{change:?}"
+                decide(&m, &call(Allow, Change::Outside)),
+                Decision::Ask,
+                "{approval:?}"
             );
         }
+        let all = mode(Autonomy::Interactive, Approval::AllowAll);
+        assert_eq!(decide(&all, &call(Allow, Change::Outside)), Decision::Run);
+        let autopilot = mode(Autonomy::Autopilot, Approval::Assisted);
+        assert!(matches!(
+            decide(&autopilot, &call(Allow, Change::Outside)),
+            Decision::Defer(_)
+        ));
     }
 
     #[test]

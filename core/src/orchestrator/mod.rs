@@ -660,8 +660,14 @@ impl Orchestrator {
                 // The tool is the whole turn: once it has run, its result is
                 // the answer even if the user has just cancelled. Dropping it
                 // would hide an action that really happened.
+                // A command the owner typed has no model to say whether it
+                // writes: it counts as writing (6.6).
+                let mut args = args.clone();
+                if name == "shell.run" {
+                    args["writes"] = json!(true);
+                }
                 let outcome = self
-                    .execute_call(name.clone(), args.clone(), confirm, &[], rec)
+                    .execute_call(name.clone(), args, confirm, &[], rec)
                     .await;
                 // A confirmation that was denied *because* the user cancelled
                 // is not a tool result worth persisting: the turn never ran.

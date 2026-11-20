@@ -40,6 +40,10 @@ fn missing_program(command: &str) -> Option<String> {
 }
 
 /// Output that says the sandbox, not the command, was the problem.
+/// A command approved without asking ran read-only and tried to write.
+pub const READ_ONLY_HINT: &str =
+    "This ran read-only and needs to write. Call it again with writes: true to ask the owner.";
+
 const SANDBOX_SIGNS: &[&str] = &[
     "Read-only file system",
     "Could not resolve",
@@ -49,11 +53,23 @@ const SANDBOX_SIGNS: &[&str] = &[
 ];
 
 impl RunShellTool {
-    /// `sh -c script`, in the sandbox unless `outside`.
-    fn sh(&self, script: String, outside: bool, background: bool) -> tokio::process::Command {
+    /// `sh -c script`, in the sandbox unless `outside`; read-only (nothing
+    /// writable, no network) when `read_only`.
+    fn sh(
+        &self,
+        script: String,
+        outside: bool,
+        background: bool,
+        read_only: bool,
+    ) -> tokio::process::Command {
         let mut command = match (&self.sandbox, outside) {
             (Some(sandbox), false) => {
                 let mut c = tokio::process::Command::new("bwrap");
+                let sandbox = if read_only {
+                    sandbox.read_only()
+                } else {
+                    sandbox.clone()
+                };
                 c.args(sandbox.bwrap_args(self.work_dir.as_deref(), background));
                 c.args(["sh", "-c"]).arg(script);
                 c
@@ -80,7 +96,7 @@ impl RunShellTool {
     }
 
     /// What the model is told about where the command ran.
-    fn describe(&self, result: &mut Value, outside: bool) {
+    fn describe(&self, result: &mut Value, outside: bool, read_only: bool) {
         let sandbox = match (&self.sandbox, outside) {
             (Some(sandbox), false) => sandbox,
             _ => {
@@ -102,7 +118,14 @@ impl RunShellTool {
             result["stdout"].as_str().unwrap_or(""),
             result["stderr"].as_str().unwrap_or("")
         );
-        if failed && SANDBOX_SIGNS.iter().any(|sign| said.contains(sign)) {
+        if read_only {
+            result["writable"] = json!(["/tmp (discarded)"]);
+            result["network"] = json!(false);
+            result["read_only"] = json!(true);
+        }
+        if read_only && failed && said.contains("Read-only file system") {
+            result["hint"] = json!(READ_ONLY_HINT);
+        } else if failed && SANDBOX_SIGNS.iter().any(|sign| said.contains(sign)) {
             result["hint"] = json!(
                 "The sandbox stopped this: it can write only the folders listed and has no network. If the command really needs more, call it again with outside_sandbox: true to run it outside the sandbox; the owner will be asked."
             );
@@ -126,7 +149,8 @@ impl Tool for RunShellTool {
             "properties": {
                 "command": {"type": "string", "description": "Command to run"},
                 "background": {"type": "boolean", "description": "Start the command in the background and return immediately (use for GUI apps that would otherwise block)"},
-                "outside_sandbox": {"type": "boolean", "description": "Run without the sandbox: full access to files and the network. Always asks the owner."}
+                "outside_sandbox": {"type": "boolean", "description": "Run without the sandbox: full access to files and the network. Always asks the owner."},
+                "writes": {"type": "boolean", "description": "Set true when the command changes, creates or deletes files. Commands that only look can leave it out."}
             },
             "required": ["command"]
         })
@@ -138,6 +162,8 @@ impl Tool for RunShellTool {
             .ok_or_else(|| crate::error::JarvisError::Tool("Missing command".to_string()))?;
         let background = args["background"].as_bool().unwrap_or(false);
         let outside = args["outside_sandbox"].as_bool().unwrap_or(false);
+        // Set by the gate, never by the model's word alone: only narrows.
+        let read_only = args["_read_only"].as_bool().unwrap_or(false);
 
         if background {
             // `setsid X &` succeeds whether or not X exists, so check first:
@@ -156,6 +182,7 @@ impl Tool for RunShellTool {
                     format!("setsid {} >/dev/null 2>&1 &", command),
                     outside,
                     true,
+                    read_only,
                 )
                 .output()
                 .await?;
@@ -165,12 +192,12 @@ impl Tool for RunShellTool {
                 "background": true,
                 "command": command,
             });
-            self.describe(&mut result, outside);
+            self.describe(&mut result, outside, read_only);
             return Ok(result);
         }
 
         let output = self
-            .sh(command.to_string(), outside, false)
+            .sh(command.to_string(), outside, false, read_only)
             .output()
             .await?;
         let mut result = json!({
@@ -178,7 +205,7 @@ impl Tool for RunShellTool {
             "stderr": String::from_utf8_lossy(&output.stderr),
             "status": output.status.code(),
         });
-        self.describe(&mut result, outside);
+        self.describe(&mut result, outside, read_only);
         Ok(result)
     }
 }
