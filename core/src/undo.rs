@@ -82,6 +82,14 @@ pub struct UndoStore {
     now: fn() -> DateTime<Utc>,
 }
 
+impl Pending {
+    /// Whether a copy of the file was kept: false when it was over the size
+    /// limit at the time.
+    pub fn kept(&self) -> bool {
+        self.kept
+    }
+}
+
 impl UndoStore {
     /// Open (or create) the store; the folder is private to its owner.
     pub fn open(dir: PathBuf, limits: &UndoConfig) -> Result<Self> {

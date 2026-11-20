@@ -76,6 +76,11 @@ impl Sandbox {
         push(&["--dev".as_ref(), "/dev".as_ref()]);
         push(&["--proc".as_ref(), "/proc".as_ref()]);
         push(&["--tmpfs".as_ref(), "/tmp".as_ref()]);
+        // Read-only does not stop connect() on a socket (/run/docker.sock,
+        // a bus): a run nobody was asked about gets no /run at all.
+        if self.read_only {
+            push(&["--tmpfs".as_ref(), "/run".as_ref()]);
+        }
         for (dir, writable) in self.mounts() {
             let how = if writable && !self.read_only {
                 "--bind"
@@ -261,6 +266,10 @@ mod tests {
             args.contains(&"--unshare-net".to_string()),
             "no network: {args:?}"
         );
+        // Review of 6.6: a read-only bind does not stop connect() on a
+        // socket (/run/docker.sock); run with no /run at all.
+        let run = position(&args, &["--tmpfs", "/run"]).expect("/run replaced");
+        assert!(run > position(&args, &["--ro-bind", "/", "/"]).unwrap());
         let d = data.display().to_string();
         assert!(
             position(&args, &["--tmpfs", &d]).is_some(),

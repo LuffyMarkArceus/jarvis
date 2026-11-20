@@ -374,6 +374,9 @@ impl Orchestrator {
             };
         }
         let verdict = self.permissions.check_permission(&name, &args);
+        // What the call itself asked for, before the mode adds to it: a
+        // deferred call keeps only this, so /approve decides by the mode then.
+        let as_asked = args.clone();
         let outside = self.runs_outside(&name, &args) || (name == "shell.run" && !mode.sandbox);
         if outside {
             if let Some(map) = args.as_object_mut() {
@@ -475,7 +478,7 @@ impl Orchestrator {
                 );
                 conv.defer(Deferred {
                     name: name.clone(),
-                    args: args.clone(),
+                    args: as_asked,
                     why,
                     untrusted: untrusted.to_vec(),
                 });
@@ -767,6 +770,30 @@ impl Orchestrator {
                     ) =>
                 {
                     match store.before_change(std::path::Path::new(path), &name, &conv.id) {
+                        // Approved only because it could be undone, but the
+                        // file grew past the limit since: no copy, no write.
+                        Ok(pending) if decision == "auto_approved_undoable" && !pending.kept() => {
+                            store.discard(pending);
+                            let msg = format!(
+                                "Tool {} was not run: the file is now too large to keep an undo copy, so it was not written automatically. Ask again to be asked.",
+                                name
+                            );
+                            let _ = self.permissions.log_audit(
+                                Some(&conv.id),
+                                &name,
+                                &args,
+                                "no_undo_copy",
+                                Some(&msg),
+                            );
+                            return ToolOutcome {
+                                name,
+                                args,
+                                status: OutcomeStatus::Failed,
+                                output: msg,
+                                result: None,
+                                pattern,
+                            };
+                        }
                         Ok(pending) => Some(pending),
                         // Approved only because it could be undone: with no
                         // copy, it is not made (6.6).

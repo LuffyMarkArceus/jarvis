@@ -590,3 +590,34 @@ fn drive_names_are_given_only_where_the_model_can_use_them() {
     assert!(!chat.contains("Drives on this machine"), "{chat}");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[tokio::test]
+async fn an_auto_approved_write_with_no_lasting_copy_is_not_made() {
+    // Review of 6.6: the file grew past the undo limit between the gate's
+    // check and the write; before_change "succeeds" with no copy kept.
+    let dir = std::env::temp_dir().join(format!("jarvis-undo-race-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut config = Config::default();
+    config.general.data_dir = dir.clone();
+    config.memory.db_path = dir.join("memory.db");
+    config.undo.max_file_bytes = 10;
+    let permissions =
+        PermissionManager::with_paths(dir.join("permissions.toml"), dir.join("audit.db")).unwrap();
+    let jarvis =
+        Orchestrator::with_parts(config, Arc::new(crate::eval::ScriptedProvider), permissions);
+    let conv = jarvis.new_conversation();
+    let file = dir.join("grown.log");
+    std::fs::write(&file, "x".repeat(100)).unwrap();
+    let outcome = jarvis
+        .run_tool(
+            &conv,
+            "filesystem.write".into(),
+            json!({ "path": file, "content": "replaced" }),
+            "auto_approved_undoable",
+            None,
+        )
+        .await;
+    assert_eq!(outcome.status, OutcomeStatus::Failed, "{}", outcome.output);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "x".repeat(100));
+    let _ = std::fs::remove_dir_all(dir);
+}

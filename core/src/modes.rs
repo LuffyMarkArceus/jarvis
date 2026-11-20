@@ -164,7 +164,9 @@ pub fn decide(mode: &Mode, call: &Call) -> Decision {
         match mode.approval {
             Approval::Manual => {}
             Approval::Assisted => match call.change {
-                Change::None | Change::Undoable => return Decision::Run,
+                // Not reads the owner's rule asks about: Assisted relaxes
+                // undoable changes and looking commands only.
+                Change::Undoable => return Decision::Run,
                 c if c == looks && read_only => return Decision::RunReadOnly,
                 _ => {}
             },
@@ -362,6 +364,14 @@ mod tests {
             Decision::Ask,
             "with the sandbox off there is no read-only run"
         );
+    }
+
+    #[test]
+    fn assisted_keeps_a_read_rule_that_asks() {
+        // Review of 6.6: Assisted relaxes undoable changes and looking
+        // commands, not the owner's "ask before reading this".
+        let m = mode(Autonomy::Interactive, Approval::Assisted);
+        assert_eq!(decide(&m, &call(Ask, Change::None)), Decision::Ask);
     }
 
     #[test]

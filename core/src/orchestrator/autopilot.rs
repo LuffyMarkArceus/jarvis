@@ -132,6 +132,13 @@ impl Orchestrator {
             if outside {
                 args["outside_sandbox"] = json!(true);
             }
+            // Plan changes nothing, even approved: a command that only looks
+            // runs read-only.
+            if mode.autonomy == crate::modes::Autonomy::Plan
+                && call.change == (Change::Shell { writes: false })
+            {
+                args["_read_only"] = json!(true);
+            }
             let outcome = self
                 .run_tool(conv, action.name.clone(), args, "approved_deferred", None)
                 .await;

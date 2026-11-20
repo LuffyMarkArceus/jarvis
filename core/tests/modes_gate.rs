@@ -662,3 +662,53 @@ async fn plan_prompt_asks_for_a_numbered_plan() {
         s.model_saw()
     );
 }
+
+#[tokio::test]
+async fn approve_in_plan_runs_a_looking_command_read_only() {
+    // Review of 6.6: a deferred command without `writes` was run with the
+    // writable sandbox by /approve in Plan mode.
+    if !common::sandbox_or_skip() {
+        return;
+    }
+    let s = setup(
+        autopilot(),
+        |d| {
+            std::fs::create_dir_all(d.join("project/build")).unwrap();
+            vec![
+                shell(
+                    &format!("rm -rf {}", d.join("project/build").display()),
+                    None,
+                ),
+                answer("done"),
+            ]
+        },
+        |_| {},
+    );
+    s.ask(&Owner::saying(true)).await;
+    assert_eq!(
+        s.conv.deferred().len(),
+        1,
+        "the rule asks, so Autopilot defers"
+    );
+    s.conv
+        .set_mode(mode(Autonomy::Plan, Approval::Manual, true));
+    s.jarvis.approve(&s.conv, Approve::All).await.unwrap();
+    assert!(s.path("project/build").exists(), "Plan mode deleted files");
+}
+
+#[tokio::test]
+async fn an_action_deferred_with_the_sandbox_off_runs_inside_once_it_is_on() {
+    let s = setup(
+        mode(Autonomy::Autopilot, Approval::Manual, false),
+        |_| vec![shell("echo where", Some(true)), answer("done")],
+        |_| {},
+    );
+    s.ask(&Owner::saying(true)).await;
+    let deferred = s.conv.deferred();
+    assert_eq!(deferred.len(), 1);
+    assert!(
+        deferred[0].args.get("outside_sandbox").is_none(),
+        "the mode's choice was stored as the model's: {:?}",
+        deferred[0].args
+    );
+}
