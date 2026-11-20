@@ -116,12 +116,18 @@ pub struct TurnTiming {
     pub model: Vec<ModelTiming>,
     /// Each tool call, including any prompt it asked.
     pub tools: Vec<ToolTiming>,
+    /// Spent waiting for a GPU slot behind another window's model call.
+    #[serde(default)]
+    pub queue_ms: u64,
 }
 
 impl TurnTiming {
-    /// The turn without the owner's time: what "slow" is judged on.
+    /// The turn without the owner's time, or time spent queued behind
+    /// another window: what "slow" is judged on.
     pub fn jarvis_ms(&self) -> u64 {
-        self.total_ms.saturating_sub(self.you_ms)
+        self.total_ms
+            .saturating_sub(self.you_ms)
+            .saturating_sub(self.queue_ms)
     }
 }
 
@@ -194,6 +200,10 @@ pub(super) struct TurnRecorder<'c> {
     pub(super) planned: std::sync::Mutex<Option<(String, Vec<String>)>>,
     /// Where to say what the turn is doing now, for a client to show.
     pub(super) progress: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    /// The conversation's settings when the turn started.
+    pub(super) pinned: crate::conversation::Pinned,
+    /// A busy GPU sent this turn to the remote tier (6.5b).
+    pub(super) spilled: std::sync::atomic::AtomicBool,
 }
 
 impl<'c> TurnRecorder<'c> {
@@ -214,7 +224,17 @@ impl<'c> TurnRecorder<'c> {
             timing: Default::default(),
             planned: Default::default(),
             progress: Default::default(),
+            pinned: conversation.pin(),
+            spilled: Default::default(),
         }
+    }
+
+    /// The settings this turn's requests use: as pinned, on the remote
+    /// tier once spilled.
+    pub(super) fn settings(&self) -> crate::conversation::Pinned {
+        let mut pinned = self.pinned.clone();
+        pinned.remote |= self.spilled.load(std::sync::atomic::Ordering::Relaxed);
+        pinned
     }
 }
 
@@ -271,6 +291,11 @@ impl TurnRecorder<'_> {
 
     /// Say what the turn is doing now. A client that went away is not an
     /// error: the turn still finishes.
+    /// Time spent waiting for a GPU slot.
+    pub(super) fn queued(&self, waited: std::time::Duration) {
+        self.timing.lock().unwrap().queue_ms += waited.as_millis() as u64;
+    }
+
     pub(super) fn step(&self, text: String) {
         if let Some(progress) = &self.progress {
             let _ = progress.send(text);

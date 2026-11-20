@@ -106,3 +106,102 @@ pub fn sandbox_or_skip() -> bool {
     );
     false
 }
+
+/// A local model whose every call waits until the test lets it go, so a
+/// test decides exactly when the GPU is busy (Milestone 6.5b). Each call
+/// says it has started (with its model) before it waits; `fail` makes the
+/// next released call an error.
+#[allow(dead_code)]
+pub struct Gated {
+    release: tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<()>>,
+    entered: tokio::sync::mpsc::UnboundedSender<String>,
+    pub fail: std::sync::atomic::AtomicBool,
+    /// Replies to give first, in order; then "answered by <model>".
+    pub script: Mutex<std::collections::VecDeque<ChatTurn>>,
+    /// Models asked to load ahead of time.
+    pub warmed: Mutex<Vec<String>>,
+}
+
+#[allow(dead_code)]
+pub struct Gate {
+    pub release: tokio::sync::mpsc::UnboundedSender<()>,
+    pub entered: tokio::sync::mpsc::UnboundedReceiver<String>,
+}
+
+#[allow(dead_code)]
+impl Gate {
+    /// Wait until a call reaches the model; its model.
+    pub async fn reached(&mut self) -> String {
+        tokio::time::timeout(std::time::Duration::from_secs(10), self.entered.recv())
+            .await
+            .expect("a call reached the model")
+            .expect("gate open")
+    }
+
+    pub fn open_once(&self) {
+        self.release.send(()).unwrap();
+    }
+}
+
+#[allow(dead_code)]
+pub fn gated() -> (std::sync::Arc<Gated>, Gate) {
+    let (release_tx, release_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (entered_tx, entered_rx) = tokio::sync::mpsc::unbounded_channel();
+    (
+        std::sync::Arc::new(Gated {
+            release: tokio::sync::Mutex::new(release_rx),
+            entered: entered_tx,
+            fail: Default::default(),
+            script: Default::default(),
+            warmed: Default::default(),
+        }),
+        Gate {
+            release: release_tx,
+            entered: entered_rx,
+        },
+    )
+}
+
+#[async_trait::async_trait]
+impl Provider for Gated {
+    fn name(&self) -> &'static str {
+        "gated"
+    }
+
+    async fn warm(&self, model: &str, _options: &Value) -> Result<()> {
+        self.warmed.lock().unwrap().push(model.to_string());
+        Ok(())
+    }
+
+    async fn chat_turn(
+        &self,
+        request: ChatRequest<'_>,
+        cancel: Option<&Cancellation>,
+    ) -> Result<ChatTurn> {
+        let _ = self.entered.send(request.model.to_string());
+        let mut cancel = cancel.cloned().unwrap_or_default();
+        let mut release = self.release.lock().await;
+        tokio::select! {
+            _ = release.recv() => {}
+            _ = cancel.cancelled() => return Err(jarvis_core::error::JarvisError::Cancelled),
+        }
+        if self.fail.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Err(jarvis_core::error::JarvisError::Model(
+                "the GPU fell over".into(),
+            ));
+        }
+        if let Some(turn) = self.script.lock().unwrap().pop_front() {
+            return Ok(turn);
+        }
+        Ok(answer(&format!("answered by {}", request.model)))
+    }
+
+    async fn chat_turn_streaming(
+        &self,
+        request: ChatRequest<'_>,
+        cancel: Option<&Cancellation>,
+        _sink: &UnboundedSender<String>,
+    ) -> Result<ChatTurn> {
+        self.chat_turn(request, cancel).await
+    }
+}

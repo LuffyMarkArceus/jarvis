@@ -227,18 +227,24 @@ impl Orchestrator {
     /// earlier session does not leave as "memory".
     pub(super) fn with_recall(
         &self,
-        conv: &Conversation,
+        rec: &TurnRecorder<'_>,
         input: &str,
         prompt: String,
     ) -> (String, Label) {
-        let (block, label) = self.recall_block(conv, input).unwrap_or_default();
+        let remote = destination_of(&self.turn_tier(rec).0).is_remote();
+        let (block, label) = self
+            .recall_block(rec.conversation, input, remote)
+            .unwrap_or_default();
         (append_recall(prompt, block), label)
     }
 
+    /// `remote`: for a request to a remote destination, which leaves out
+    /// what the policy would not send.
     pub(super) fn recall_block(
         &self,
         conv: &Conversation,
         input: &str,
+        remote: bool,
     ) -> Option<(Option<String>, Label)> {
         if !self.config.memory.recall_enabled {
             return None;
@@ -258,7 +264,7 @@ impl Orchestrator {
         // prompt on every question (every message stored before labels is
         // unknown) would be answered by reflex. Required content - what the
         // user asked about - is still asked about in ask_model.
-        let results: Vec<_> = if self.destination(conv).is_remote() {
+        let results: Vec<_> = if remote {
             let policy = self.egress_policy();
             let before = results.len();
             let kept: Vec<_> = results
@@ -303,8 +309,8 @@ impl Orchestrator {
 
     /// The answer when the model did not respond. Names the model and where
     /// it is: "the local model" was wrong once a remote tier existed.
-    pub(super) fn fallback_answer(&self, conv: &Conversation, error: &JarvisError) -> String {
-        let (cfg, _) = self.tier(conv);
+    pub(super) fn fallback_answer(&self, rec: &TurnRecorder<'_>, error: &JarvisError) -> String {
+        let (cfg, _) = self.turn_tier(rec);
         format!(
             "I could not reach {} ({}), so I cannot answer that yet.\n\nReason: {}",
             cfg.default_model,

@@ -1,6 +1,7 @@
 //! Every model request goes through here: the egress check, redaction, the call.
 
 use super::*;
+use crate::lane::{Admit, LanePermit};
 
 /// `https://openrouter.ai/api/v1` -> `openrouter.ai`.
 pub(super) fn host_of(base_url: &str) -> String {
@@ -75,7 +76,7 @@ impl Orchestrator {
         rec: &TurnRecorder<'_>,
     ) -> Result<ModelReply> {
         rec.saw_request(system, system_label, messages);
-        let (cfg, client) = self.tier(rec.conversation);
+        let (cfg, client) = self.turn_tier(rec);
         let (cfg, client) = (&cfg, &client);
         let request = Request {
             system,
@@ -117,9 +118,7 @@ impl Orchestrator {
         };
         // The owner's rule: when nothing could be sent, ask each time whether
         // the local model should answer instead. Nobody to ask means no.
-        if let (Some((local_cfg, local)), Some(confirm)) =
-            (self.local_fallback(rec.conversation), confirm)
-        {
+        if let (Some((local_cfg, local)), Some(confirm)) = (self.local_fallback(rec), confirm) {
             let (local_cfg, local) = (&local_cfg, &local);
             let args = json!({ "model": local_cfg.default_model, "reason": why });
             if confirm.confirm(EGRESS_LOCAL_TOOL, &args).await {
@@ -215,6 +214,13 @@ impl Orchestrator {
         // A placeholder can be split across streamed chunks and shown before
         // it is restored; a redacted remote answer is shown whole instead.
         let stream_to = sink.filter(|_| !redacted.as_ref().is_some_and(|r| r.2));
+        // A local model call takes a GPU slot first, and says so when it
+        // has to wait behind another window's (6.5b).
+        let _slot = if remote {
+            None
+        } else {
+            Some(self.local_slot(&cfg.default_model, cancel, rec).await?)
+        };
         rec.step(format!(
             "asking {} (step {})",
             short_model(&cfg.default_model),
@@ -245,6 +251,36 @@ impl Orchestrator {
             }
         }
         Ok(ModelReply::Turn(Box::new(turn)))
+    }
+
+    /// A slot in the local lane for one call to `model`.
+    pub(super) async fn local_slot(
+        &self,
+        model: &str,
+        cancel: Option<&Cancellation>,
+        rec: &TurnRecorder<'_>,
+    ) -> Result<LanePermit> {
+        if self.lane.available() == 0 {
+            if let Some(running) = self.lane.running() {
+                rec.step(format!(
+                    "waiting for the GPU: another window is using {running}"
+                ));
+            }
+        }
+        match self.lane.acquire(model, None, cancel).await {
+            Admit::Slot(permit) => {
+                rec.queued(permit.waited());
+                Ok(permit)
+            }
+            Admit::Busy(waiter) => match waiter.wait(cancel).await {
+                Some(permit) => {
+                    rec.queued(permit.waited());
+                    Ok(permit)
+                }
+                None => Err(JarvisError::Cancelled),
+            },
+            Admit::Cancelled => Err(JarvisError::Cancelled),
+        }
     }
 
     /// The answer for a request that was not sent.

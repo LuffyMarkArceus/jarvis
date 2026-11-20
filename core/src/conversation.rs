@@ -35,6 +35,15 @@ pub struct Conversation {
     answering: AtomicBool,
 }
 
+/// A conversation's settings at one moment: a turn takes them when it
+/// starts and keeps them, so a switch made meanwhile applies from the next
+/// turn (6.5b).
+#[derive(Debug, Clone, Default)]
+pub struct Pinned {
+    pub remote: bool,
+    pub chosen: [Option<String>; 2],
+}
+
 /// Held while a conversation answers; dropping it (however the turn ends)
 /// lets it answer again.
 pub struct Answering(Arc<Conversation>);
@@ -79,6 +88,14 @@ impl Conversation {
 
     pub(crate) fn set_remote(&self, on: bool) {
         self.remote.store(on, Ordering::Relaxed);
+    }
+
+    /// Its settings now.
+    pub fn pin(&self) -> Pinned {
+        Pinned {
+            remote: self.remote(),
+            chosen: self.chosen(),
+        }
     }
 
     pub fn chosen(&self) -> [Option<String>; 2] {
