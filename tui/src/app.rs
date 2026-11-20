@@ -338,6 +338,9 @@ pub struct App {
     pub continue_last: bool,
     /// The terminal tells Shift+Enter (and Ctrl+Enter) from Enter.
     pub keyboard_enhanced: bool,
+    /// The `/` menu's selected row, and whether Esc closed it.
+    pub menu_selected: usize,
+    menu_closed: bool,
     /// This window's conversation's mode, for the header (6.6).
     pub mode_label: String,
     /// Its autonomy, for Shift+Tab: `plan`, `interactive` or `autopilot`.
@@ -375,6 +378,8 @@ impl App {
             last_timing: None,
             continue_last: false,
             keyboard_enhanced: false,
+            menu_selected: 0,
+            menu_closed: false,
             mode_label: "Interactive · Manual · Sandbox on".into(),
             autonomy: "interactive".into(),
             busy_since: None,
@@ -1269,6 +1274,66 @@ impl App {
             return vec![Action::Reconnect];
         }
 
+        // The `/` menu takes its keys first while it is open.
+        if let Some(rows) = self.menu_rows() {
+            let exact = rows.iter().any(|c| c.name == self.input.text());
+            match key.code {
+                KeyCode::Up => {
+                    self.menu_selected = self.menu_selected.saturating_sub(1);
+                    return vec![];
+                }
+                KeyCode::Down => {
+                    self.menu_selected = (self.menu_selected + 1).min(rows.len() - 1);
+                    return vec![];
+                }
+                KeyCode::Esc => {
+                    self.menu_closed = true;
+                    return vec![];
+                }
+                KeyCode::Tab => {
+                    self.complete_menu(&rows);
+                    return vec![];
+                }
+                KeyCode::Enter if !exact && !alt && !shift => {
+                    self.complete_menu(&rows);
+                    return vec![];
+                }
+                _ => {}
+            }
+        }
+        let before = self.input.text();
+        let actions = self.edit_key(key, ctrl, alt, shift);
+        if self.input.text() != before {
+            // A new text reopens the menu, from the top.
+            self.menu_closed = false;
+            self.menu_selected = 0;
+        }
+        actions
+    }
+
+    /// The `/` menu's rows, while it is open: the input is a command name
+    /// still being typed.
+    pub fn menu_rows(&self) -> Option<Vec<&'static crate::commands::CommandInfo>> {
+        let text = self.input.text();
+        if self.menu_closed
+            || self.overlay.is_some()
+            || !text.starts_with('/')
+            || text.contains(char::is_whitespace)
+        {
+            return None;
+        }
+        let rows = crate::commands::matching(&text);
+        (!rows.is_empty()).then_some(rows)
+    }
+
+    fn complete_menu(&mut self, rows: &[&'static crate::commands::CommandInfo]) {
+        if let Some(chosen) = rows.get(self.menu_selected.min(rows.len() - 1)) {
+            self.input.set(&format!("{} ", chosen.name));
+        }
+    }
+
+    /// Keys for the input box itself.
+    fn edit_key(&mut self, key: KeyEvent, ctrl: bool, alt: bool, shift: bool) -> Vec<Action> {
         match key.code {
             KeyCode::Enter if alt || shift => self.input.newline(),
             KeyCode::Enter => return self.submit(),
@@ -1528,6 +1593,73 @@ mod tests {
 
     fn key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Vec<Action> {
         app.handle_key(KeyEvent::new(code, modifiers))
+    }
+
+    fn type_keys(app: &mut App, text: &str) {
+        for ch in text.chars() {
+            press(app, KeyCode::Char(ch));
+        }
+    }
+
+    fn menu_names(app: &App) -> Option<Vec<&'static str>> {
+        app.menu_rows()
+            .map(|rows| rows.iter().map(|c| c.name).collect())
+    }
+
+    #[test]
+    fn menu_opens_on_slash_and_closes_on_space() {
+        let mut app = with_session();
+        assert!(menu_names(&app).is_none());
+        type_keys(&mut app, "/ap");
+        assert_eq!(menu_names(&app).unwrap(), vec!["/approval", "/approve"]);
+        type_keys(&mut app, "proval ");
+        assert!(menu_names(&app).is_none(), "an argument is being typed");
+    }
+
+    #[test]
+    fn tab_completes_the_selection_with_a_space() {
+        let mut app = with_session();
+        type_keys(&mut app, "/ap");
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.input.text(), "/approve ");
+    }
+
+    #[test]
+    fn enter_runs_an_exact_command_or_completes() {
+        let mut app = with_session();
+        type_keys(&mut app, "/ne");
+        let actions = press(&mut app, KeyCode::Enter);
+        assert!(actions.is_empty());
+        assert_eq!(app.input.text(), "/new ");
+        app.input.clear();
+        type_keys(&mut app, "/new");
+        let actions = press(&mut app, KeyCode::Enter);
+        assert_eq!(request_of(&actions).0, "session.new");
+    }
+
+    #[test]
+    fn esc_closes_the_menu_and_keeps_the_text() {
+        let mut app = with_session();
+        type_keys(&mut app, "/mo");
+        press(&mut app, KeyCode::Esc);
+        assert!(menu_names(&app).is_none());
+        assert_eq!(app.input.text(), "/mo");
+        type_keys(&mut app, "d");
+        assert!(menu_names(&app).is_some(), "typing again reopens it");
+    }
+
+    #[test]
+    fn up_down_select_in_the_menu_not_history() {
+        let mut app = with_session();
+        app.history.push("old prompt".into());
+        type_keys(&mut app, "/");
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.menu_selected, 2);
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.menu_selected, 1);
+        assert_eq!(app.input.text(), "/", "history replaced the text");
     }
 
     #[test]
