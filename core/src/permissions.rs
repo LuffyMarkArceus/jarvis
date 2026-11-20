@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum PermissionAction {
     Allow,
@@ -182,7 +182,7 @@ impl PermissionsConfig {
             }
         }
 
-        PermissionVerdict::from_rule(rule.action.clone())
+        PermissionVerdict::from_rule(rule.action)
     }
 }
 
@@ -215,7 +215,7 @@ fn match_patterns(patterns: &[CommandPattern], command: &str) -> Option<Permissi
         };
         if better {
             best = Some(PermissionVerdict {
-                action: p.action.clone(),
+                action: p.action,
                 pattern: Some(p.pattern.clone()),
             });
         }
