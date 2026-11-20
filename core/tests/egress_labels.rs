@@ -346,6 +346,7 @@ fn tiers() -> Tiers {
             ..ModelConfig::default()
         },
         default: true,
+        ..RemoteConfig::default()
     });
     let permissions =
         PermissionManager::with_paths(dir.join("permissions.toml"), dir.join("audit.db")).unwrap();
@@ -500,6 +501,7 @@ async fn recalled_memory_the_policy_would_not_send_is_left_out_not_asked_about()
             ..ModelConfig::default()
         },
         default: true,
+        ..RemoteConfig::default()
     });
     let memory = MemoryManager::new(config.clone()).unwrap();
     // An old, unlabelled answer and a labelled user message, in another session.

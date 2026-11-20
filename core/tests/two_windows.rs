@@ -50,6 +50,7 @@ fn config_in(dir: &std::path::Path) -> Config {
             ..ModelConfig::default()
         },
         default: false,
+        ..RemoteConfig::default()
     });
     config
 }
