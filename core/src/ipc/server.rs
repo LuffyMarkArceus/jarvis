@@ -352,6 +352,8 @@ async fn handle_request(
                     "privacy": daemon.default_privacy().await,
                     "tools": daemon.list_tools().await,
                     "last_session": daemon.last_session(),
+                    "mode": daemon.default_mode(),
+                    "mode_label": daemon.default_mode().label(),
                 }),
             )
         }
@@ -373,20 +375,44 @@ async fn handle_request(
             }
         }
         "session.new" => match daemon.new_session().await {
-            Ok((id, model, remote)) => Response::ok(
-                request.id,
-                serde_json::json!({
-                    "session_id": id,
-                    "model": model,
-                    "tier": if remote { "remote" } else { "local" },
-                }),
-            ),
+            Ok((id, model, remote)) => {
+                let mode = daemon.mode_of(&id).unwrap_or_default();
+                Response::ok(
+                    request.id,
+                    serde_json::json!({
+                        "session_id": id,
+                        "model": model,
+                        "tier": if remote { "remote" } else { "local" },
+                        "mode": mode,
+                        "mode_label": mode.label(),
+                    }),
+                )
+            }
             Err(e) => Response::err(request.id, e.to_string()),
         },
         "session.last" => Response::ok(
             request.id,
             serde_json::json!({ "session_id": daemon.last_session() }),
         ),
+        "mode.set" => {
+            let session = match session_of(&request) {
+                Ok(s) => s,
+                Err(r) => return r,
+            };
+            match daemon.set_mode(&session, &request.params) {
+                Ok(mode) => {
+                    let mut result =
+                        serde_json::json!({ "mode": mode, "mode_label": mode.label() });
+                    if mode.sandbox && !daemon.sandbox_ready() {
+                        result["note"] =
+                            "the sandbox is not available here: commands ask and run outside"
+                                .into();
+                    }
+                    Response::ok(request.id, result)
+                }
+                Err(e) => Response::err(request.id, e.to_string()),
+            }
+        }
         "tier.set" => {
             let session = match session_of(&request) {
                 Ok(s) => s,
@@ -504,6 +530,8 @@ async fn handle_request(
                             "messages": messages,
                             "model": daemon.model_info(&sid).await.map(|m| m.1).unwrap_or_default(),
                             "tier": if daemon.uses_remote(&sid).await.unwrap_or(false) { "remote" } else { "local" },
+                            "mode": daemon.mode_of(&sid).unwrap_or_default(),
+                            "mode_label": daemon.mode_of(&sid).unwrap_or_default().label(),
                         }),
                     )
                 }

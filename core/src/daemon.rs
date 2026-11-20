@@ -31,9 +31,12 @@ impl Daemon {
     /// conversations there is nothing to serve.
     pub fn with_orchestrator(config: Config, orchestrator: Orchestrator) -> Result<Self> {
         let memory = MemoryManager::new(config.clone())?;
+        let default_mode = orchestrator.default_mode();
         Ok(Self {
             orchestrator: Arc::new(orchestrator),
-            conversations: Arc::new(Conversations::new(memory.clone())),
+            conversations: Arc::new(
+                Conversations::new(memory.clone()).with_default_mode(default_mode),
+            ),
             config,
             memory: Some(memory),
         })
@@ -102,6 +105,51 @@ impl Daemon {
         let conv = self.conversations.create(orch);
         let (_, model, _) = orch.model_info(&conv);
         Ok((conv.id.clone(), model, conv.remote()))
+    }
+
+    /// A conversation's mode.
+    pub fn mode_of(&self, session: &str) -> Result<crate::modes::Mode> {
+        Ok(self.conversation(session)?.mode())
+    }
+
+    /// Whether commands can run in the sandbox here.
+    pub fn sandbox_ready(&self) -> bool {
+        crate::sandbox::ready(&self.config)
+    }
+
+    /// The mode a new conversation starts in, for `status`.
+    pub fn default_mode(&self) -> crate::modes::Mode {
+        self.orchestrator.default_mode()
+    }
+
+    /// Change part of a conversation's mode: any of `autonomy`, `approval`
+    /// and `sandbox` in `change`. Its next turn uses it.
+    pub fn set_mode(
+        &self,
+        session: &str,
+        change: &serde_json::Value,
+    ) -> Result<crate::modes::Mode> {
+        let conv = self.conversation(session)?;
+        let mut mode = conv.mode();
+        let bad = |what: &str, value: &serde_json::Value| {
+            JarvisError::Config(format!("{value} is not a {what}"))
+        };
+        if let Some(v) = change.get("autonomy") {
+            mode.autonomy = serde_json::from_value(v.clone())
+                .map_err(|_| bad("autonomy: plan, interactive or autopilot", v))?;
+        }
+        if let Some(v) = change.get("approval") {
+            mode.approval = serde_json::from_value(v.clone())
+                .map_err(|_| bad("approval: manual, assisted or allow_all", v))?;
+        }
+        if let Some(v) = change.get("sandbox") {
+            mode.sandbox = v
+                .as_bool()
+                .ok_or_else(|| bad("sandbox setting: true or false", v))?;
+        }
+        conv.set_mode(mode);
+        self.conversations.saved(&conv);
+        Ok(mode)
     }
 
     /// The conversation used most recently, for `--continue`.

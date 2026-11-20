@@ -5,6 +5,7 @@
 
 use crate::error::{JarvisError, Result};
 use crate::memory::{ConversationSettings, MemoryManager};
+use crate::modes::Mode;
 use crate::orchestrator::Orchestrator;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -33,6 +34,8 @@ pub struct Conversation {
     /// A turn is running: a conversation answers one question at a time,
     /// or two windows on it would interleave its history (6.5b).
     answering: AtomicBool,
+    /// Autonomy, approval and the sandbox (Milestone 6.6).
+    mode: Mutex<Mode>,
 }
 
 /// A conversation's settings at one moment: a turn takes them when it
@@ -42,6 +45,8 @@ pub struct Conversation {
 pub struct Pinned {
     pub remote: bool,
     pub chosen: [Option<String>; 2],
+    /// Its mode (Milestone 6.6).
+    pub mode: Mode,
 }
 
 /// Held while a conversation answers; dropping it (however the turn ends)
@@ -67,6 +72,7 @@ impl Conversation {
             chosen: Mutex::new(chosen),
             last_turn: Mutex::new(None),
             answering: AtomicBool::new(false),
+            mode: Mutex::new(Mode::default()),
         })
     }
 
@@ -95,7 +101,16 @@ impl Conversation {
         Pinned {
             remote: self.remote(),
             chosen: self.chosen(),
+            mode: self.mode(),
         }
+    }
+
+    pub fn mode(&self) -> Mode {
+        *self.mode.lock().unwrap()
+    }
+
+    pub fn set_mode(&self, mode: Mode) {
+        *self.mode.lock().unwrap() = mode;
     }
 
     pub fn chosen(&self) -> [Option<String>; 2] {
@@ -112,6 +127,8 @@ impl Conversation {
 /// when switched.
 pub struct Conversations {
     memory: MemoryManager,
+    /// For a conversation stored before modes: `[modes]` in the config.
+    default_mode: Mutex<Mode>,
     loaded: Mutex<HashMap<String, Arc<Conversation>>>,
 }
 
@@ -125,8 +142,15 @@ impl Conversations {
     pub fn new(memory: MemoryManager) -> Self {
         Conversations {
             memory,
+            default_mode: Mutex::new(Mode::default()),
             loaded: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Conversations stored before modes existed get `mode`.
+    pub fn with_default_mode(self, mode: Mode) -> Self {
+        *self.default_mode.lock().unwrap() = mode;
+        self
     }
 
     /// The conversation `id`, or an error naming it if there is none. A
@@ -145,6 +169,7 @@ impl Conversations {
             stored.remote,
             [stored.local, stored.remote_model],
         );
+        conv.set_mode(stored.mode.unwrap_or(*self.default_mode.lock().unwrap()));
         // Whoever loaded it first wins: two windows on one conversation
         // must share one `Conversation`, or a model switch in one would miss
         // the other.
@@ -162,6 +187,7 @@ impl Conversations {
     pub fn create(&self, orch: &Orchestrator) -> Arc<Conversation> {
         let fresh = orch.new_conversation();
         let conv = Conversation::restore(fresh.id.clone(), fresh.remote(), self.last_models());
+        conv.set_mode(orch.default_mode());
         self.saved(&conv);
         self.loaded
             .lock()
@@ -180,6 +206,7 @@ impl Conversations {
                 local: local.clone(),
                 remote_model: remote_model.clone(),
                 remote: conv.remote(),
+                mode: Some(conv.mode()),
             },
         );
         for (key, model) in [(LAST_LOCAL_MODEL, local), (LAST_REMOTE_MODEL, remote_model)] {
@@ -212,7 +239,9 @@ impl Conversations {
     /// for loading that model on start. Not a conversation: never stored,
     /// never sent a turn.
     pub fn preferred(&self, orch: &Orchestrator) -> Arc<Conversation> {
-        Conversation::restore(String::new(), orch.starts_remote(), self.last_models())
+        let conv = Conversation::restore(String::new(), orch.starts_remote(), self.last_models());
+        conv.set_mode(orch.default_mode());
+        conv
     }
 
     /// The conversations in use since the daemon started: `/prune` leaves

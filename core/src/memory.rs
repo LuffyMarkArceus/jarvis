@@ -9,6 +9,13 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+/// A mode setting's name as serde spells it ("allow_all").
+fn name_of<T: Serialize>(value: &T) -> Option<String> {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|v| v.as_str().map(String::from))
+}
+
 /// A conversation's stored settings: the model chosen on each tier (`None`:
 /// the tier's default) and whether it is on the remote tier.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -16,6 +23,8 @@ pub struct ConversationSettings {
     pub local: Option<String>,
     pub remote_model: Option<String>,
     pub remote: bool,
+    /// `None`: stored before modes (6.6), so the configured default.
+    pub mode: Option<crate::modes::Mode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,6 +168,16 @@ impl MemoryManager {
             )
             .map_err(|e| JarvisError::Memory(format!("Migration failed: {}", e)))?;
         }
+        // 6.6: a conversation's mode; NULL until it is saved with one.
+        for (column, kind) in [
+            ("autonomy", "TEXT"),
+            ("approval", "TEXT"),
+            ("sandbox", "INTEGER"),
+        ] {
+            if !has("sessions", column)? {
+                migrate(&format!("ALTER TABLE sessions ADD COLUMN {column} {kind}"))?;
+            }
+        }
         Ok(())
     }
 
@@ -204,13 +223,29 @@ impl MemoryManager {
     pub fn session_settings(&self, session_id: &str) -> Result<Option<ConversationSettings>> {
         let conn = self.conn.lock().unwrap();
         let row = conn.query_row(
-            "SELECT model, remote_model, remote FROM sessions WHERE id = ?1",
+            "SELECT model, remote_model, remote, autonomy, approval, sandbox FROM sessions WHERE id = ?1",
             params![session_id],
             |row| {
+                let autonomy: Option<String> = row.get(3)?;
+                let approval: Option<String> = row.get(4)?;
+                let sandbox: Option<i64> = row.get(5)?;
+                let autonomy = autonomy
+                    .and_then(|t| serde_json::from_value(serde_json::Value::String(t)).ok());
+                let approval = approval
+                    .and_then(|t| serde_json::from_value(serde_json::Value::String(t)).ok());
+                let mode = match (autonomy, approval, sandbox) {
+                    (Some(autonomy), Some(approval), Some(sandbox)) => Some(crate::modes::Mode {
+                        autonomy,
+                        approval,
+                        sandbox: sandbox != 0,
+                    }),
+                    _ => None,
+                };
                 Ok(ConversationSettings {
                     local: row.get(0)?,
                     remote_model: row.get(1)?,
                     remote: row.get::<_, i64>(2)? != 0,
+                    mode,
                 })
             },
         );
@@ -228,12 +263,16 @@ impl MemoryManager {
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE sessions SET model = ?2, remote_model = ?3, remote = ?4 WHERE id = ?1",
+            "UPDATE sessions SET model = ?2, remote_model = ?3, remote = ?4,
+                 autonomy = ?5, approval = ?6, sandbox = ?7 WHERE id = ?1",
             params![
                 session_id,
                 settings.local,
                 settings.remote_model,
-                settings.remote as i64
+                settings.remote as i64,
+                settings.mode.map(|m| name_of(&m.autonomy)),
+                settings.mode.map(|m| name_of(&m.approval)),
+                settings.mode.map(|m| m.sandbox as i64),
             ],
         )
         .map(|_| ())

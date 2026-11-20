@@ -276,6 +276,11 @@ impl Orchestrator {
         Conversation::new(id, self.starts_remote())
     }
 
+    /// The mode a new conversation starts in (`[modes]`).
+    pub fn default_mode(&self) -> crate::modes::Mode {
+        crate::modes::Mode::from_config(&self.config.modes)
+    }
+
     /// Whether a new conversation starts on the remote tier: only when one
     /// exists and `[remote] default` is set.
     pub fn starts_remote(&self) -> bool {

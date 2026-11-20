@@ -229,6 +229,7 @@ fn an_old_row_with_a_remote_model_loads() {
                 local: None,
                 remote_model: Some("nvidia/nemotron-3-ultra-550b-a55b:free".into()),
                 remote: true,
+                mode: None,
             })
         );
         assert_eq!(
@@ -323,4 +324,40 @@ fn an_unknown_conversation_is_an_error() {
         .expect("an error")
         .to_string();
     assert!(err.contains("nope"), "{err}");
+}
+
+#[test]
+fn a_conversations_mode_survives_a_restart() {
+    use jarvis_core::modes::{Approval, Autonomy, Mode};
+    let s = setup();
+    let convs = registry(&s);
+    let conv = convs.create(&s.jarvis);
+    let chosen = Mode {
+        autonomy: Autonomy::Autopilot,
+        approval: Approval::Assisted,
+        sandbox: false,
+    };
+    conv.set_mode(chosen);
+    convs.saved(&conv);
+    assert_eq!(registry(&s).get(&conv.id).unwrap().mode(), chosen);
+}
+
+#[test]
+fn a_new_conversation_takes_the_configured_mode() {
+    use jarvis_core::modes::{Approval, Autonomy};
+    let mut s = setup();
+    s.config.modes.approval = Approval::Assisted;
+    s.config.modes.autonomy = Autonomy::Plan;
+    let permissions =
+        PermissionManager::with_paths(s.dir.join("permissions.toml"), s.dir.join("audit.db"))
+            .unwrap();
+    s.jarvis = Orchestrator::with_parts(
+        s.config.clone(),
+        Arc::new(RecordingProvider::replying("local answer")),
+        permissions,
+    );
+    let conv = registry(&s).create(&s.jarvis);
+    assert_eq!(conv.mode().approval, Approval::Assisted);
+    assert_eq!(conv.mode().autonomy, Autonomy::Plan);
+    assert!(conv.mode().sandbox);
 }

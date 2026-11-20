@@ -543,3 +543,41 @@ async fn the_marker_is_released_when_a_turn_fails() {
     let again = a.in_mine("ask", json!({ "prompt": "hello" })).await;
     assert!(again.ok, "{:?}", again.error);
 }
+
+#[tokio::test]
+async fn a_mode_change_stays_in_its_conversation() {
+    let home = fresh().await;
+    let mut a = Window::open(&home).await;
+    let mut b = Window::open(&home).await;
+    let set = a
+        .in_mine("mode.set", json!({ "approval": "assisted" }))
+        .await;
+    assert!(set.ok, "{:?}", set.error);
+    assert_eq!(
+        set.result.as_ref().unwrap()["mode_label"],
+        "Interactive · Assisted · Sandbox on"
+    );
+    let a_session = a.session.clone();
+    let shown_a = a
+        .in_mine("session.show", json!({ "session_id": a_session }))
+        .await;
+    assert_eq!(shown_a.result.unwrap()["mode"]["approval"], "assisted");
+    let b_session = b.session.clone();
+    let shown_b = b
+        .in_mine("session.show", json!({ "session_id": b_session }))
+        .await;
+    assert_eq!(shown_b.result.unwrap()["mode"]["approval"], "manual");
+    let status = a.call("status", json!({})).await.result.unwrap();
+    assert_eq!(status["mode_label"], "Interactive · Manual · Sandbox on");
+    let bad = a.in_mine("mode.set", json!({ "approval": "yolo" })).await;
+    assert!(!bad.ok);
+}
+
+#[tokio::test]
+async fn a_new_window_is_told_its_mode() {
+    let home = fresh().await;
+    let mut a = Window::open(&home).await;
+    let new = a.call("session.new", json!({})).await.result.unwrap();
+    assert_eq!(new["mode"]["autonomy"], "interactive");
+    assert_eq!(new["mode_label"], "Interactive · Manual · Sandbox on");
+}
