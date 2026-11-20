@@ -82,13 +82,20 @@ conversation its window did not show.
   with messages, or updating any message, fail.
 * [Design](superpowers/specs/2026-11-18-conversation-isolation-design.md).
 
-## Milestone 6.5b - turns in parallel (next)
+## Milestone 6.5b - turns in parallel (done, 2026-11-20)
 
 Two conversations at once: a quick question must not wait for a long one.
-Shared services behind short locks instead of one lock per turn, and one GPU
-queue that says it is waiting. Spec first.
 
-## Milestone 6.6 - modes
+* No lock held for a turn: a window at a prompt no longer freezes the others.
+  One turn at a time per conversation.
+* The local lane: `[model] slots` local calls at once, first come first
+  served, saying it waits and cancellable while waiting.
+* A busy GPU spills a turn to the remote tier after `spill_after` seconds
+  (`spill = auto | ask | never`), with a notice and the egress check.
+* New conversations start local; a model choice per tier.
+* [Spec](superpowers/specs/2026-11-19-parallel-turns-design.md).
+
+## Milestone 6.6 - modes (next)
 
 Autonomy (Plan / Interactive / Autopilot), approval (Manual / Assisted /
 Allow all) and the sandbox, per conversation. Assisted approves what can be
