@@ -36,6 +36,8 @@ pub struct Conversation {
     answering: AtomicBool,
     /// Autonomy, approval and the sandbox (Milestone 6.6).
     mode: Mutex<Mode>,
+    /// What Autopilot left for `/approve`.
+    deferred: Mutex<Vec<Deferred>>,
 }
 
 /// A conversation's settings at one moment: a turn takes them when it
@@ -47,6 +49,17 @@ pub struct Pinned {
     pub chosen: [Option<String>; 2],
     /// Its mode (Milestone 6.6).
     pub mode: Mode,
+}
+
+/// An action Autopilot did not take because it needed the owner's yes,
+/// kept for `/approve` until the next turn starts.
+#[derive(Debug, Clone)]
+pub struct Deferred {
+    pub name: String,
+    pub args: serde_json::Value,
+    pub why: String,
+    /// What its turn had read that the owner has not vouched for.
+    pub untrusted: Vec<crate::taint::Source>,
 }
 
 /// Held while a conversation answers; dropping it (however the turn ends)
@@ -73,6 +86,7 @@ impl Conversation {
             last_turn: Mutex::new(None),
             answering: AtomicBool::new(false),
             mode: Mutex::new(Mode::default()),
+            deferred: Mutex::new(Vec::new()),
         })
     }
 
@@ -103,6 +117,20 @@ impl Conversation {
             chosen: self.chosen(),
             mode: self.mode(),
         }
+    }
+
+    /// What is waiting for `/approve`, in order.
+    pub fn deferred(&self) -> Vec<Deferred> {
+        self.deferred.lock().unwrap().clone()
+    }
+
+    pub(crate) fn defer(&self, action: Deferred) {
+        self.deferred.lock().unwrap().push(action);
+    }
+
+    /// Replace what is waiting (`/approve` keeps what it could not run).
+    pub(crate) fn set_deferred(&self, actions: Vec<Deferred>) {
+        *self.deferred.lock().unwrap() = actions;
     }
 
     pub fn mode(&self) -> Mode {

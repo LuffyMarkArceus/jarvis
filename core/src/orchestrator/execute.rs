@@ -1,6 +1,7 @@
 //! Running a tool call: the web check, the permission and untrusted-content gates, undo.
 
 use super::*;
+use crate::conversation::Deferred;
 use crate::modes::{decide, Approval, Call, Change, Decision, Mode};
 
 /// The real arguments, when a model nested them inside an echo of the tool
@@ -455,11 +456,39 @@ impl Orchestrator {
                     pattern: verdict.pattern,
                 }
             }
-            Decision::Ask | Decision::Defer(_) if !untrusted.is_empty() => {
+            Decision::Defer(why) => {
+                let msg = format!(
+                    "Not done yet: {} needs the owner's yes, so it waits for /approve (Autopilot). Carry on with the rest of the task. Args: {}",
+                    name,
+                    compact_args(&args)
+                );
+                let _ = self.permissions.log_audit(
+                    Some(&conv.id),
+                    &name,
+                    &args,
+                    "deferred",
+                    Some(&msg),
+                );
+                conv.defer(Deferred {
+                    name: name.clone(),
+                    args: args.clone(),
+                    why,
+                    untrusted: untrusted.to_vec(),
+                });
+                ToolOutcome {
+                    name,
+                    args,
+                    status: OutcomeStatus::Deferred,
+                    output: msg,
+                    result: None,
+                    pattern: verdict.pattern,
+                }
+            }
+            Decision::Ask if !untrusted.is_empty() => {
                 self.ask_after_untrusted(conv, name, args, confirm, untrusted, verdict.pattern)
                     .await
             }
-            Decision::Ask | Decision::Defer(_) => match confirm {
+            Decision::Ask => match confirm {
                 Some(handler) => {
                     if handler.confirm(&name, &args).await {
                         self.run_tool(conv, name, args, "confirmed", verdict.pattern)

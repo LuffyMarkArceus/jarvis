@@ -14,6 +14,22 @@ pub(super) fn recalled_label(result: &memory::RecallResult) -> Label {
 ///
 /// The blank line keeps it visually separate from the instructions above;
 /// without it a small model reads the remembered text as another rule.
+/// How the mode asks the model to behave (6.6).
+pub(super) fn mode_line(mode: &crate::modes::Mode) -> &'static str {
+    use crate::modes::Autonomy;
+    match mode.autonomy {
+        Autonomy::Plan => "Plan mode: you may look but not change anything. Answer with a numbered plan of the steps you would take.",
+        Autonomy::Interactive => "If the request is ambiguous, ask one short question instead of guessing.",
+        Autonomy::Autopilot => "You are on Autopilot: do not ask questions; choose sensible defaults, say what you assumed, and carry the task to the end.",
+    }
+}
+
+fn with_mode_line(mut prompt: String, mode: &crate::modes::Mode) -> String {
+    prompt.push('\n');
+    prompt.push_str(mode_line(mode));
+    prompt
+}
+
 /// A system prompt with recall added, and where the recalled text came
 /// from; `spill` is the same for a request a busy GPU sends remote.
 pub(super) struct Recalled {
@@ -242,6 +258,7 @@ impl Orchestrator {
         input: &str,
         prompt: String,
     ) -> Recalled {
+        let prompt = with_mode_line(prompt, &rec.pinned.mode);
         let remote = destination_of(&self.turn_tier(rec).0).is_remote();
         let spill = self.can_spill(rec).then(|| {
             let (block, label) = self

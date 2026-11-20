@@ -135,28 +135,16 @@ pub const PLAN_REFUSAL: &str = "Plan mode changes nothing; /go to carry out the 
 
 /// The decision for `call` under `mode`.
 pub fn decide(mode: &Mode, call: &Call) -> Decision {
-    // 1-3: the protections, before any mode.
-    if call.rule == PermissionAction::Deny {
-        return Decision::Refuse("denied by your permission rules".into());
-    }
-    if call.change == Change::Outside && call.untrusted {
-        return Decision::Refuse(
-            "nothing runs outside the sandbox after content you have not marked as trusted".into(),
-        );
-    }
-    if call.change == Change::Outside && !call.allow_outside {
-        return Decision::Refuse(
-            "running outside the sandbox is switched off ([sandbox] allow_outside)".into(),
-        );
+    if let Some(why) = protections(mode, call) {
+        return Decision::Refuse(why);
     }
     let read_only = call.sandbox_ready && mode.sandbox;
     let looks = Change::Shell { writes: false };
-    // 4: Plan changes nothing; its shell only looks, read-only.
+    // Plan changes nothing (refused above); its shell only looks.
     if mode.autonomy == Autonomy::Plan {
         return match call.change {
-            Change::None => verdict(mode, call.rule),
-            c if c == looks && read_only => Decision::RunReadOnly,
-            _ => Decision::Refuse(PLAN_REFUSAL.into()),
+            c if c == looks => Decision::RunReadOnly,
+            _ => verdict(mode, call.rule),
         };
     }
     // Outside the sandbox asks even where the rule allows (as before 6.6);
@@ -184,6 +172,32 @@ pub fn decide(mode: &Mode, call: &Call) -> Decision {
         }
     }
     verdict(mode, call.rule)
+}
+
+/// What no mode can reach, for a call: deny; outside the sandbox after
+/// untrusted content, or when switched off; and in Plan, any change. Also
+/// what `/approve` checks again - the owner's yes covers the rest.
+pub fn protections(mode: &Mode, call: &Call) -> Option<String> {
+    if call.rule == PermissionAction::Deny {
+        return Some("denied by your permission rules".into());
+    }
+    if call.change == Change::Outside && call.untrusted {
+        return Some(
+            "nothing runs outside the sandbox after content you have not marked as trusted".into(),
+        );
+    }
+    if call.change == Change::Outside && !call.allow_outside {
+        return Some(
+            "running outside the sandbox is switched off ([sandbox] allow_outside)".into(),
+        );
+    }
+    let read_only = call.sandbox_ready && mode.sandbox;
+    let looks = call.change == Change::None
+        || (call.change == Change::Shell { writes: false } && read_only);
+    if mode.autonomy == Autonomy::Plan && !looks {
+        return Some(PLAN_REFUSAL.into());
+    }
+    None
 }
 
 /// A rule's verdict as it stands; 7: Autopilot does not ask, it defers.

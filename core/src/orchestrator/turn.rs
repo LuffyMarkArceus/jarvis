@@ -202,12 +202,16 @@ impl Orchestrator {
             }
         }
 
-        let max_rounds = self
-            .turn_tier(rec)
-            .0
-            .max_rounds
-            .unwrap_or(DEFAULT_MAX_ROUNDS)
-            .max(1);
+        // Autopilot carries the task to the end: a larger budget (6.6).
+        let max_rounds = if rec.pinned.mode.autonomy == crate::modes::Autonomy::Autopilot {
+            self.config.modes.autopilot_rounds
+        } else {
+            self.turn_tier(rec)
+                .0
+                .max_rounds
+                .unwrap_or(DEFAULT_MAX_ROUNDS)
+        }
+        .max(1);
         let mut seen: std::collections::HashSet<String> =
             trace.iter().map(|o| call_key(&o.name, &o.args)).collect();
         for _ in 0..max_rounds {
@@ -458,6 +462,9 @@ impl Orchestrator {
 
     /// Turn a single tool outcome into the user-facing answer.
     pub(super) fn answer_from_outcome(&self, outcome: &ToolOutcome) -> String {
+        if outcome.status == OutcomeStatus::Deferred {
+            return "Not done yet: it needs your yes.".to_string();
+        }
         if outcome.status.is_blocked() {
             return render_blocked_report(std::slice::from_ref(outcome));
         }

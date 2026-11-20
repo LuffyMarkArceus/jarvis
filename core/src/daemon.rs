@@ -107,6 +107,24 @@ impl Daemon {
         Ok((conv.id.clone(), model, conv.remote()))
     }
 
+    /// `/approve`: run, list or drop what Autopilot left in a conversation.
+    /// It takes the conversation's turn, like a question does. Returns the
+    /// text and how many are still waiting.
+    pub async fn approve(
+        &self,
+        session: &str,
+        which: crate::orchestrator::Approve,
+    ) -> Result<(String, usize)> {
+        let conv = self.conversation(session)?;
+        let Some(_answering) = conv.begin_turn() else {
+            return Err(JarvisError::Busy(
+                "This conversation is answering another question. Wait for it, or open another with /new.".into(),
+            ));
+        };
+        let text = self.orchestrator.approve(&conv, which).await?;
+        Ok((text, conv.deferred().len()))
+    }
+
     /// A conversation's mode.
     pub fn mode_of(&self, session: &str) -> Result<crate::modes::Mode> {
         Ok(self.conversation(session)?.mode())

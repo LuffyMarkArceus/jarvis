@@ -80,6 +80,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+mod autopilot;
 mod execute;
 mod gateway;
 mod outcome;
@@ -94,6 +95,7 @@ use render::*;
 use turn::*;
 use turnlog::*;
 
+pub use autopilot::Approve;
 use outcome::*;
 pub use outcome::{
     footer, route_label, ModelTiming, ToolCallRecord, ToolTiming, TurnReport, TurnTiming,
@@ -570,10 +572,19 @@ impl Orchestrator {
         // Measured here, around everything, so every way a turn ends -
         // answered, cancelled, failed - is logged with its timing.
         let started = std::time::Instant::now();
-        let timed = confirm.map(TimedConfirm::new);
-        let confirm = timed.as_ref().map(|t| t as &dyn ConfirmationHandler);
         let mut rec = TurnRecorder::new(conv);
         rec.progress = progress.cloned();
+        // Autopilot never prompts: whatever would, is answered no and listed.
+        let no_prompts = autopilot::NoPrompts {
+            not_done: &rec.not_done,
+        };
+        let confirm = if rec.pinned.mode.autonomy == crate::modes::Autonomy::Autopilot {
+            Some(&no_prompts as &dyn ConfirmationHandler)
+        } else {
+            confirm
+        };
+        let timed = confirm.map(TimedConfirm::new);
+        let confirm = timed.as_ref().map(|t| t as &dyn ConfirmationHandler);
         let result = self
             .run_turn_inner(conv, input, confirm, cancel, sink, &rec)
             .await;
@@ -622,6 +633,10 @@ impl Orchestrator {
 
         // Bound the log line: a pasted document should not fill the log.
         info!("Processing: {}", context::truncate_with_marker(input, 200));
+
+        // What the last turn left for /approve is about that turn, not this
+        // one (6.6).
+        conv.set_deferred(Vec::new());
 
         // Snapshot history *before* persisting the new user message so the
         // prompt never contains the request twice.
@@ -693,7 +708,13 @@ impl Orchestrator {
             .unwrap()
             .iter()
             .any(|c| c.status == "executed");
-        let answer = taint::scrub_markers(&answer, ran);
+        let mut answer = taint::scrub_markers(&answer, ran);
+        if rec.pinned.mode.autonomy == crate::modes::Autonomy::Autopilot {
+            let not_done = rec.not_done.lock().unwrap().clone();
+            if let Some(report) = autopilot::report(&conv.deferred(), &not_done) {
+                answer = format!("{}\n\n{}", answer.trim_end(), report.trim_end());
+            }
+        }
         let model = rec
             .used
             .lock()

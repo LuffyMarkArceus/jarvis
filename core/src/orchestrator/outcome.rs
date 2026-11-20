@@ -20,6 +20,9 @@ pub(super) enum OutcomeStatus {
     /// An action the model asked for after reading untrusted content, with
     /// nobody to ask. `output` names the sources.
     Untrusted,
+    /// Autopilot did not take it: it needs the owner's yes, and waits for
+    /// `/approve`. Not blocked: the turn carries on with the rest.
+    Deferred,
 }
 
 impl OutcomeStatus {
@@ -47,6 +50,7 @@ impl OutcomeStatus {
             OutcomeStatus::Untrusted => {
                 "not run: it followed untrusted content and nobody could be asked"
             }
+            OutcomeStatus::Deferred => "waiting for /approve",
         }
     }
 }
@@ -211,6 +215,8 @@ pub(super) struct TurnRecorder<'c> {
     pub(super) spilled: std::sync::atomic::AtomicBool,
     /// A spill could not send what it had to: no more spills this turn.
     pub(super) spill_withheld: std::sync::atomic::AtomicBool,
+    /// Prompts an Autopilot turn answered no to, because it never prompts.
+    pub(super) not_done: std::sync::Mutex<Vec<String>>,
 }
 
 impl<'c> TurnRecorder<'c> {
@@ -234,6 +240,7 @@ impl<'c> TurnRecorder<'c> {
             pinned: conversation.pin(),
             spilled: Default::default(),
             spill_withheld: Default::default(),
+            not_done: Default::default(),
         }
     }
 
@@ -467,5 +474,6 @@ pub(super) fn status_label(status: &OutcomeStatus) -> &'static str {
         OutcomeStatus::NeedsConfirmation => "needs_confirmation",
         OutcomeStatus::Withheld => "withheld",
         OutcomeStatus::Untrusted => "untrusted",
+        OutcomeStatus::Deferred => "deferred",
     }
 }

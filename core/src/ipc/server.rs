@@ -394,6 +394,41 @@ async fn handle_request(
             request.id,
             serde_json::json!({ "session_id": daemon.last_session() }),
         ),
+        "approve" => {
+            let session = match session_of(&request) {
+                Ok(s) => s,
+                Err(r) => return r,
+            };
+            use crate::orchestrator::Approve;
+            let which = match request.params.get("which") {
+                None => Approve::List,
+                Some(Value::Number(n)) => Approve::One(n.as_u64().unwrap_or(0) as usize),
+                Some(Value::String(w)) => match w.as_str() {
+                    "list" | "" => Approve::List,
+                    "all" => Approve::All,
+                    "none" => Approve::None,
+                    n => match n.parse::<usize>() {
+                        Ok(n) => Approve::One(n),
+                        Err(_) => {
+                            return Response::err(
+                                request.id,
+                                format!("'{n}' is not something /approve knows: all, none, a number, or nothing to list"),
+                            )
+                        }
+                    },
+                },
+                Some(other) => {
+                    return Response::err(request.id, format!("{other} is not something /approve knows"))
+                }
+            };
+            match daemon.approve(&session, which).await {
+                Ok((text, remaining)) => Response::ok(
+                    request.id,
+                    serde_json::json!({ "text": text, "remaining": remaining }),
+                ),
+                Err(e) => Response::err(request.id, e.to_string()),
+            }
+        }
         "mode.set" => {
             let session = match session_of(&request) {
                 Ok(s) => s,

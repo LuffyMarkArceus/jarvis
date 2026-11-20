@@ -581,3 +581,20 @@ async fn a_new_window_is_told_its_mode() {
     assert_eq!(new["mode"]["autonomy"], "interactive");
     assert_eq!(new["mode_label"], "Interactive · Manual · Sandbox on");
 }
+
+#[tokio::test]
+async fn approve_is_a_conversation_request() {
+    let home = fresh().await;
+    let mut a = Window::open(&home).await;
+    let listed = a.in_mine("approve", json!({ "which": "list" })).await;
+    assert!(listed.ok, "{:?}", listed.error);
+    assert_eq!(
+        listed.result.as_ref().unwrap()["text"],
+        "Nothing is waiting for /approve."
+    );
+    assert_eq!(listed.result.unwrap()["remaining"], 0);
+    let bad = a.in_mine("approve", json!({ "which": "some" })).await;
+    assert!(!bad.ok);
+    let no_session = a.call("approve", json!({ "which": "all" })).await;
+    assert!(!no_session.ok);
+}

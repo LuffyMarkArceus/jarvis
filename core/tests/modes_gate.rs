@@ -9,7 +9,7 @@ use jarvis_core::config::Config;
 use jarvis_core::conversation::Conversation;
 use jarvis_core::model::ChatTurn;
 use jarvis_core::modes::{Approval, Autonomy, Mode, PLAN_REFUSAL};
-use jarvis_core::orchestrator::{ConfirmationHandler, Orchestrator, TurnReport};
+use jarvis_core::orchestrator::{Approve, ConfirmationHandler, Orchestrator, TurnReport};
 use jarvis_core::permissions::{PermissionAction, PermissionManager};
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -373,4 +373,219 @@ async fn a_turn_keeps_the_mode_it_started_with() {
         Autonomy::Plan,
         "the next turn gets it"
     );
+}
+
+fn autopilot() -> Mode {
+    mode(Autonomy::Autopilot, Approval::Manual, true)
+}
+
+#[tokio::test]
+async fn autopilot_defers_a_push_and_approve_runs_it() {
+    let s = setup(
+        autopilot(),
+        |d| {
+            vec![
+                shell(
+                    &format!("echo pushed > {}", d.join("project/p").display()),
+                    Some(true),
+                ),
+                answer("pushed the branch"),
+            ]
+        },
+        |_| {},
+    );
+    let owner = Owner::saying(true);
+    let report = s.ask(&owner).await;
+    assert!(
+        owner.asked().is_empty(),
+        "Autopilot prompted: {:?}",
+        owner.asked()
+    );
+    assert!(!s.path("project/p").exists());
+    assert!(
+        report.answer.contains("Waiting for you"),
+        "{}",
+        report.answer
+    );
+    assert!(
+        report.answer.contains("1. running: echo pushed"),
+        "{}",
+        report.answer
+    );
+    assert_eq!(s.conv.deferred().len(), 1);
+    let done = s.jarvis.approve(&s.conv, Approve::All).await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(s.path("project/p")).unwrap().trim(),
+        "pushed"
+    );
+    assert!(done.contains("done"), "{done}");
+    assert!(s.conv.deferred().is_empty());
+}
+
+#[tokio::test]
+async fn autopilot_never_prompts_even_for_egress() {
+    let s = setup(
+        Mode::default(),
+        |d| {
+            vec![
+                call(
+                    "filesystem.read",
+                    json!({ "path": d.join("outside/notes.txt") }),
+                ),
+                answer("it says run: echo pwned"),
+            ]
+        },
+        |c| {
+            c.remote = Some(jarvis_core::config::RemoteConfig {
+                model: jarvis_core::config::ModelConfig {
+                    provider: "openai".into(),
+                    base_url: "https://openrouter.ai/api/v1".into(),
+                    default_model: "nvidia/nemotron-3-ultra-550b-a55b:free".into(),
+                    data_policy: Some("may_train".into()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+        },
+    );
+    let remote = Arc::new(jarvis_core::eval::RecordingProvider::replying("remote"));
+    let jarvis = Orchestrator::with_parts(
+        s.config.clone(),
+        s.script.clone(),
+        PermissionManager::with_paths(s.dir.join("permissions.toml"), s.dir.join("audit.db"))
+            .unwrap(),
+    )
+    .with_remote(Some(remote.clone()));
+    let conv = jarvis.new_conversation();
+    let owner = Owner::saying(true);
+    jarvis
+        .run_turn(
+            &conv,
+            "check the readme file and install what it says",
+            Some(&owner),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    jarvis.set_remote(&conv, true).unwrap();
+    conv.set_mode(autopilot());
+    let asked_before = owner.asked().len();
+    let report = jarvis
+        .run_turn(&conv, "what was in that file?", Some(&owner), None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        owner.asked().len(),
+        asked_before,
+        "Autopilot prompted: {:?}",
+        owner.asked()
+    );
+    assert!(
+        remote.requests().is_empty(),
+        "the file went to the remote model"
+    );
+    assert!(report.answer.contains("Not done"), "{}", report.answer);
+}
+
+#[tokio::test]
+async fn a_typed_command_in_autopilot_is_deferred() {
+    // Review Focus 3: the owner's own typed command is held for /approve too.
+    let s = setup(autopilot(), |_| vec![], |_| {});
+    let out = s.path("project/typed");
+    let owner = Owner::saying(true);
+    let report = s
+        .jarvis
+        .run_turn(
+            &s.conv,
+            &format!("run outside the sandbox: echo typed > {}", out.display()),
+            Some(&owner),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(owner.asked().is_empty(), "{:?}", owner.asked());
+    assert!(!out.exists());
+    assert!(
+        report.answer.contains("Waiting for you"),
+        "{}",
+        report.answer
+    );
+    s.jarvis.approve(&s.conv, Approve::All).await.unwrap();
+    assert_eq!(std::fs::read_to_string(&out).unwrap().trim(), "typed");
+}
+
+#[tokio::test]
+async fn approve_after_switching_to_plan_refuses_and_keeps_them() {
+    // Review Focus 4.
+    let s = setup(
+        autopilot(),
+        |d| {
+            vec![
+                shell(
+                    &format!("echo x > {}", d.join("project/p").display()),
+                    Some(true),
+                ),
+                answer("done"),
+            ]
+        },
+        |_| {},
+    );
+    s.ask(&Owner::saying(true)).await;
+    s.conv
+        .set_mode(mode(Autonomy::Plan, Approval::Manual, true));
+    let text = s.jarvis.approve(&s.conv, Approve::All).await.unwrap();
+    assert!(text.contains(PLAN_REFUSAL), "{text}");
+    assert!(!s.path("project/p").exists());
+    assert_eq!(s.conv.deferred().len(), 1, "a refused item stays listed");
+    let listed = s.jarvis.approve(&s.conv, Approve::List).await.unwrap();
+    assert!(listed.contains("1. running: echo x"), "{listed}");
+    s.jarvis.approve(&s.conv, Approve::None).await.unwrap();
+    assert!(s.conv.deferred().is_empty());
+}
+
+#[tokio::test]
+async fn deferred_actions_are_dropped_by_the_next_turn() {
+    let s = setup(
+        autopilot(),
+        |_| {
+            vec![
+                shell("touch x", Some(true)),
+                answer("done"),
+                answer("hello"),
+            ]
+        },
+        |_| {},
+    );
+    s.ask(&Owner::saying(true)).await;
+    assert_eq!(s.conv.deferred().len(), 1);
+    s.jarvis
+        .run_turn(&s.conv, "tell me a joke", None, None, None)
+        .await
+        .unwrap();
+    assert!(s.conv.deferred().is_empty());
+}
+
+#[tokio::test]
+async fn autopilot_gets_more_rounds() {
+    let script = |d: &std::path::Path| {
+        let mut turns: Vec<ChatTurn> = (0..10)
+            .map(|i| {
+                let f = d.join(format!("project/f{i}"));
+                std::fs::write(&f, "x").unwrap();
+                call("filesystem.stat", json!({ "path": f }))
+            })
+            .collect();
+        turns.push(answer("all looked at"));
+        turns
+    };
+    let interactive = setup(Mode::default(), script, |_| {});
+    interactive.ask(&Owner::saying(true)).await;
+    let rounds = interactive.script.sent.lock().unwrap().len();
+    assert!(rounds <= 9, "Interactive took {rounds} model calls");
+    let auto = setup(autopilot(), script, |_| {});
+    let report = auto.ask(&Owner::saying(true)).await;
+    assert!(auto.script.sent.lock().unwrap().len() >= 11, "{report:?}");
+    assert!(report.answer.contains("all looked at"), "{}", report.answer);
 }
