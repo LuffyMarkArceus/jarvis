@@ -336,3 +336,25 @@ async fn an_answer_never_shows_our_untrusted_marker() {
         report.answer
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_turns_keep_every_log_line_whole() {
+    let s = setup(vec![]);
+    let jarvis = Arc::new(rebuild(&s, vec![answer("hello there")]));
+    let mut tasks = Vec::new();
+    for i in 0..8 {
+        let jarvis = jarvis.clone();
+        tasks.push(tokio::spawn(async move {
+            let conv = jarvis.new_conversation();
+            jarvis
+                .run_turn(&conv, &format!("tell me joke number {i}"), None, None, None)
+                .await
+                .unwrap();
+        }));
+    }
+    for task in tasks {
+        task.await.unwrap();
+    }
+    // `lines()` parses every line: a torn one fails here.
+    assert_eq!(s.lines().len(), 8);
+}

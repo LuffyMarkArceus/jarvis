@@ -3,18 +3,17 @@
 use crate::cancel::Cancellation;
 use crate::config::Config;
 use crate::conversation::{Conversation, Conversations};
-use crate::error::Result;
+use crate::error::{JarvisError, Result};
 use crate::memory::{MemoryManager, MemoryStats, RecallResult, SessionInfo};
 use crate::orchestrator::{ConfirmationHandler, Orchestrator};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::Mutex;
 use tracing::info;
 
 #[derive(Clone)]
 pub struct Daemon {
-    orchestrator: Arc<Mutex<Orchestrator>>,
+    orchestrator: Arc<Orchestrator>,
     /// Every conversation, by id. Each request names the one it is for.
     conversations: Arc<Conversations>,
     config: Config,
@@ -33,7 +32,7 @@ impl Daemon {
     pub fn with_orchestrator(config: Config, orchestrator: Orchestrator) -> Result<Self> {
         let memory = MemoryManager::new(config.clone())?;
         Ok(Self {
-            orchestrator: Arc::new(Mutex::new(orchestrator)),
+            orchestrator: Arc::new(orchestrator),
             conversations: Arc::new(Conversations::new(memory.clone())),
             config,
             memory: Some(memory),
@@ -56,7 +55,12 @@ impl Daemon {
         progress: Option<&UnboundedSender<String>>,
     ) -> Result<(String, String, crate::orchestrator::TurnTiming)> {
         let conv = self.conversation(session)?;
-        let orch = self.orchestrator.lock().await;
+        let Some(_answering) = conv.begin_turn() else {
+            return Err(JarvisError::Busy(
+                "This conversation is answering another question. Wait for it, or open another with /new.".into(),
+            ));
+        };
+        let orch = &self.orchestrator;
         let session_id = conv.id.clone();
         self.conversations.used(&conv);
         let (result, footer, timing) = orch
@@ -94,8 +98,8 @@ impl Daemon {
     /// The conversation requests go to now.
     /// A new conversation, on the model used last: `(id, model, remote)`.
     pub async fn new_session(&self) -> Result<(String, String, bool)> {
-        let orch = self.orchestrator.lock().await;
-        let conv = self.conversations.create(&orch);
+        let orch = &self.orchestrator;
+        let conv = self.conversations.create(orch);
         let (_, model, _) = orch.model_info(&conv);
         Ok((conv.id.clone(), model, conv.remote()))
     }
@@ -114,6 +118,14 @@ impl Daemon {
     }
 
     pub async fn delete_session(&self, session_id: &str) -> Result<()> {
+        if self
+            .conversation(session_id)
+            .is_ok_and(|conv| conv.answering())
+        {
+            return Err(JarvisError::Busy(format!(
+                "Conversation {session_id} is answering a question; delete it after."
+            )));
+        }
         if let Some(ref mem) = self.memory {
             mem.delete_session(session_id)?;
         }
@@ -178,21 +190,21 @@ impl Daemon {
     }
 
     pub async fn list_tools(&self) -> Vec<String> {
-        let orch = self.orchestrator.lock().await;
+        let orch = &self.orchestrator;
         orch.list_tools()
     }
 
     /// `(provider, model, base_url)` a conversation's turns go to.
     pub async fn model_info(&self, session: &str) -> Result<(String, String, String)> {
         let conv = self.conversation(session)?;
-        let orch = self.orchestrator.lock().await;
+        let orch = &self.orchestrator;
         let (provider, model, url) = orch.model_info(&conv);
         Ok((provider.to_string(), model, url))
     }
 
     /// What a new conversation would start with, for `status`.
     pub async fn default_model(&self) -> (String, String, String) {
-        let orch = self.orchestrator.lock().await;
+        let orch = &self.orchestrator;
         let preferred = self.conversations.preferred();
         let (provider, model, url) = orch.model_info(&preferred);
         (provider.to_string(), model, url)
@@ -201,7 +213,7 @@ impl Daemon {
     /// Switch a conversation's tier; only that conversation changes.
     pub async fn set_remote(&self, session: &str, on: bool) -> Result<()> {
         let conv = self.conversation(session)?;
-        self.orchestrator.lock().await.set_remote(&conv, on)?;
+        self.orchestrator.set_remote(&conv, on)?;
         self.conversations.saved(&conv);
         Ok(())
     }
@@ -209,27 +221,27 @@ impl Daemon {
     /// `/bad` or `/good` about a conversation's last turn.
     pub async fn feedback(&self, session: &str, kind: &str, note: &str) -> Result<()> {
         let conv = self.conversation(session)?;
-        self.orchestrator.lock().await.feedback(&conv, kind, note)
+        self.orchestrator.feedback(&conv, kind, note)
     }
 
     /// Load a conversation's local model in the background (a window
     /// opening it is about to ask).
     pub async fn warm_up(&self, session: &str) {
         if let Ok(conv) = self.conversation(session) {
-            self.orchestrator.lock().await.warm_up(&conv);
+            self.orchestrator.warm_up(&conv);
         }
     }
 
     /// Load the model a new conversation would use (on start).
     pub async fn warm_up_default(&self) {
         let preferred = self.conversations.preferred();
-        self.orchestrator.lock().await.warm_up(&preferred);
+        self.orchestrator.warm_up(&preferred);
     }
 
     /// The models a conversation can switch to.
     pub async fn models(&self, session: &str) -> Result<Vec<crate::orchestrator::ModelChoice>> {
         let conv = self.conversation(session)?;
-        Ok(self.orchestrator.lock().await.models(&conv))
+        Ok(self.orchestrator.models(&conv))
     }
 
     /// Switch a conversation's model; only that conversation changes, and
@@ -240,7 +252,7 @@ impl Daemon {
         query: &str,
     ) -> Result<crate::orchestrator::ModelChoice> {
         let conv = self.conversation(session)?;
-        let chosen = self.orchestrator.lock().await.set_model(&conv, query)?;
+        let chosen = self.orchestrator.set_model(&conv, query)?;
         self.conversations.saved(&conv);
         Ok(chosen)
     }
@@ -248,24 +260,24 @@ impl Daemon {
     /// What a conversation trusts (`[t]`).
     pub async fn trusted(&self, session: &str) -> Result<Vec<String>> {
         let conv = self.conversation(session)?;
-        Ok(self.orchestrator.lock().await.trusted(&conv))
+        Ok(self.orchestrator.trusted(&conv))
     }
 
     pub async fn clear_trust(&self, session: &str) -> Result<()> {
         let conv = self.conversation(session)?;
-        self.orchestrator.lock().await.clear_trust(&conv);
+        self.orchestrator.clear_trust(&conv);
         Ok(())
     }
 
     pub async fn uses_remote(&self, session: &str) -> Result<bool> {
         let conv = self.conversation(session)?;
-        Ok(self.orchestrator.lock().await.uses_remote(&conv))
+        Ok(self.orchestrator.uses_remote(&conv))
     }
 
     /// The privacy notice for a conversation's tier.
     pub async fn privacy(&self, session: &str) -> Result<String> {
         let conv = self.conversation(session)?;
-        let orch = self.orchestrator.lock().await;
+        let orch = &self.orchestrator;
         Ok(orch.destination(&conv).notice().to_string())
     }
 
@@ -286,7 +298,7 @@ impl Daemon {
     /// The privacy notice for a new conversation's tier, for `status`.
     pub async fn default_privacy(&self) -> String {
         let preferred = self.conversations.preferred();
-        let orch = self.orchestrator.lock().await;
+        let orch = &self.orchestrator;
         orch.destination(&preferred).notice().to_string()
     }
 

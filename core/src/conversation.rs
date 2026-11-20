@@ -30,6 +30,19 @@ pub struct Conversation {
     chosen: Mutex<[Option<String>; 2]>,
     /// Its last logged turn, for `/bad` and spotting a rephrase.
     pub(crate) last_turn: Mutex<Option<LastTurn>>,
+    /// A turn is running: a conversation answers one question at a time,
+    /// or two windows on it would interleave its history (6.5b).
+    answering: AtomicBool,
+}
+
+/// Held while a conversation answers; dropping it (however the turn ends)
+/// lets it answer again.
+pub struct Answering(Arc<Conversation>);
+
+impl Drop for Answering {
+    fn drop(&mut self) {
+        self.0.answering.store(false, Ordering::Release);
+    }
 }
 
 impl Conversation {
@@ -44,7 +57,20 @@ impl Conversation {
             remote: AtomicBool::new(remote),
             chosen: Mutex::new(chosen),
             last_turn: Mutex::new(None),
+            answering: AtomicBool::new(false),
         })
+    }
+
+    /// Start a turn, or `None` if one is already running.
+    pub fn begin_turn(self: &Arc<Self>) -> Option<Answering> {
+        self.answering
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+            .then(|| Answering(self.clone()))
+    }
+
+    pub fn answering(&self) -> bool {
+        self.answering.load(Ordering::Acquire)
     }
 
     pub fn remote(&self) -> bool {

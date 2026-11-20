@@ -239,6 +239,13 @@ impl Orchestrator {
         }
     }
 
+    /// An orchestrator is shared by every turn at once (6.5b).
+    #[allow(dead_code)]
+    const SHARED: fn() = || {
+        fn shared<T: Send + Sync>() {}
+        shared::<Orchestrator>();
+    };
+
     /// Attach the `[remote]` tier's provider. New sessions start on it only
     /// if `[remote] default = true`.
     pub fn with_remote(mut self, client: Option<Arc<dyn Provider>>) -> Self {

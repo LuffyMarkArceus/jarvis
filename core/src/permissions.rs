@@ -312,6 +312,10 @@ fn deny_all() -> PermissionsConfig {
     }
 }
 
+/// Rule edits are read-modify-write of one file: two windows saving a rule
+/// at once must not lose one (6.5b).
+static RULES_FILE: Mutex<()> = Mutex::new(());
+
 #[derive(Debug, Clone)]
 pub struct PermissionManager {
     config_path: PathBuf,
@@ -440,6 +444,7 @@ impl PermissionManager {
 
     /// Set the action for a tool, adding a rule if the tool is not listed.
     pub fn set_rule(&self, tool: &str, action: PermissionAction) -> Result<()> {
+        let _edit = RULES_FILE.lock().unwrap_or_else(|e| e.into_inner());
         let mut config = self.load();
         match config.rules.iter_mut().find(|r| r.tool == tool) {
             Some(rule) => rule.action = action,
@@ -456,6 +461,7 @@ impl PermissionManager {
     ///
     /// Returns whether a rule was actually removed.
     pub fn remove_rule(&self, tool: &str) -> Result<bool> {
+        let _edit = RULES_FILE.lock().unwrap_or_else(|e| e.into_inner());
         let mut config = self.load();
         let before = config.rules.len();
         config.rules.retain(|r| r.tool != tool);

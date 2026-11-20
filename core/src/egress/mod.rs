@@ -316,7 +316,12 @@ pub fn allowed_folders(path: &Path) -> Vec<String> {
 }
 
 /// Add `folder` to the allow file. Returns false if it was already there.
+/// Edits of the allow file are read-modify-write: two windows saying
+/// "always allow" at once must not lose one (6.5b).
+static ALLOW_FILE_EDIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn allow_folder(path: &Path, folder: &str) -> Result<bool> {
+    let _edit = ALLOW_FILE_EDIT.lock().unwrap_or_else(|e| e.into_inner());
     let mut file = AllowFile {
         file_allow: allowed_folders(path),
     };
@@ -330,6 +335,7 @@ pub fn allow_folder(path: &Path, folder: &str) -> Result<bool> {
 
 /// Remove `folder` from the allow file. Returns false if it was not there.
 pub fn disallow_folder(path: &Path, folder: &str) -> Result<bool> {
+    let _edit = ALLOW_FILE_EDIT.lock().unwrap_or_else(|e| e.into_inner());
     let mut file = AllowFile {
         file_allow: allowed_folders(path),
     };

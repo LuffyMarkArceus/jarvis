@@ -127,6 +127,10 @@ impl Orchestrator {
     /// Append one line. Measuring must never break a turn: failures are
     /// logged and dropped.
     fn append_turn_log(&self, line: &Value) {
+        // Turns run at once (6.5b): one writer at a time, so a rotation
+        // cannot race an append and no line is torn.
+        static TURN_LOG: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _append = TURN_LOG.lock().unwrap_or_else(|e| e.into_inner());
         let path = self.turn_log_path();
         let write = || -> std::io::Result<()> {
             use std::io::Write as _;
