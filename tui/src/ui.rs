@@ -91,7 +91,27 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::bordered().title(" Conversation ");
     let inner = block.inner(area);
     let width = inner.width.max(1) as usize;
-    let lines = transcript_lines(&app.entries, width);
+    let mut lines = transcript_lines(&app.entries, width);
+    // What waits for the running turn: dim, at the end, as in T3 Code.
+    for queued in app.queue().into_iter().flatten() {
+        let what = if queued.steer {
+            "returned steer"
+        } else {
+            "queued"
+        };
+        lines.push(Line::raw(""));
+        for wrapped in wrap::wrap(
+            &format!("⋯ {what}: {}", queued.text),
+            width.saturating_sub(2).max(1),
+        ) {
+            lines.push(Line::styled(
+                format!("  {wrapped}"),
+                Style::new()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+            ));
+        }
+    }
 
     app.max_scroll = lines.len().saturating_sub(inner.height as usize);
     if app.scroll > app.max_scroll {
@@ -138,11 +158,22 @@ fn transcript_lines(entries: &[Entry], width: usize) -> Vec<Line<'static>> {
 }
 
 /// The keys that apply in the input box now.
-fn input_hint(app: &App) -> &'static str {
-    if app.keyboard_enhanced {
-        " Enter send · Shift+Enter newline · Ctrl+←/→ word "
+fn input_hint(app: &App) -> String {
+    let newline = if app.keyboard_enhanced {
+        "Shift+Enter"
     } else {
-        " Enter send · Alt+Enter newline · Ctrl+←/→ word "
+        "Alt+Enter"
+    };
+    let queued = app.queue().map_or(0, |q| q.len());
+    let queued = if queued > 0 {
+        format!("queued: {queued} · ")
+    } else {
+        String::new()
+    };
+    if app.is_busy() {
+        format!(" {queued}Enter queue · Ctrl+C cancel turn ")
+    } else {
+        format!(" {queued}Enter send · {newline} newline · Ctrl+←/→ word ")
     }
 }
 
@@ -495,6 +526,23 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn the_queue_shows_at_the_end_and_in_the_hint() {
+        let mut app = App::new("llama3.2:1b".into());
+        app.session_id = Some("abc".into());
+        app.queues
+            .entry("abc".into())
+            .or_default()
+            .push_back(crate::app::Queued {
+                id: uuid::Uuid::new_v4(),
+                text: "rename them too".into(),
+                steer: false,
+            });
+        let shown = screen(&mut app);
+        assert!(shown.contains("⋯ queued: rename them too"), "{shown}");
+        assert!(shown.contains("queued: 1"), "{shown}");
     }
 
     #[test]

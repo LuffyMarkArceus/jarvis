@@ -200,6 +200,10 @@ pub enum Command {
     Approve(String),
     /// `/go [auto]`: carry out the plan above.
     Go(String),
+    /// `/resume`: send this conversation's held queue (6.7a).
+    Resume,
+    /// `/queue`: what is queued in this conversation.
+    Queue,
     Clear,
     Quit,
     /// `/word` that is no command: shown as a mistake, not sent to the
@@ -286,6 +290,8 @@ pub fn parse_command(text: &str) -> Option<Command> {
         "/sandbox" => Command::Sandbox(rest),
         "/approve" => Command::Approve(rest),
         "/go" => Command::Go(rest),
+        "/resume" => Command::Resume,
+        "/queue" => Command::Queue,
         "/tools" => Command::Tools,
         "/session" => Command::Session,
         "/clear" => Command::Clear,
@@ -301,6 +307,15 @@ pub fn parse_command(text: &str) -> Option<Command> {
         }
         _ => return None,
     })
+}
+
+/// A message waiting to be sent after the running turn.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Queued {
+    pub id: Uuid,
+    pub text: String,
+    /// A steer that came back unused (6.7a).
+    pub steer: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -338,6 +353,10 @@ pub struct App {
     pub continue_last: bool,
     /// The terminal tells Shift+Enter (and Ctrl+Enter) from Enter.
     pub keyboard_enhanced: bool,
+    /// Messages typed while a turn ran, per conversation (6.7a).
+    pub queues: std::collections::HashMap<String, std::collections::VecDeque<Queued>>,
+    /// Conversations whose queue waits for `/resume`.
+    pub held: std::collections::HashSet<String>,
     /// The `/` menu's selected row, and whether Esc closed it.
     pub menu_selected: usize,
     menu_closed: bool,
@@ -378,6 +397,8 @@ impl App {
             last_timing: None,
             continue_last: false,
             keyboard_enhanced: false,
+            queues: Default::default(),
+            held: Default::default(),
             menu_selected: 0,
             menu_closed: false,
             mode_label: "Interactive · Manual · Sandbox on".into(),
@@ -518,6 +539,9 @@ impl App {
     }
 
     pub fn on_disconnected(&mut self, reason: String) {
+        if matches!(self.pending, Some(Pending::Turn)) {
+            self.hold_queue();
+        }
         self.state = DaemonState::Offline(reason.clone());
         self.pending = None;
         self.pending_id = None;
@@ -619,6 +643,17 @@ impl App {
             return self.run_command(command);
         }
 
+        // Typed while a turn runs: it waits its turn (6.7a).
+        if matches!(self.pending, Some(Pending::Turn)) {
+            if let Some(session) = self.session_id.clone() {
+                self.queues.entry(session).or_default().push_back(Queued {
+                    id: Uuid::new_v4(),
+                    text: trimmed.to_string(),
+                    steer: false,
+                });
+                return vec![];
+            }
+        }
         if self.pending.is_some() {
             self.input.set(trimmed);
             self.note(Entry::system(
@@ -635,6 +670,12 @@ impl App {
             return vec![];
         }
 
+        self.send_prompt(text.clone())
+    }
+
+    /// Send `text` as this window's next question.
+    fn send_prompt(&mut self, text: String) -> Vec<Action> {
+        let trimmed = text.trim();
         if self.history.last().map(String::as_str) != Some(trimmed) {
             self.history.push(trimmed.to_string());
         }
@@ -681,6 +722,8 @@ impl App {
                 | Command::Quit
                 | Command::Clear
                 | Command::Session
+                | Command::Queue
+                | Command::Resume
                 | Command::Timing
                 | Command::Unknown(_)
         );
@@ -763,6 +806,30 @@ impl App {
             Command::Clear => {
                 self.entries.clear();
                 self.scroll = 0;
+                vec![]
+            }
+            Command::Resume => {
+                let Some(session) = self.session_id.clone() else {
+                    return vec![];
+                };
+                self.held.remove(&session);
+                if self.pending.is_some() {
+                    return vec![];
+                }
+                self.send_next_queued()
+            }
+            Command::Queue => {
+                let text = match self.queue().filter(|q| !q.is_empty()) {
+                    None => "Nothing is queued.".to_string(),
+                    Some(q) => {
+                        let mut out = format!("Queued ({}):", q.len());
+                        for (i, m) in q.iter().enumerate() {
+                            out.push_str(&format!("\n{}. {}", i + 1, m.text));
+                        }
+                        out
+                    }
+                };
+                self.note(Entry::system(text));
                 vec![]
             }
             Command::Session => {
@@ -897,6 +964,59 @@ impl App {
     }
 
     pub fn on_response(&mut self, response: Response) -> Vec<Action> {
+        let turn_ended =
+            self.pending_id == Some(response.id) && matches!(self.pending, Some(Pending::Turn));
+        let answered = response.ok
+            && !response
+                .result
+                .as_ref()
+                .and_then(|r| r.get("cancelled"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+        let mut actions = self.on_response_inner(response);
+        if turn_ended {
+            if answered {
+                actions.extend(self.send_next_queued());
+            } else {
+                self.hold_queue();
+            }
+        }
+        actions
+    }
+
+    /// This conversation's queue, if it has one.
+    pub fn queue(&self) -> Option<&std::collections::VecDeque<Queued>> {
+        self.session_id.as_ref().and_then(|s| self.queues.get(s))
+    }
+
+    /// Send the front of this conversation's queue, unless it is held.
+    fn send_next_queued(&mut self) -> Vec<Action> {
+        let Some(session) = self.session_id.clone() else {
+            return vec![];
+        };
+        if self.held.contains(&session) {
+            return vec![];
+        }
+        match self.queues.get_mut(&session).and_then(|q| q.pop_front()) {
+            Some(next) => self.send_prompt(next.text),
+            None => vec![],
+        }
+    }
+
+    /// A turn that did not answer holds what was queued after it.
+    fn hold_queue(&mut self) {
+        let Some(session) = self.session_id.clone() else {
+            return;
+        };
+        if self.queues.get(&session).is_some_and(|q| !q.is_empty()) {
+            self.held.insert(session);
+            self.note(Entry::system(
+                "Queue held: /resume sends it, Alt+Up edits the last one.",
+            ));
+        }
+    }
+
+    fn on_response_inner(&mut self, response: Response) -> Vec<Action> {
         if self.pending_id != Some(response.id) {
             // An answer to a request that was abandoned, e.g. after a
             // reconnect. Showing it would attach it to the wrong turn.
@@ -1361,6 +1481,14 @@ impl App {
                 };
                 return self.mode_request("autonomy", next);
             }
+            // The newest queued message, back to edit (or delete).
+            KeyCode::Up if alt && self.input.is_empty() => {
+                if let Some(session) = self.session_id.clone() {
+                    if let Some(last) = self.queues.get_mut(&session).and_then(|q| q.pop_back()) {
+                        self.input.set(&last.text);
+                    }
+                }
+            }
             KeyCode::Left if ctrl => self.input.word_left(),
             KeyCode::Right if ctrl => self.input.word_right(),
             KeyCode::Left => self.input.left(),
@@ -1593,6 +1721,167 @@ mod tests {
 
     fn key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> Vec<Action> {
         app.handle_key(KeyEvent::new(code, modifiers))
+    }
+
+    /// Type `text` and press Enter.
+    fn enter(app: &mut App, text: &str) -> Vec<Action> {
+        app.input.set(text);
+        press(app, KeyCode::Enter)
+    }
+
+    /// The prompt an action list asks, if it asks one.
+    fn asked(actions: &[Action]) -> Option<String> {
+        actions.iter().find_map(|a| match a {
+            Action::Request {
+                method: "ask",
+                params,
+                ..
+            } => params["prompt"].as_str().map(String::from),
+            _ => None,
+        })
+    }
+
+    /// End the running turn: answered, cancelled, or failed.
+    fn end_turn(app: &mut App, how: &str) -> Vec<Action> {
+        let id = app.pending_id.expect("a turn is running");
+        let response = match how {
+            "answer" => Response::ok(id, json!({ "response": "done" })),
+            "cancel" => Response::ok(id, json!({ "cancelled": true, "response": "" })),
+            _ => Response::err(id, "the model fell over".into()),
+        };
+        app.on_response(response)
+    }
+
+    fn queued(app: &App) -> Vec<String> {
+        app.queue()
+            .map(|q| q.iter().map(|m| m.text.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    fn running(app: &mut App, text: &str) {
+        let actions = enter(app, text);
+        let Action::Request { .. } = &actions[0] else {
+            panic!("no request")
+        };
+        let request = Request::new("ask", json!({}));
+        app.begin_request(request.id, Pending::Turn);
+    }
+
+    #[test]
+    fn enter_while_busy_queues_instead_of_refusing() {
+        let mut app = with_session();
+        running(&mut app, "first");
+        let actions = enter(&mut app, "second");
+        assert!(actions.is_empty());
+        assert_eq!(queued(&app), vec!["second"]);
+        assert!(app.input.text().is_empty());
+        assert!(!app
+            .entries
+            .iter()
+            .any(|e| e.role == Role::User && e.text == "second"));
+    }
+
+    #[test]
+    fn the_queue_is_sent_in_order_after_each_turn() {
+        let mut app = with_session();
+        running(&mut app, "first");
+        enter(&mut app, "second");
+        enter(&mut app, "third");
+        let next = end_turn(&mut app, "answer");
+        assert_eq!(asked(&next).as_deref(), Some("second"));
+        let request = Request::new("ask", json!({}));
+        app.begin_request(request.id, Pending::Turn);
+        assert_eq!(
+            asked(&end_turn(&mut app, "answer")).as_deref(),
+            Some("third")
+        );
+        let request = Request::new("ask", json!({}));
+        app.begin_request(request.id, Pending::Turn);
+        assert_eq!(asked(&end_turn(&mut app, "answer")), None);
+        assert!(queued(&app).is_empty());
+    }
+
+    #[test]
+    fn a_cancel_holds_the_queue_and_resume_sends_it() {
+        let mut app = with_session();
+        running(&mut app, "first");
+        enter(&mut app, "second");
+        assert_eq!(asked(&end_turn(&mut app, "cancel")), None);
+        assert!(app
+            .entries
+            .iter()
+            .any(|e| e.text.contains("Queue held: /resume sends it")));
+        assert_eq!(
+            asked(&enter(&mut app, "/resume")).as_deref(),
+            Some("second")
+        );
+    }
+
+    #[test]
+    fn an_error_or_disconnect_holds_the_queue() {
+        let mut app = with_session();
+        running(&mut app, "first");
+        enter(&mut app, "second");
+        assert_eq!(asked(&end_turn(&mut app, "error")), None);
+        assert_eq!(queued(&app), vec!["second"]);
+
+        let mut app = with_session();
+        running(&mut app, "first");
+        enter(&mut app, "second");
+        app.on_disconnected("gone".into());
+        assert_eq!(queued(&app), vec!["second"]);
+        assert_eq!(
+            asked(&enter(&mut app, "/resume")).as_deref(),
+            Some("second")
+        );
+    }
+
+    #[test]
+    fn alt_up_takes_the_newest_back_to_edit() {
+        let mut app = with_session();
+        running(&mut app, "first");
+        enter(&mut app, "a");
+        enter(&mut app, "b");
+        key(&mut app, KeyCode::Up, KeyModifiers::ALT);
+        assert_eq!(app.input.text(), "b");
+        assert_eq!(queued(&app), vec!["a"]);
+    }
+
+    #[test]
+    fn the_queue_belongs_to_its_conversation() {
+        let mut app = with_session(); // conversation "abc"
+        running(&mut app, "first");
+        enter(&mut app, "for abc");
+        end_turn(&mut app, "cancel"); // held
+        app.session_id = Some("other".into());
+        assert!(queued(&app).is_empty());
+        assert_eq!(
+            asked(&enter(&mut app, "/resume")),
+            None,
+            "nothing of abc's goes to other"
+        );
+        app.session_id = Some("abc".into());
+        assert_eq!(queued(&app), vec!["for abc"]);
+        assert_eq!(
+            asked(&enter(&mut app, "/resume")).as_deref(),
+            Some("for abc")
+        );
+    }
+
+    #[test]
+    fn commands_other_than_resume_and_queue_are_still_refused_while_busy() {
+        let mut app = with_session();
+        running(&mut app, "first");
+        enter(&mut app, "second");
+        assert!(enter(&mut app, "/new").is_empty());
+        assert!(app.entries.last().unwrap().text.contains("Still waiting"));
+        let shown = enter(&mut app, "/queue");
+        assert!(shown.is_empty());
+        assert!(
+            app.entries.last().unwrap().text.contains("second"),
+            "{:?}",
+            app.entries.last()
+        );
     }
 
     fn type_keys(app: &mut App, text: &str) {
