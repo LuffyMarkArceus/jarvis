@@ -9,6 +9,7 @@ use crate::client::ClientEvent;
 pub use crate::input::Input;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use jarvis_common::ipc::{ConfirmationRequest, Response};
+pub use jarvis_core::config::FollowUp;
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
@@ -117,6 +118,11 @@ pub enum Action {
     UndoList,
     /// Undo exactly the change that was previewed.
     UndoApply(String),
+    /// Send a steer into the running turn, beside it, not as the pending
+    /// request (6.7a).
+    Steer {
+        steer: Queued,
+    },
     Quit,
 }
 
@@ -204,6 +210,8 @@ pub enum Command {
     Resume,
     /// `/queue`: what is queued in this conversation.
     Queue,
+    /// `/steer <text>`: into the running turn.
+    Steer(String),
     Clear,
     Quit,
     /// `/word` that is no command: shown as a mistake, not sent to the
@@ -292,6 +300,7 @@ pub fn parse_command(text: &str) -> Option<Command> {
         "/go" => Command::Go(rest),
         "/resume" => Command::Resume,
         "/queue" => Command::Queue,
+        "/steer" => Command::Steer(rest),
         "/tools" => Command::Tools,
         "/session" => Command::Session,
         "/clear" => Command::Clear,
@@ -357,6 +366,12 @@ pub struct App {
     pub queues: std::collections::HashMap<String, std::collections::VecDeque<Queued>>,
     /// Conversations whose queue waits for `/resume`.
     pub held: std::collections::HashSet<String>,
+    /// What Enter does while a turn runs (`[tui] follow_up`).
+    pub follow_up: FollowUp,
+    /// Steers sent into the running turn, not yet known used.
+    pub in_flight: Vec<Queued>,
+    /// Steer requests waiting for their reply: request id -> steer id.
+    steer_requests: std::collections::HashMap<Uuid, Uuid>,
     /// The `/` menu's selected row, and whether Esc closed it.
     pub menu_selected: usize,
     menu_closed: bool,
@@ -399,6 +414,9 @@ impl App {
             keyboard_enhanced: false,
             queues: Default::default(),
             held: Default::default(),
+            follow_up: FollowUp::Queue,
+            in_flight: Vec::new(),
+            steer_requests: Default::default(),
             menu_selected: 0,
             menu_closed: false,
             mode_label: "Interactive · Manual · Sandbox on".into(),
@@ -529,6 +547,7 @@ impl App {
             "trust.clear",
             "mode.set",
             "approve",
+            "steer",
         ];
         if !CONVERSATION.contains(&method) {
             return Some(params);
@@ -540,8 +559,11 @@ impl App {
 
     pub fn on_disconnected(&mut self, reason: String) {
         if matches!(self.pending, Some(Pending::Turn)) {
+            let back: Vec<Queued> = self.in_flight.drain(..).collect();
+            self.requeue_front(back);
             self.hold_queue();
         }
+        self.steer_requests.clear();
         self.state = DaemonState::Offline(reason.clone());
         self.pending = None;
         self.pending_id = None;
@@ -632,6 +654,12 @@ impl App {
     }
 
     pub fn submit(&mut self) -> Vec<Action> {
+        self.submit_with(false)
+    }
+
+    /// Enter (`flip` false) or Ctrl+Enter (`flip` true): while a turn runs,
+    /// the one queues and the other steers, by `[tui] follow_up`.
+    fn submit_with(&mut self, flip: bool) -> Vec<Action> {
         let text = self.input.take();
         let trimmed = text.trim();
         if trimmed.is_empty() {
@@ -643,8 +671,11 @@ impl App {
             return self.run_command(command);
         }
 
-        // Typed while a turn runs: it waits its turn (6.7a).
+        // Typed while a turn runs: it waits its turn, or joins it (6.7a).
         if matches!(self.pending, Some(Pending::Turn)) {
+            if (self.follow_up == FollowUp::Steer) != flip {
+                return self.start_steer(trimmed.to_string());
+            }
             if let Some(session) = self.session_id.clone() {
                 self.queues.entry(session).or_default().push_back(Queued {
                     id: Uuid::new_v4(),
@@ -724,6 +755,7 @@ impl App {
                 | Command::Session
                 | Command::Queue
                 | Command::Resume
+                | Command::Steer(_)
                 | Command::Timing
                 | Command::Unknown(_)
         );
@@ -807,6 +839,20 @@ impl App {
                 self.entries.clear();
                 self.scroll = 0;
                 vec![]
+            }
+            Command::Steer(text) if text.trim().is_empty() => {
+                self.note(Entry::error("/steer what? /steer <message>"));
+                vec![]
+            }
+            Command::Steer(text) => {
+                if matches!(self.pending, Some(Pending::Turn)) {
+                    self.start_steer(text)
+                } else if self.pending.is_some() {
+                    self.note(Entry::system("Still waiting for the daemon."));
+                    vec![]
+                } else {
+                    self.send_prompt(text)
+                }
             }
             Command::Resume => {
                 let Some(session) = self.session_id.clone() else {
@@ -964,8 +1010,53 @@ impl App {
     }
 
     pub fn on_response(&mut self, response: Response) -> Vec<Action> {
+        // A steer's reply: it joined the turn, or it waits like a message.
+        if let Some(steer_id) = self.steer_requests.remove(&response.id) {
+            let took = response.ok
+                && response.result.as_ref().and_then(|r| r["status"].as_str()) == Some("steering");
+            if !took {
+                if let Some(pos) = self.in_flight.iter().position(|q| q.id == steer_id) {
+                    let mut steer = self.in_flight.remove(pos);
+                    steer.steer = false;
+                    if let Some(session) = self.session_id.clone() {
+                        self.queues.entry(session).or_default().push_back(steer);
+                    }
+                }
+            }
+            return vec![];
+        }
         let turn_ended =
             self.pending_id == Some(response.id) && matches!(self.pending, Some(Pending::Turn));
+        if turn_ended {
+            let ids = |key: &str| -> Option<Vec<String>> {
+                response
+                    .result
+                    .as_ref()
+                    .and_then(|r| r[key].as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().or_else(|| v["id"].as_str()))
+                            .map(String::from)
+                            .collect()
+                    })
+            };
+            // Back to the front of the queue: what the turn did not use -
+            // all of it when it failed and nobody can say.
+            let back: Vec<Queued> = match (ids("unused_steers"), ids("used_steers")) {
+                (Some(unused), _) => self
+                    .in_flight
+                    .drain(..)
+                    .filter(|q| unused.contains(&q.id.to_string()))
+                    .collect(),
+                (None, Some(used)) => self
+                    .in_flight
+                    .drain(..)
+                    .filter(|q| !used.contains(&q.id.to_string()))
+                    .collect(),
+                (None, None) => self.in_flight.drain(..).collect(),
+            };
+            self.requeue_front(back);
+        }
         let answered = response.ok
             && !response
                 .result
@@ -982,6 +1073,35 @@ impl App {
             }
         }
         actions
+    }
+
+    /// Steers that came back, to the front of this conversation's queue,
+    /// in the order they were sent.
+    fn requeue_front(&mut self, steers: Vec<Queued>) {
+        let Some(session) = self.session_id.clone() else {
+            return;
+        };
+        let queue = self.queues.entry(session).or_default();
+        for steer in steers.into_iter().rev() {
+            queue.push_front(steer);
+        }
+    }
+
+    /// Steer `text` into the running turn.
+    fn start_steer(&mut self, text: String) -> Vec<Action> {
+        let steer = Queued {
+            id: Uuid::new_v4(),
+            text: text.clone(),
+            steer: true,
+        };
+        self.note(Entry::system(format!("steering: {text}")));
+        vec![Action::Steer { steer }]
+    }
+
+    /// `main` sent `steer` as request `request`.
+    pub fn steer_sent(&mut self, request: Uuid, steer: Queued) {
+        self.steer_requests.insert(request, steer.id);
+        self.in_flight.push(steer);
     }
 
     /// This conversation's queue, if it has one.
@@ -1456,6 +1576,7 @@ impl App {
     fn edit_key(&mut self, key: KeyEvent, ctrl: bool, alt: bool, shift: bool) -> Vec<Action> {
         match key.code {
             KeyCode::Enter if alt || shift => self.input.newline(),
+            KeyCode::Enter if ctrl => return self.submit_with(true),
             KeyCode::Enter => return self.submit(),
             KeyCode::Char(' ') if ctrl => {}
             // Editing like a text field (6.7a), with the terminal habits
@@ -1765,6 +1886,125 @@ mod tests {
         };
         let request = Request::new("ask", json!({}));
         app.begin_request(request.id, Pending::Turn);
+    }
+
+    /// Enter `text` and record the steer it sends.
+    fn enter_steer(app: &mut App, text: &str) -> (Uuid, Queued) {
+        let actions = enter(app, text);
+        sent_steer(app, &actions)
+    }
+
+    /// The steer an action list sends, recorded as sent; its request id.
+    fn sent_steer(app: &mut App, actions: &[Action]) -> (Uuid, Queued) {
+        let steer = actions
+            .iter()
+            .find_map(|a| match a {
+                Action::Steer { steer } => Some(steer.clone()),
+                _ => None,
+            })
+            .expect("a steer");
+        let request = Uuid::new_v4();
+        app.steer_sent(request, steer.clone());
+        (request, steer)
+    }
+
+    #[test]
+    fn slash_steer_sends_a_steer_request() {
+        let mut app = with_session();
+        running(&mut app, "first");
+        let (_, steer) = enter_steer(&mut app, "/steer use Pictures");
+        assert_eq!(steer.text, "use Pictures");
+        assert!(app
+            .entries
+            .iter()
+            .any(|e| e.text.contains("steering: use Pictures")));
+        assert!(queued(&app).is_empty());
+    }
+
+    #[test]
+    fn slash_steer_with_no_turn_running_just_asks() {
+        let mut app = with_session();
+        assert_eq!(
+            asked(&enter(&mut app, "/steer hello")).as_deref(),
+            Some("hello")
+        );
+    }
+
+    #[test]
+    fn follow_up_steer_makes_enter_steer() {
+        let mut app = with_session();
+        app.follow_up = FollowUp::Steer;
+        running(&mut app, "first");
+        enter_steer(&mut app, "x");
+    }
+
+    #[test]
+    fn ctrl_enter_flips_follow_up() {
+        let mut app = with_session();
+        running(&mut app, "first");
+        app.input.set("x");
+        let actions = key(&mut app, KeyCode::Enter, KeyModifiers::CONTROL);
+        sent_steer(&mut app, &actions);
+        app.follow_up = FollowUp::Steer;
+        app.input.set("y");
+        assert!(key(&mut app, KeyCode::Enter, KeyModifiers::CONTROL).is_empty());
+        assert_eq!(queued(&app), vec!["y"]);
+    }
+
+    #[test]
+    fn not_running_queues_the_steer() {
+        let mut app = with_session();
+        running(&mut app, "first");
+        let (request, _) = enter_steer(&mut app, "/steer late");
+        app.on_response(Response::ok(request, json!({ "status": "not_running" })));
+        assert_eq!(queued(&app), vec!["late"]);
+        assert!(app.in_flight.is_empty());
+    }
+
+    #[test]
+    fn unused_steers_go_to_the_front_and_are_sent_next() {
+        let mut app = with_session();
+        running(&mut app, "first");
+        enter(&mut app, "q1");
+        let (request, steer) = enter_steer(&mut app, "/steer s");
+        app.on_response(Response::ok(request, json!({ "status": "steering" })));
+        let id = app.pending_id.unwrap();
+        let next = app.on_response(Response::ok(
+            id,
+            json!({ "response": "done",
+                    "unused_steers": [{ "id": steer.id.to_string(), "text": "s" }] }),
+        ));
+        assert_eq!(asked(&next).as_deref(), Some("s"));
+        assert_eq!(queued(&app), vec!["q1"]);
+        assert!(app.in_flight.is_empty());
+    }
+
+    #[test]
+    fn a_cancel_requeues_only_unused_steers_held() {
+        let mut app = with_session();
+        running(&mut app, "first");
+        let (_, s1) = enter_steer(&mut app, "/steer one");
+        enter_steer(&mut app, "/steer two");
+        let id = app.pending_id.unwrap();
+        let next = app.on_response(Response::ok(
+            id,
+            json!({ "cancelled": true, "response": "", "used_steers": [s1.id.to_string()] }),
+        ));
+        assert_eq!(asked(&next), None, "held");
+        assert_eq!(queued(&app), vec!["two"]);
+    }
+
+    #[test]
+    fn a_disconnect_requeues_every_in_flight_steer_first() {
+        // Review Focus 3.
+        let mut app = with_session();
+        running(&mut app, "first");
+        enter(&mut app, "q1");
+        enter(&mut app, "q2");
+        enter_steer(&mut app, "/steer s");
+        app.on_disconnected("gone".into());
+        assert_eq!(queued(&app), vec!["s", "q1", "q2"]);
+        assert!(app.held.contains("abc"));
     }
 
     #[test]

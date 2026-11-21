@@ -35,6 +35,7 @@ async fn main() -> Result<()> {
     let config = Config::load();
     let socket = config.general.data_dir.join("jarvis.sock");
     let mut app = App::new(config.model.default_model.clone());
+    app.follow_up = config.tui.follow_up;
     // `jarvis-tui --continue` (and `jarvis up --continue`): the conversation
     // used last. Otherwise each window starts its own.
     app.continue_last = std::env::args().any(|a| a == "--continue");
@@ -218,6 +219,22 @@ fn perform(
                 if let Some(client) = client.as_ref() {
                     client.cancel(id);
                 }
+            }
+            Action::Steer { steer } => {
+                let Some(client) = client.as_ref() else {
+                    app.on_disconnected(offline_message(socket));
+                    continue;
+                };
+                let Some(params) = app.scoped(
+                    "steer",
+                    serde_json::json!({ "id": steer.id.to_string(), "text": steer.text }),
+                ) else {
+                    continue;
+                };
+                let request = Request::new("steer", params);
+                diag.sent(request.id, "steer");
+                app.steer_sent(request.id, steer);
+                client.request(request);
             }
             Action::Request {
                 method,

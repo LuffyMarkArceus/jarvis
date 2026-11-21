@@ -34,6 +34,8 @@ pub struct Config {
     /// The mode new conversations start in.
     #[serde(default)]
     pub modes: ModesConfig,
+    #[serde(default)]
+    pub tui: TuiConfig,
 }
 
 /// `[up]`: `jarvis up` starts Ollama, loads keys, starts the daemon and
@@ -147,6 +149,23 @@ impl Default for RemoteConfig {
             spill_after: default_spill_after(),
         }
     }
+}
+
+/// The TUI (`[tui]`, Milestone 6.7a).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TuiConfig {
+    /// What Enter does while a turn runs; Ctrl+Enter does the other.
+    pub follow_up: FollowUp,
+}
+
+/// A message typed while a turn runs: waits for it, or joins it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FollowUp {
+    #[default]
+    Queue,
+    Steer,
 }
 
 /// The mode new conversations start in (`[modes]`, Milestone 6.6).
@@ -612,6 +631,14 @@ fn expand_sidecar_arg(arg: &str, root: Option<&std::path::Path>) -> Option<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tui_follow_up_defaults_to_queue() {
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.tui.follow_up, FollowUp::Queue);
+        let steer: Config = toml::from_str("[tui]\nfollow_up = \"steer\"\n").unwrap();
+        assert_eq!(steer.tui.follow_up, FollowUp::Steer);
+    }
 
     #[test]
     fn modes_defaults() {

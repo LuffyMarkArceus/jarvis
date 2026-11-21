@@ -171,7 +171,16 @@ fn input_hint(app: &App) -> String {
         String::new()
     };
     if app.is_busy() {
-        format!(" {queued}Enter queue · Ctrl+C cancel turn ")
+        let (enter, other) = match app.follow_up {
+            crate::app::FollowUp::Queue => ("queue", "steer"),
+            crate::app::FollowUp::Steer => ("steer", "queue"),
+        };
+        let flip = if app.keyboard_enhanced {
+            format!("Ctrl+Enter {other}")
+        } else {
+            "/steer <msg>".to_string()
+        };
+        format!(" {queued}Enter {enter} · {flip} · Ctrl+C cancel turn ")
     } else {
         format!(" {queued}Enter send · {newline} newline · Ctrl+←/→ word ")
     }
