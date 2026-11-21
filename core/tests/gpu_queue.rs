@@ -407,6 +407,8 @@ async fn a_busy_gpu_spills_to_remote_after_the_wait() {
         .expect("the spilled turn does not wait for A")
         .unwrap()
         .unwrap();
+    // Live check, 6.5b: the wait before a spill was not counted as waiting.
+    assert!(report.timing.queue_ms >= 1000, "{:?}", report.timing);
     assert_eq!(report.answer, "a remote answer");
     assert!(
         footer(&report).ends_with(" (GPU busy)"),
