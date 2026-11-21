@@ -89,7 +89,7 @@ TUI to follow T3's ways. This milestone brings in five of them:
   - Lines starting with `+` are green, `-` red, `@@` cyan.
   - Up/Down choose a file; PgUp/PgDn scroll the diff.
   - `r` reverts this turn's files, asking "Revert 2 files? y/n". It applies
-    undo to those `undo_id`s, newest first, through the existing undo path,
+    undo to those `undo_ids`, newest first, through the existing undo path,
     and reports each one.
   - Esc closes the view.
 
