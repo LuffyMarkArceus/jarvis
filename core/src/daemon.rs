@@ -69,27 +69,23 @@ impl Daemon {
         let (result, footer, timing) = orch
             .run_with_footer(&conv, prompt, confirm, cancel, sink, progress)
             .await?;
-        // Auto-title if this is a new session with few messages
+        // Title a conversation that has none yet, from its first question,
+        // once it has an answer. Not "exactly two messages": a steer (6.7a)
+        // adds a user message mid-turn.
         if let Some(ref mem) = self.memory {
-            if let Ok(count) = mem.get_message_count(&session_id) {
-                if count == 2 {
-                    if let Ok(messages) = mem.get_recent_messages(&session_id, 2) {
-                        if let Some(first) = messages.first() {
-                            if first.role == "user" {
-                                let title = first
-                                    .content
-                                    .chars()
-                                    .take(40)
-                                    .collect::<String>()
-                                    .trim()
-                                    .to_string();
-                                let title = if title.is_empty() {
-                                    "New Session".to_string()
-                                } else {
-                                    title
-                                };
-                                let _ = mem.update_session_title(&session_id, &title);
-                            }
+            let untitled = mem
+                .session_title(&session_id)
+                .ok()
+                .flatten()
+                .is_none_or(|t| t == "New Session");
+            if untitled {
+                if let Ok(messages) = mem.get_all_messages(&session_id) {
+                    let answered = messages.iter().any(|m| m.role == "assistant");
+                    if let Some(first) = messages.iter().find(|m| m.role == "user") {
+                        let title: String = first.content.chars().take(40).collect();
+                        let title = title.trim();
+                        if answered && !title.is_empty() {
+                            let _ = mem.update_session_title(&session_id, title);
                         }
                     }
                 }
@@ -123,6 +119,24 @@ impl Daemon {
         };
         let text = self.orchestrator.approve(&conv, which).await?;
         Ok((text, conv.deferred().len()))
+    }
+
+    /// A steer for the conversation's running turn: true if it took it.
+    pub fn steer(&self, session: &str, id: &str, text: &str) -> Result<bool> {
+        Ok(self
+            .conversation(session)?
+            .steer(crate::conversation::Steer {
+                id: id.to_string(),
+                text: text.to_string(),
+            }))
+    }
+
+    /// After a turn: the steers it did not use, and the ids of those it did.
+    pub fn steer_outcome(&self, session: &str) -> (Vec<crate::conversation::Steer>, Vec<String>) {
+        match self.conversation(session) {
+            Ok(conv) => (conv.take_steers(), conv.take_used_steers()),
+            Err(_) => (Vec::new(), Vec::new()),
+        }
     }
 
     /// A conversation's mode.

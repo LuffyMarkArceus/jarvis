@@ -637,6 +637,8 @@ impl Orchestrator {
         // What the last turn left for /approve is about that turn, not this
         // one (6.6).
         conv.set_deferred(Vec::new());
+        // Steers are this turn's; the window collects the last turn's first.
+        conv.take_used_steers();
 
         // Snapshot history *before* persisting the new user message so the
         // prompt never contains the request twice.

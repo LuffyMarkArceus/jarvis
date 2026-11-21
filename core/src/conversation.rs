@@ -38,6 +38,12 @@ pub struct Conversation {
     mode: Mutex<Mode>,
     /// What Autopilot left for `/approve`.
     deferred: Mutex<Vec<Deferred>>,
+    /// Steers waiting for the turn's next model call.
+    steers: Mutex<Vec<Steer>>,
+    /// The ids of the steers this turn has used.
+    used_steers: Mutex<Vec<String>>,
+    /// A turn that can still take a steer is running.
+    steerable: AtomicBool,
 }
 
 /// A conversation's settings at one moment: a turn takes them when it
@@ -60,6 +66,14 @@ pub struct Deferred {
     pub why: String,
     /// What its turn had read that the owner has not vouched for.
     pub untrusted: Vec<crate::taint::Source>,
+}
+
+/// A message the owner typed into a running turn (Milestone 6.7a).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Steer {
+    /// Chosen by the window, so it can tell which of its steers were used.
+    pub id: String,
+    pub text: String,
 }
 
 /// Held while a conversation answers; dropping it (however the turn ends)
@@ -87,6 +101,9 @@ impl Conversation {
             answering: AtomicBool::new(false),
             mode: Mutex::new(Mode::default()),
             deferred: Mutex::new(Vec::new()),
+            steers: Mutex::new(Vec::new()),
+            used_steers: Mutex::new(Vec::new()),
+            steerable: AtomicBool::new(false),
         })
     }
 
@@ -117,6 +134,42 @@ impl Conversation {
             chosen: self.chosen(),
             mode: self.mode(),
         }
+    }
+
+    /// Add a steer to the running turn; false (and not kept) when no turn
+    /// that can take one is running.
+    pub fn steer(&self, steer: Steer) -> bool {
+        let mut inbox = self.steers.lock().unwrap();
+        // Checked under the inbox lock: a turn ending clears `steerable`
+        // under it too, so a steer is never left behind unseen.
+        if !self.steerable.load(Ordering::Acquire) {
+            return false;
+        }
+        inbox.push(steer);
+        true
+    }
+
+    /// The steers waiting, taken out.
+    pub fn take_steers(&self) -> Vec<Steer> {
+        std::mem::take(&mut *self.steers.lock().unwrap())
+    }
+
+    /// The ids of the steers the last turn used, taken out.
+    pub fn take_used_steers(&self) -> Vec<String> {
+        std::mem::take(&mut *self.used_steers.lock().unwrap())
+    }
+
+    pub(crate) fn used_steer(&self, id: String) {
+        self.used_steers.lock().unwrap().push(id);
+    }
+
+    pub(crate) fn set_steerable(&self, on: bool) {
+        let _inbox = self.steers.lock().unwrap();
+        self.steerable.store(on, Ordering::Release);
+    }
+
+    pub(crate) fn has_steers(&self) -> bool {
+        !self.steers.lock().unwrap().is_empty()
     }
 
     /// What is waiting for `/approve`, in order.

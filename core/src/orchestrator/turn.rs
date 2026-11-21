@@ -143,6 +143,27 @@ impl Orchestrator {
         })
     }
 
+    /// The owner's steers, into the request as their own words, and into
+    /// the conversation's history.
+    fn take_steers_into(&self, messages: &mut Vec<ChatMessage>, rec: &TurnRecorder<'_>) {
+        for steer in rec.conversation.take_steers() {
+            let label = Label::of(Origin::User);
+            messages.push(ChatMessage::text("user", &steer.text).with_label(label.clone()));
+            if let Some(memory) = &self.memory {
+                let _ = memory.add_labeled_message(
+                    &rec.conversation.id,
+                    "user",
+                    &steer.text,
+                    Some(&label),
+                );
+            }
+            rec.saw(&label);
+            let short: String = steer.text.chars().take(40).collect();
+            rec.step(format!("steered: {short}"));
+            rec.conversation.used_steer(steer.id);
+        }
+    }
+
     /// The ambiguous case: the model may call a tool, and the result is
     /// rendered deterministically.
     pub(super) async fn model_with_tools(
@@ -154,6 +175,17 @@ impl Orchestrator {
         cancel: Option<&Cancellation>,
         rec: &TurnRecorder<'_>,
     ) -> Result<String> {
+        // While its rounds run, this turn takes steers (6.7a); however it
+        // ends, it stops taking them.
+        struct Steerable<'a>(&'a crate::conversation::Conversation);
+        impl Drop for Steerable<'_> {
+            fn drop(&mut self) {
+                self.0.set_steerable(false);
+            }
+        }
+        rec.conversation.set_steerable(true);
+        let _steerable = Steerable(rec.conversation);
+
         // The offered tools are the request's tools. There is no second
         // filter here, and no way for the prompt to mention anything else.
         let tools = plan.schemas();
@@ -214,10 +246,11 @@ impl Orchestrator {
         .max(1);
         let mut seen: std::collections::HashSet<String> =
             trace.iter().map(|o| call_key(&o.name, &o.args)).collect();
-        for _ in 0..max_rounds {
+        for round in 0..max_rounds {
             if cancel.is_some_and(Cancellation::is_cancelled) {
                 return self.cancelled_result(&trace);
             }
+            self.take_steers_into(&mut messages, rec);
 
             // Tool results grow the prompt. Shed the oldest history until it
             // fits again rather than letting the provider truncate the front.
@@ -335,7 +368,12 @@ impl Orchestrator {
                 return Ok("I tried to use a tool, but the model's instruction was malformed, so nothing was run. Try rephrasing the request.".to_string());
             }
 
-            // A plain answer.
+            // A plain answer - unless the owner steered meanwhile and a
+            // round is left: then the model hears it and answers again.
+            if round + 1 < max_rounds && rec.conversation.has_steers() {
+                messages.push(ChatMessage::text("assistant", &turn.message.content));
+                continue;
+            }
             let answer = final_answer(&turn.message.content);
             if answer.is_empty() {
                 return Ok(if trace.is_empty() {

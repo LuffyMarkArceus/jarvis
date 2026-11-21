@@ -120,6 +120,8 @@ pub struct Gated {
     pub script: Mutex<std::collections::VecDeque<ChatTurn>>,
     /// Models asked to load ahead of time.
     pub warmed: Mutex<Vec<String>>,
+    /// Every request's messages, joined, in order.
+    pub requests: Mutex<Vec<String>>,
 }
 
 #[allow(dead_code)]
@@ -154,6 +156,7 @@ pub fn gated() -> (std::sync::Arc<Gated>, Gate) {
             fail: Default::default(),
             script: Default::default(),
             warmed: Default::default(),
+            requests: Default::default(),
         }),
         Gate {
             release: release_tx,
@@ -178,6 +181,12 @@ impl Provider for Gated {
         request: ChatRequest<'_>,
         cancel: Option<&Cancellation>,
     ) -> Result<ChatTurn> {
+        let seen: Vec<String> = request
+            .messages
+            .iter()
+            .map(|m| format!("[{}] {}", m.role, m.content))
+            .collect();
+        self.requests.lock().unwrap().push(seen.join("\n"));
         let _ = self.entered.send(request.model.to_string());
         let mut cancel = cancel.cloned().unwrap_or_default();
         let mut release = self.release.lock().await;

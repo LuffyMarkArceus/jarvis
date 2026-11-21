@@ -461,6 +461,20 @@ impl MemoryManager {
         Ok(sessions)
     }
 
+    /// A conversation's title; `None` if it has none or does not exist.
+    pub fn session_title(&self, session_id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        match conn.query_row(
+            "SELECT title FROM sessions WHERE id = ?1",
+            params![session_id],
+            |row| row.get::<_, Option<String>>(0),
+        ) {
+            Ok(title) => Ok(title),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(JarvisError::Memory(format!("Query failed: {}", e))),
+        }
+    }
+
     pub fn update_session_title(&self, session_id: &str, title: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
