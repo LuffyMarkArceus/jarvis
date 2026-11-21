@@ -43,6 +43,13 @@ pub const COMMANDS: &[CommandInfo] = &[
     ),
     c("/go", "[auto]", "carry out the plan above"),
     c(
+        "/steer",
+        "<message>",
+        "add to the running turn; the model sees it next step",
+    ),
+    c("/queue", "", "what is waiting to be sent after this turn"),
+    c("/resume", "", "send a held queue"),
+    c(
         "/undo",
         "[list|id]",
         "undo Jarvis's last file change (asks first)",
@@ -87,6 +94,47 @@ mod tests {
                 parsed.is_some() && !matches!(parsed, Some(Command::Unknown(_))),
                 "{} is listed but does not parse",
                 info.name
+            );
+        }
+    }
+
+    #[test]
+    fn every_command_is_listed() {
+        // Review of 6.7a: /resume, /queue and /steer parsed but were missing
+        // from /help and the menu.
+        for name in [
+            "/help",
+            "/new",
+            "/sessions",
+            "/switch",
+            "/delete",
+            "/prune",
+            "/recall",
+            "/status",
+            "/remote",
+            "/local",
+            "/model",
+            "/timing",
+            "/bad",
+            "/good",
+            "/undo",
+            "/trust",
+            "/tools",
+            "/session",
+            "/clear",
+            "/quit",
+            "/mode",
+            "/approval",
+            "/sandbox",
+            "/approve",
+            "/go",
+            "/resume",
+            "/queue",
+            "/steer",
+        ] {
+            assert!(
+                COMMANDS.iter().any(|c| c.name == name),
+                "{name} is not listed"
             );
         }
     }

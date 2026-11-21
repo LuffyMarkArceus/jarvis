@@ -189,6 +189,9 @@ fn perform(
             }
             Action::Reconnect => {
                 diag.line("reconnect");
+                // The running turn's answer will not come over the new
+                // connection: its steers go back to the queue (6.7a review).
+                app.reconnecting();
                 // Dropping the old client aborts its socket task.
                 *client = None;
                 app.state = DaemonState::Connecting;
@@ -222,13 +225,14 @@ fn perform(
             }
             Action::Steer { steer } => {
                 let Some(client) = client.as_ref() else {
-                    app.on_disconnected(offline_message(socket));
+                    app.steer_unsent(steer);
                     continue;
                 };
                 let Some(params) = app.scoped(
                     "steer",
                     serde_json::json!({ "id": steer.id.to_string(), "text": steer.text }),
                 ) else {
+                    app.steer_unsent(steer);
                     continue;
                 };
                 let request = Request::new("steer", params);

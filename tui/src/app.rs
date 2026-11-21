@@ -558,12 +558,7 @@ impl App {
     }
 
     pub fn on_disconnected(&mut self, reason: String) {
-        if matches!(self.pending, Some(Pending::Turn)) {
-            let back: Vec<Queued> = self.in_flight.drain(..).collect();
-            self.requeue_front(back);
-            self.hold_queue();
-        }
-        self.steer_requests.clear();
+        self.abandon_turn();
         self.state = DaemonState::Offline(reason.clone());
         self.pending = None;
         self.pending_id = None;
@@ -1021,6 +1016,11 @@ impl App {
                     if let Some(session) = self.session_id.clone() {
                         self.queues.entry(session).or_default().push_back(steer);
                     }
+                    // Too late for a turn that has ended: nothing else will
+                    // send it, so it goes now.
+                    if self.pending.is_none() {
+                        return self.send_next_queued();
+                    }
                 }
             }
             return vec![];
@@ -1042,19 +1042,27 @@ impl App {
             };
             // Back to the front of the queue: what the turn did not use -
             // all of it when it failed and nobody can say.
-            let back: Vec<Queued> = match (ids("unused_steers"), ids("used_steers")) {
-                (Some(unused), _) => self
-                    .in_flight
-                    .drain(..)
-                    .filter(|q| unused.contains(&q.id.to_string()))
-                    .collect(),
-                (None, Some(used)) => self
-                    .in_flight
-                    .drain(..)
-                    .filter(|q| !used.contains(&q.id.to_string()))
-                    .collect(),
-                (None, None) => self.in_flight.drain(..).collect(),
-            };
+            // A steer whose own reply has not come yet is not this turn's to
+            // judge: it waits for that reply (6.7a review).
+            let outstanding: std::collections::HashSet<Uuid> =
+                self.steer_requests.values().copied().collect();
+            let (waiting, settled): (Vec<Queued>, Vec<Queued>) = self
+                .in_flight
+                .drain(..)
+                .partition(|q| outstanding.contains(&q.id));
+            self.in_flight = waiting;
+            let reported = ids("unused_steers").is_some() || ids("used_steers").is_some();
+            let unused = ids("unused_steers").unwrap_or_default();
+            let used = ids("used_steers").unwrap_or_default();
+            let mut back = Vec::new();
+            for steer in settled {
+                let id = steer.id.to_string();
+                // Used: done. Unused, or a failed turn nobody can speak for:
+                // back to the front. Accepted but unreported: back, to be safe.
+                if !reported || !used.contains(&id) || unused.contains(&id) {
+                    back.push(steer);
+                }
+            }
             self.requeue_front(back);
         }
         let answered = response.ok
@@ -1073,6 +1081,32 @@ impl App {
             }
         }
         actions
+    }
+
+    /// The connection is going (Ctrl+R): the running turn's steers go back
+    /// to the queue, and the queue is held, as for a drop.
+    pub fn reconnecting(&mut self) {
+        self.abandon_turn();
+    }
+
+    /// A turn whose answer will not come: every steer sent into it goes
+    /// back to the front of the queue, and the queue waits for `/resume`.
+    fn abandon_turn(&mut self) {
+        if matches!(self.pending, Some(Pending::Turn)) || !self.in_flight.is_empty() {
+            let back: Vec<Queued> = self.in_flight.drain(..).collect();
+            self.requeue_front(back);
+            self.hold_queue();
+        }
+        self.steer_requests.clear();
+    }
+
+    /// A steer `main` could not send: it waits in the queue instead.
+    pub fn steer_unsent(&mut self, mut steer: Queued) {
+        steer.steer = false;
+        if let Some(session) = self.session_id.clone() {
+            self.queues.entry(session).or_default().push_back(steer);
+        }
+        self.hold_queue();
     }
 
     /// Steers that came back, to the front of this conversation's queue,
@@ -1983,12 +2017,16 @@ mod tests {
     fn a_cancel_requeues_only_unused_steers_held() {
         let mut app = with_session();
         running(&mut app, "first");
-        let (_, s1) = enter_steer(&mut app, "/steer one");
-        enter_steer(&mut app, "/steer two");
+        let (r1, s1) = enter_steer(&mut app, "/steer one");
+        let (r2, s2) = enter_steer(&mut app, "/steer two");
+        app.on_response(Response::ok(r1, json!({ "status": "steering" })));
+        app.on_response(Response::ok(r2, json!({ "status": "steering" })));
         let id = app.pending_id.unwrap();
         let next = app.on_response(Response::ok(
             id,
-            json!({ "cancelled": true, "response": "", "used_steers": [s1.id.to_string()] }),
+            json!({ "cancelled": true, "response": "",
+                    "used_steers": [s1.id.to_string()],
+                    "unused_steers": [{ "id": s2.id.to_string(), "text": "two" }] }),
         ));
         assert_eq!(asked(&next), None, "held");
         assert_eq!(queued(&app), vec!["two"]);
@@ -2005,6 +2043,82 @@ mod tests {
         app.on_disconnected("gone".into());
         assert_eq!(queued(&app), vec!["s", "q1", "q2"]);
         assert!(app.held.contains("abc"));
+    }
+
+    #[test]
+    fn a_used_steer_is_not_sent_again() {
+        let mut app = with_session();
+        running(&mut app, "first");
+        let (request, steer) = enter_steer(&mut app, "/steer s");
+        app.on_response(Response::ok(request, json!({ "status": "steering" })));
+        let id = app.pending_id.unwrap();
+        let next = app.on_response(Response::ok(
+            id,
+            json!({ "response": "done", "unused_steers": [], "used_steers": [steer.id.to_string()] }),
+        ));
+        assert_eq!(asked(&next), None);
+        assert!(queued(&app).is_empty() && app.in_flight.is_empty());
+    }
+
+    #[test]
+    fn a_late_not_running_after_the_turn_ended_is_queued_and_sent() {
+        // Review of 6.7a: the reply came after the turn's end had dropped it.
+        let mut app = with_session();
+        running(&mut app, "first");
+        let actions = enter(&mut app, "/steer one more thing");
+        let (request, _) = sent_steer(&mut app, &actions);
+        assert!(asked(&end_turn(&mut app, "answer")).is_none());
+        let next = app.on_response(Response::ok(request, json!({ "status": "not_running" })));
+        assert_eq!(asked(&next).as_deref(), Some("one more thing"));
+    }
+
+    #[test]
+    fn a_late_steering_reply_belongs_to_the_next_turn() {
+        let mut app = with_session();
+        running(&mut app, "first");
+        enter(&mut app, "queued next");
+        let actions = enter(&mut app, "/steer late");
+        let (request, steer) = sent_steer(&mut app, &actions);
+        // The turn ends; the queued message starts the next one.
+        let next = end_turn(&mut app, "answer");
+        assert_eq!(asked(&next).as_deref(), Some("queued next"));
+        let request2 = Request::new("ask", json!({}));
+        app.begin_request(request2.id, Pending::Turn);
+        app.on_response(Response::ok(request, json!({ "status": "steering" })));
+        let after = app.on_response(Response::ok(
+            request2.id,
+            json!({ "response": "done",
+                    "unused_steers": [{ "id": steer.id.to_string(), "text": "late" }] }),
+        ));
+        assert_eq!(asked(&after).as_deref(), Some("late"), "it was not lost");
+    }
+
+    #[test]
+    fn reconnecting_mid_turn_holds_the_queue_and_keeps_steers() {
+        let mut app = with_session();
+        running(&mut app, "first");
+        enter(&mut app, "q1");
+        let actions = enter(&mut app, "/steer s");
+        sent_steer(&mut app, &actions);
+        app.reconnecting();
+        assert_eq!(queued(&app), vec!["s", "q1"]);
+        assert!(app.held.contains("abc"));
+        assert!(app.in_flight.is_empty());
+    }
+
+    #[test]
+    fn a_steer_that_could_not_be_sent_is_queued() {
+        let mut app = with_session();
+        running(&mut app, "first");
+        let actions = enter(&mut app, "/steer offline");
+        let Some(Action::Steer { steer }) = actions
+            .into_iter()
+            .find(|a| matches!(a, Action::Steer { .. }))
+        else {
+            panic!("no steer")
+        };
+        app.steer_unsent(steer);
+        assert_eq!(queued(&app), vec!["offline"]);
     }
 
     #[test]

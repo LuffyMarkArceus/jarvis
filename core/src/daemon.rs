@@ -57,12 +57,57 @@ impl Daemon {
         sink: Option<&UnboundedSender<String>>,
         progress: Option<&UnboundedSender<String>>,
     ) -> Result<(String, String, crate::orchestrator::TurnTiming)> {
-        let conv = self.conversation(session)?;
-        let Some(_answering) = conv.begin_turn() else {
-            return Err(JarvisError::Busy(
-                "This conversation is answering another question. Wait for it, or open another with /new.".into(),
-            ));
+        self.ask_steered(session, prompt, confirm, cancel, sink, progress)
+            .await
+            .0
+    }
+
+    /// A turn, and what became of the steers sent into it: unused, and the
+    /// ids of those used. Collected while the turn still holds the
+    /// conversation, so another window's next turn cannot take them
+    /// (6.7a review).
+    #[allow(clippy::type_complexity)]
+    pub async fn ask_steered(
+        &self,
+        session: &str,
+        prompt: &str,
+        confirm: Option<&dyn ConfirmationHandler>,
+        cancel: Option<&Cancellation>,
+        sink: Option<&UnboundedSender<String>>,
+        progress: Option<&UnboundedSender<String>>,
+    ) -> (
+        Result<(String, String, crate::orchestrator::TurnTiming)>,
+        (Vec<crate::conversation::Steer>, Vec<String>),
+    ) {
+        let conv = match self.conversation(session) {
+            Ok(conv) => conv,
+            Err(e) => return (Err(e), Default::default()),
         };
+        let Some(_answering) = conv.begin_turn() else {
+            return (
+                Err(JarvisError::Busy(
+                    "This conversation is answering another question. Wait for it, or open another with /new.".into(),
+                )),
+                Default::default(),
+            );
+        };
+        let result = self
+            .answer(&conv, prompt, confirm, cancel, sink, progress)
+            .await;
+        let outcome = (conv.take_steers(), conv.take_used_steers());
+        (result, outcome)
+    }
+
+    async fn answer(
+        &self,
+        conv: &Arc<Conversation>,
+        prompt: &str,
+        confirm: Option<&dyn ConfirmationHandler>,
+        cancel: Option<&Cancellation>,
+        sink: Option<&UnboundedSender<String>>,
+        progress: Option<&UnboundedSender<String>>,
+    ) -> Result<(String, String, crate::orchestrator::TurnTiming)> {
+        let conv = conv.clone();
         let orch = &self.orchestrator;
         let session_id = conv.id.clone();
         self.conversations.used(&conv);
@@ -129,14 +174,6 @@ impl Daemon {
                 id: id.to_string(),
                 text: text.to_string(),
             }))
-    }
-
-    /// After a turn: the steers it did not use, and the ids of those it did.
-    pub fn steer_outcome(&self, session: &str) -> (Vec<crate::conversation::Steer>, Vec<String>) {
-        match self.conversation(session) {
-            Ok(conv) => (conv.take_steers(), conv.take_used_steers()),
-            Err(_) => (Vec::new(), Vec::new()),
-        }
     }
 
     /// A conversation's mode.

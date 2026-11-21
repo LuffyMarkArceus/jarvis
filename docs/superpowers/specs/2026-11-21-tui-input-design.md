@@ -59,7 +59,7 @@ do not clash with it.
 | Ctrl+Delete, Alt+D | delete the word after the cursor |
 | Ctrl+K | delete to the end of the line |
 | Ctrl+U | clear the input (unchanged) |
-| Up / Down | move between lines of a multi-line message; history at the first or last line |
+| Up / Down | move between lines of a multi-line message; past the first or last line, history as before (when the box is empty; a half-written message is never replaced) |
 | Shift+Enter, Alt+Enter | new line |
 
 * **A word** is a run of letters and digits. Anything else separates words,
