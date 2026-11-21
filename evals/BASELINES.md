@@ -260,3 +260,12 @@ failed are the **model-dependent** ones, scored separately below.
 * Not measured: Big Pickle and Beam Free (OpenCode Zen) refuse API use of
   their free models ("Free models work in OpenCode"); gemma-4-31b:free was
   rate-limited upstream (34 of 57 skipped), so it is not in the table.
+
+## 2026-11-21, Milestones 6.5-6.7a verification on qwen2.5:3b at 30b562e
+
+93.3% mean pass rate, 56/60 cases pass every attempt (p50 14.8 s). On the 57
+cases shared with the last full qwen run (75ca551, 91.2%): 93.0%, none worse,
+`memory.correction` 0/3 -> 3/3. Still failing 3/3: `ctrl.follow_steps`,
+`memory.followup_file`, `web.latest_news`, `web.nobel_physics`. The same day,
+on the real GPU, a llama question waited behind a qwen answer ("waiting for the
+GPU"), spilled to nemotron after 5 s and answered in 11.4 s (6.5b).
