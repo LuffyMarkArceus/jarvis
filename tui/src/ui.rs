@@ -27,6 +27,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_transcript(frame, app, chunks[1]);
     let cursor = draw_input(frame, app, chunks[2]);
     draw_footer(frame, app, chunks[3]);
+    draw_menu(frame, app, chunks[2]);
 
     if app.overlay.is_some() {
         draw_overlay(frame, app, area);
@@ -90,7 +91,27 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::bordered().title(" Conversation ");
     let inner = block.inner(area);
     let width = inner.width.max(1) as usize;
-    let lines = transcript_lines(&app.entries, width);
+    let mut lines = transcript_lines(&app.entries, width);
+    // What waits for the running turn: dim, at the end, as in T3 Code.
+    for queued in app.queue().into_iter().flatten() {
+        let what = if queued.steer {
+            "returned steer"
+        } else {
+            "queued"
+        };
+        lines.push(Line::raw(""));
+        for wrapped in wrap::wrap(
+            &format!("⋯ {what}: {}", queued.text),
+            width.saturating_sub(2).max(1),
+        ) {
+            lines.push(Line::styled(
+                format!("  {wrapped}"),
+                Style::new()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+            ));
+        }
+    }
 
     app.max_scroll = lines.len().saturating_sub(inner.height as usize);
     if app.scroll > app.max_scroll {
@@ -136,10 +157,80 @@ fn transcript_lines(entries: &[Entry], width: usize) -> Vec<Line<'static>> {
     lines
 }
 
+/// The keys that apply in the input box now.
+fn input_hint(app: &App) -> String {
+    let newline = if app.keyboard_enhanced {
+        "Shift+Enter"
+    } else {
+        "Alt+Enter"
+    };
+    let queued = app.queue().map_or(0, |q| q.len());
+    let queued = if queued > 0 {
+        format!("queued: {queued} · ")
+    } else {
+        String::new()
+    };
+    if app.is_busy() {
+        let (enter, other) = match app.follow_up {
+            crate::app::FollowUp::Queue => ("queue", "steer"),
+            crate::app::FollowUp::Steer => ("steer", "queue"),
+        };
+        let flip = if app.keyboard_enhanced {
+            format!("Ctrl+Enter {other}")
+        } else {
+            "/steer <msg>".to_string()
+        };
+        format!(" {queued}Enter {enter} · {flip} · Ctrl+C cancel turn ")
+    } else {
+        format!(" {queued}Enter send · {newline} newline · Ctrl+←/→ word ")
+    }
+}
+
+/// The `/` menu, just above the input box, over the transcript.
+fn draw_menu(frame: &mut Frame, app: &App, input: Rect) {
+    let Some(rows) = app.menu_rows() else {
+        return;
+    };
+    const SHOWN: usize = 8;
+    let selected = app.menu_selected.min(rows.len() - 1);
+    let first = selected.saturating_sub(SHOWN - 1);
+    let visible = &rows[first..rows.len().min(first + SHOWN)];
+    let height = visible.len() as u16 + 2;
+    let area = Rect {
+        x: input.x,
+        y: input.y.saturating_sub(height),
+        width: input.width,
+        height: height.min(input.y),
+    };
+    let items: Vec<ListItem> = visible
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let style = if first + i == selected {
+                Style::new()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::new()
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!(" {:<10}", c.name), style.fg(Color::Cyan)),
+                Span::styled(format!("{:<14}", c.args), style.fg(Color::DarkGray)),
+                Span::styled(c.about.to_string(), style),
+            ]))
+        })
+        .collect();
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        List::new(items).block(Block::bordered().title(" Tab complete · Enter run · Esc close ")),
+        area,
+    );
+}
+
 fn draw_input(frame: &mut Frame, app: &App, area: Rect) -> Option<Position> {
     let block = Block::bordered()
         .title(" Message ")
-        .title_bottom(Line::from(" Enter send · Alt+Enter newline ").right_aligned());
+        .title_bottom(Line::from(input_hint(app)).right_aligned());
     let inner = block.inner(area);
     if inner.height == 0 {
         frame.render_widget(block, area);
@@ -208,7 +299,7 @@ fn draw_overlay(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_help(frame: &mut Frame, area: Rect) {
     let rows = [
         ("Enter", "send the message"),
-        ("Alt+Enter", "insert a newline"),
+        ("Shift+Enter, Alt+Enter", "insert a newline"),
         ("Up / Down", "prompt history, or scroll"),
         ("PgUp / PgDn, wheel", "scroll the conversation"),
         ("Shift+drag", "select text to copy"),
@@ -216,56 +307,35 @@ fn draw_help(frame: &mut Frame, area: Rect) {
         ("Ctrl+C", "cancel the running turn, or quit when idle"),
         ("Ctrl+S", "list and switch sessions"),
         ("Ctrl+P", "pick the model"),
-        ("/recall <q>", "search memories across sessions"),
+        ("Shift+Tab", "cycle plan, interactive, autopilot"),
+        (
+            "Ctrl+←/→, Ctrl+A/E",
+            "word back / forward, start / end of line",
+        ),
+        ("Ctrl+Backspace / W / K", "delete word back, to end of line"),
+        ("/", "the commands menu"),
         ("Ctrl+L", "clear the screen"),
         ("Ctrl+U", "clear the message box"),
         ("Ctrl+R", "reconnect to the daemon"),
         ("Ctrl+Q", "quit"),
-        ("/new", "start a new session"),
-        ("/sessions", "list sessions"),
-        ("/switch <id>", "switch to a session"),
-        ("/delete <id>", "delete a session"),
-        ("/prune", "remove empty sessions"),
-        ("/session", "show the current session id"),
-        ("/recall <query>", "search memories across sessions"),
-        ("/status, /tools", "daemon information"),
-        (
-            "/model [name] [msg]",
-            "pick a model; switch by name, then send msg",
-        ),
-        ("/timing", "where the last turn's time went"),
-        ("/bad, /good [note]", "flag the last answer for review"),
-        (
-            "/remote, /local",
-            "answer with the remote or the local model",
-        ),
-        (
-            "/undo, /undo list",
-            "undo Jarvis's last file change (asks first)",
-        ),
-        (
-            "/trust, /trust clear",
-            "what this conversation trusts; forget it",
-        ),
-        (
-            "/mode [autonomy]",
-            "show, or plan / interactive / autopilot",
-        ),
-        (
-            "/approval <level>",
-            "manual / assisted / allow-all: what needs a yes",
-        ),
-        ("/sandbox on|off", "where commands run"),
-        (
-            "/approve [all|none|n]",
-            "list or run what Autopilot left for you",
-        ),
-        ("/go [auto]", "carry out the plan above"),
-        ("/clear, /quit, /help", "clear, leave, this list"),
+        ("F1", "this help"),
     ];
 
+    let commands: Vec<(String, &str)> = crate::commands::COMMANDS
+        .iter()
+        .map(|c| {
+            (
+                format!("{} {}", c.name, c.args).trim_end().to_string(),
+                c.about,
+            )
+        })
+        .collect();
     let mut lines = Vec::new();
-    for (key, what) in rows {
+    let all = rows
+        .iter()
+        .map(|(k, w)| (k.to_string(), *w))
+        .chain(commands);
+    for (key, what) in all {
         lines.push(Line::from(vec![
             Span::styled(
                 format!("{key:<26}"),
@@ -451,6 +521,52 @@ fn draw_recall(frame: &mut Frame, rows: &[crate::app::RecallRow], area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn screen(app: &mut App) -> String {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn the_queue_shows_at_the_end_and_in_the_hint() {
+        let mut app = App::new("llama3.2:1b".into());
+        app.session_id = Some("abc".into());
+        app.queues
+            .entry("abc".into())
+            .or_default()
+            .push_back(crate::app::Queued {
+                id: uuid::Uuid::new_v4(),
+                text: "rename them too".into(),
+                steer: false,
+            });
+        let shown = screen(&mut app);
+        assert!(shown.contains("⋯ queued: rename them too"), "{shown}");
+        assert!(shown.contains("queued: 1"), "{shown}");
+    }
+
+    #[test]
+    fn the_menu_draws_above_the_input() {
+        let mut app = App::new("llama3.2:1b".into());
+        app.input.set("/mo");
+        let shown = screen(&mut app);
+        assert!(shown.contains("/model"), "{shown}");
+        assert!(shown.contains("/mode"), "{shown}");
+        app.input.set("/model qwen");
+        assert!(
+            !screen(&mut app).contains("Tab complete"),
+            "closed once an argument is typed"
+        );
+    }
 
     #[test]
     fn transcript_has_labels_and_blank_separators() {

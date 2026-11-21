@@ -6,7 +6,9 @@
 
 mod app;
 mod client;
+mod commands;
 mod diag;
+mod input;
 mod ui;
 mod wrap;
 
@@ -33,13 +35,15 @@ async fn main() -> Result<()> {
     let config = Config::load();
     let socket = config.general.data_dir.join("jarvis.sock");
     let mut app = App::new(config.model.default_model.clone());
+    app.follow_up = config.tui.follow_up;
     // `jarvis-tui --continue` (and `jarvis up --continue`): the conversation
     // used last. Otherwise each window starts its own.
     app.continue_last = std::env::args().any(|a| a == "--continue");
     let mut diag = diag::Diag::new(&config.general.data_dir);
     diag.line("started");
 
-    let mut terminal = setup_terminal()?;
+    let (mut terminal, enhanced) = setup_terminal()?;
+    app.keyboard_enhanced = enhanced;
     let _guard = TerminalGuard;
 
     let (input_tx, mut input_rx) = mpsc::unbounded_channel();
@@ -185,6 +189,9 @@ fn perform(
             }
             Action::Reconnect => {
                 diag.line("reconnect");
+                // The running turn's answer will not come over the new
+                // connection: its steers go back to the queue (6.7a review).
+                app.reconnecting();
                 // Dropping the old client aborts its socket task.
                 *client = None;
                 app.state = DaemonState::Connecting;
@@ -215,6 +222,23 @@ fn perform(
                 if let Some(client) = client.as_ref() {
                     client.cancel(id);
                 }
+            }
+            Action::Steer { steer } => {
+                let Some(client) = client.as_ref() else {
+                    app.steer_unsent(steer);
+                    continue;
+                };
+                let Some(params) = app.scoped(
+                    "steer",
+                    serde_json::json!({ "id": steer.id.to_string(), "text": steer.text }),
+                ) else {
+                    app.steer_unsent(steer);
+                    continue;
+                };
+                let request = Request::new("steer", params);
+                diag.sent(request.id, "steer");
+                app.steer_sent(request.id, steer);
+                client.request(request);
             }
             Action::Request {
                 method,
@@ -273,7 +297,14 @@ fn spawn_input_thread(tx: mpsc::UnboundedSender<Event>) {
     });
 }
 
-fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
+/// The keyboard protocol to ask for: with it, the terminal tells Shift+Enter
+/// from Enter and Ctrl+Backspace from Ctrl+H (6.7a).
+fn enhancement_flags(supported: bool) -> Option<crossterm::event::KeyboardEnhancementFlags> {
+    supported.then_some(crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+}
+
+/// The terminal, and whether it tells Shift+Enter from Enter.
+fn setup_terminal() -> Result<(Terminal<CrosstermBackend<Stdout>>, bool)> {
     enable_raw_mode()?;
     let mut out = stdout();
     crossterm::execute!(
@@ -283,11 +314,18 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
         // Wheel events scroll the conversation; selecting text is Shift+drag.
         crossterm::event::EnableMouseCapture
     )?;
+    let flags =
+        enhancement_flags(crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false));
+    if let Some(flags) = flags {
+        crossterm::execute!(out, crossterm::event::PushKeyboardEnhancementFlags(flags))?;
+    }
     let terminal = Terminal::new(CrosstermBackend::new(out))?;
-    Ok(terminal)
+    Ok((terminal, flags.is_some()))
 }
 
 fn restore_terminal() {
+    // Harmless where nothing was pushed.
+    let _ = crossterm::execute!(stdout(), crossterm::event::PopKeyboardEnhancementFlags);
     let _ = disable_raw_mode();
     let _ = crossterm::execute!(
         stdout(),
@@ -310,6 +348,16 @@ impl Drop for TerminalGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enhancement_only_when_supported() {
+        use crossterm::event::KeyboardEnhancementFlags;
+        assert_eq!(
+            enhancement_flags(true),
+            Some(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        );
+        assert_eq!(enhancement_flags(false), None);
+    }
     use jarvis_core::undo::UndoStore;
 
     /// A config whose data lives in a fresh folder, with one undoable change

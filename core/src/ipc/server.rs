@@ -394,6 +394,27 @@ async fn handle_request(
             request.id,
             serde_json::json!({ "session_id": daemon.last_session() }),
         ),
+        "steer" => {
+            let session = match session_of(&request) {
+                Ok(s) => s,
+                Err(r) => return r,
+            };
+            let id = request
+                .params
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let Some(text) = request.params.get("text").and_then(Value::as_str) else {
+                return Response::err(request.id, "Missing 'text' parameter".to_string());
+            };
+            match daemon.steer(&session, id, text) {
+                Ok(took) => Response::ok(
+                    request.id,
+                    serde_json::json!({ "status": if took { "steering" } else { "not_running" } }),
+                ),
+                Err(e) => Response::err(request.id, e.to_string()),
+            }
+        }
         "approve" => {
             let session = match session_of(&request) {
                 Ok(s) => s,
@@ -668,14 +689,14 @@ async fn handle_ask(
         }
     });
 
-    let result = {
+    let (result, (unused, used)) = {
         let daemon: &Daemon = daemon;
         let confirmer = SocketConfirmer {
             conn: conn.clone(),
             cancel: cancel.clone(),
         };
         daemon
-            .ask_with_footer(
+            .ask_steered(
                 &session,
                 &prompt,
                 Some(&confirmer),
@@ -690,15 +711,33 @@ async fn handle_ask(
     drop(progress);
     let _ = chunk_task.await;
 
+    // The window keeps each steer it sent until told how it went (6.7a).
+    // Both lists on every reply: the window settles each steer it sent.
+    let unused_json: Vec<serde_json::Value> = unused
+        .iter()
+        .map(|s| serde_json::json!({ "id": s.id, "text": s.text }))
+        .collect();
     match result {
         Ok((response, footer, timing)) => Response::ok(
             id,
-            serde_json::json!({"response": response, "footer": footer, "timing": timing}),
+            serde_json::json!({
+                "response": response,
+                "footer": footer,
+                "timing": timing,
+                "unused_steers": unused_json,
+                "used_steers": used,
+            }),
         ),
         // Cancellation is a client action, not a failure of the request.
-        Err(JarvisError::Cancelled) => {
-            Response::ok(id, serde_json::json!({"cancelled": true, "response": ""}))
-        }
+        Err(JarvisError::Cancelled) => Response::ok(
+            id,
+            serde_json::json!({
+                "cancelled": true,
+                "response": "",
+                "unused_steers": unused_json,
+                "used_steers": used,
+            }),
+        ),
         Err(e) => Response::err(id, e.to_string()),
     }
 }

@@ -111,3 +111,11 @@ sending its listing to the remote model ("always allow" stops that).
 | --- | --- | --- |
 | The owner wanted the controls they use daily (Copilot / VS Code / Claude): agent mode and permission level, and a sandbox switch | ours | Modes per conversation; Autopilot defers to `/approve` instead of prompting |
 | Designing Assisted: "contained" (the sandbox) is not "reversible" - the writable folders have no undo copies, so a sandboxed `rm -rf` of the code would have been approved | ours, caught in design | Commands approved without asking run read-only; writes need `writes: true` and a yes |
+
+## 2026-11-21, Milestone 6.7a
+
+| Finding | Whose | Done |
+| --- | --- | --- |
+| No word or line jumps in the message box: reaching the end of a line took one arrow press per character | ours | Text-field editing keys |
+| A message typed while Jarvis worked was refused | ours | Queue, and Steer into the running turn (live: a steer sent during step 1 was answered at step 2) |
+| Ctrl+Backspace arrives as Ctrl+H in most terminals, which opened help mid-sentence | ours | Ctrl+H deletes a word; help is F1 |

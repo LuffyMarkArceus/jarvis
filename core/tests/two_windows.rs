@@ -628,3 +628,43 @@ async fn go_switches_out_of_plan_and_carries_on() {
         .await;
     assert_eq!(shown.result.unwrap()["mode"]["autonomy"], "interactive");
 }
+
+#[tokio::test]
+async fn steer_over_ipc() {
+    let home = fresh().await;
+    let mut a = Window::open(&home).await;
+    let idle = a
+        .in_mine("steer", json!({ "id": "s1", "text": "use Pictures" }))
+        .await;
+    assert!(idle.ok, "{:?}", idle.error);
+    assert_eq!(idle.result.unwrap()["status"], "not_running");
+    let no_session = a.call("steer", json!({ "id": "s1", "text": "x" })).await;
+    assert!(!no_session.ok);
+    let answered = a.in_mine("ask", json!({ "prompt": "hello" })).await;
+    assert_eq!(answered.result.unwrap()["unused_steers"], json!([]));
+}
+
+#[tokio::test]
+async fn a_conversation_with_an_extra_message_still_gets_a_title() {
+    // A steer adds a user message mid-turn; titling must not need exactly 2.
+    let home = fresh().await;
+    let mut a = Window::open(&home).await;
+    MemoryManager::new(home.config.clone())
+        .unwrap()
+        .add_message(&a.session, "user", "an earlier steer")
+        .unwrap();
+    assert!(
+        a.in_mine("ask", json!({ "prompt": "plan my week" }))
+            .await
+            .ok
+    );
+    let listed = a.call("session.list", json!({})).await.result.unwrap();
+    let mine = listed["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == json!(a.session))
+        .cloned()
+        .unwrap();
+    assert_ne!(mine["title"], "New Session", "{mine}");
+}
