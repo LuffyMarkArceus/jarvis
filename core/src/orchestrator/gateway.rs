@@ -277,6 +277,8 @@ impl Orchestrator {
             None
         };
         if agreed && refused.is_none() {
+            // The wait before the spill was waiting for the GPU, not Jarvis.
+            rec.queued(waiter.waited());
             drop(waiter);
             rec.step(format!(
                 "GPU busy: answering with {} (remote)",
