@@ -303,6 +303,26 @@ spill_after = 5      # seconds
 New conversations start local (unless `[remote] default = true`), with the
 model used last on each tier.
 
+### Typing
+
+The message box edits like a text field: Ctrl+←/→ jump words, Home/End (or
+Ctrl+A/Ctrl+E) go to the start or end of the line, Ctrl+Home/End of the whole
+message, Ctrl+Backspace (or Ctrl+W) and Ctrl+Delete delete a word, Ctrl+K
+deletes to the end of the line, Shift+Enter or Alt+Enter starts a new line,
+and Up/Down move between lines before they walk history. Help is F1.
+
+Typing `/` opens a menu of commands that narrows as you type; Tab completes,
+Enter runs, Esc closes it.
+
+While Jarvis is working, Enter **queues** your message: it waits, dimmed at
+the end of the conversation, and is sent when the turn ends (Alt+Up takes the
+last one back to edit). If the turn is cancelled or the daemon drops, the
+queue waits for `/resume`. **Steer** instead with `/steer <message>` (or
+Ctrl+Enter where the terminal can tell it from Enter): it joins the running
+turn, and the model sees it at its next step. `[tui] follow_up = "steer"` makes
+Enter steer and Ctrl+Enter queue. A steer that came too late to be used is
+queued instead, so nothing you type is lost.
+
 ### Modes
 
 Each conversation has three settings, shown in the TUI header

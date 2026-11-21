@@ -108,10 +108,22 @@ after the protections no mode can reach.
 * `Mode::within` is the ceiling a Phase 7 job will run under.
 * [Spec](superpowers/specs/2026-11-20-modes-design.md).
 
-## Milestone 6.7 - TUI essentials (next)
+## Milestone 6.7a - the input box (done, 2026-11-21)
 
-Tool steps as events, diffs in approval prompts, queued messages, markdown,
-a `/mode` picker. Spec first.
+Following T3 Code (the owner's choice over Claude Code's ways):
+
+* Text-field editing: words, lines, Shift+Enter; Ctrl+H no longer help.
+* A `/` commands menu, from one commands table.
+* Queue (held after a cancel; `/resume`) and Steer: a message joins the
+  running turn at its next step; one that comes too late is queued.
+* [Spec](superpowers/specs/2026-11-21-tui-input-design.md).
+
+## Milestone 6.7b - the transcript (next)
+
+The work log folding into one row per turn (with "N files changed" and diffs
+from the undo copies), approval cards in the conversation with diffs and a
+reply that declines with a reason, markdown in answers, modes in the picker.
+Spec first.
 
 ## Milestone 6.3 - OS sandbox (done, 2026-11-09)
 
