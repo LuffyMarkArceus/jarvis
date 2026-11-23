@@ -49,6 +49,7 @@ enum Command {
         id: Uuid,
         approved: bool,
         choice: Option<char>,
+        reason: Option<String>,
     },
     Cancel {
         id: Uuid,
@@ -77,11 +78,12 @@ impl Client {
         let _ = self.commands.send(Command::Request(request));
     }
 
-    pub fn confirm(&self, id: Uuid, approved: bool, choice: Option<char>) {
+    pub fn confirm(&self, id: Uuid, approved: bool, choice: Option<char>, reason: Option<String>) {
         let _ = self.commands.send(Command::Confirm {
             id,
             approved,
             choice,
+            reason,
         });
     }
 
@@ -170,11 +172,12 @@ async fn run(
                         id,
                         approved,
                         choice,
+                        reason,
                     } => Message::ConfirmationReply(ConfirmationReply {
-            reason: None,
                         id,
                         approved,
                         choice,
+                        reason,
                     }),
                     Command::Cancel { id } => Message::Cancel(Cancel { id }),
                 };

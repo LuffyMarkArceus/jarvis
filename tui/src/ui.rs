@@ -24,15 +24,35 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         .split(area);
 
     draw_header(frame, app, chunks[0]);
-    draw_transcript(frame, app, chunks[1]);
+    // An approval is a card at the foot of the conversation (6.7b).
+    let card_height = match &app.overlay {
+        Some(Overlay::Confirm(card)) => card_height(card, chunks[1].height),
+        _ => 0,
+    };
+    let (talk, card_area) = if card_height > 0 {
+        let parts = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(3), Constraint::Length(card_height)])
+            .split(chunks[1]);
+        (parts[0], Some(parts[1]))
+    } else {
+        (chunks[1], None)
+    };
+    draw_transcript(frame, app, talk);
+    if let (Some(area), Some(Overlay::Confirm(card))) = (card_area, &app.overlay) {
+        draw_card(frame, card, area);
+    }
     let cursor = draw_input(frame, app, chunks[2]);
     draw_footer(frame, app, chunks[3]);
     draw_menu(frame, app, chunks[2]);
 
-    if app.overlay.is_some() {
+    let reasoning = matches!(&app.overlay, Some(Overlay::Confirm(card)) if card.reasoning);
+    if app.overlay.is_some() && !matches!(app.overlay, Some(Overlay::Confirm(_))) {
         draw_overlay(frame, app, area);
-    } else if let Some(cursor) = cursor {
-        frame.set_cursor_position(cursor);
+    } else if app.overlay.is_none() || reasoning {
+        if let Some(cursor) = cursor {
+            frame.set_cursor_position(cursor);
+        }
     }
 }
 
@@ -351,7 +371,8 @@ fn draw_overlay(frame: &mut Frame, app: &App, area: Rect) {
         }
         Overlay::Recall(rows) => draw_recall(frame, rows, area),
         Overlay::Models { rows, selected } => draw_models(frame, rows, *selected, area),
-        Overlay::Confirm(request) => draw_confirm(frame, &request.prompt, area),
+        // Drawn in the conversation, by draw_card.
+        Overlay::Confirm(_) => {}
     }
 }
 
@@ -419,23 +440,69 @@ fn draw_help(frame: &mut Frame, area: Rect) {
     );
 }
 
-fn draw_confirm(frame: &mut Frame, prompt: &str, area: Rect) {
-    let lines = vec![
-        Line::raw(""),
-        Line::raw(prompt.to_string()),
-        Line::raw(""),
-        Line::styled(
-            "y approve · n deny · Ctrl+C cancel the turn",
-            Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        ),
-    ];
-    let popup = centered(area, 70, 9);
-    frame.render_widget(Clear, popup);
+/// How tall a card is: its preview, a title and a key line, at most two
+/// thirds of the conversation.
+fn card_height(card: &crate::app::Card, room: u16) -> u16 {
+    let preview = card
+        .request
+        .preview
+        .as_ref()
+        .map_or(0, |p| p.text.lines().count() as u16);
+    let prompt = card.request.prompt.lines().count().max(1) as u16;
+    (prompt + preview + 4).min(room * 2 / 3).max(5)
+}
+
+fn draw_card(frame: &mut Frame, card: &crate::app::Card, area: Rect) {
+    let mut lines: Vec<Line> = card
+        .request
+        .prompt
+        .lines()
+        .map(|l| Line::styled(l.to_string(), Style::new().add_modifier(Modifier::BOLD)))
+        .collect();
+    let body: Vec<Line> = match &card.request.preview {
+        Some(preview) => preview
+            .text
+            .lines()
+            .skip(card.scroll as usize)
+            .map(|l| {
+                let colour = if preview.kind != "diff" {
+                    Color::Yellow
+                } else if l.starts_with("+++") || l.starts_with("---") {
+                    Color::DarkGray
+                } else if l.starts_with('+') {
+                    Color::Green
+                } else if l.starts_with('-') {
+                    Color::Red
+                } else if l.starts_with("@@") {
+                    Color::Cyan
+                } else {
+                    Color::Reset
+                };
+                Line::styled(l.to_string(), Style::new().fg(colour))
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    let room = area.height.saturating_sub(lines.len() as u16 + 3) as usize;
+    lines.extend(body.into_iter().take(room));
+    let mut keys = String::from("y yes · n no · Tab reason");
+    for choice in &card.request.choices[card.request.choices.len().min(1)..] {
+        keys.push_str(&format!(" · {} {}", choice.key, choice.label));
+    }
+    if card.request.preview.is_some() {
+        keys.push_str(" · PgUp/PgDn scroll");
+    }
+    if card.reasoning {
+        keys = "typing a reason · Enter decline with it · Esc back".into();
+    }
+    lines.push(Line::styled(
+        keys,
+        Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+    ));
+    frame.render_widget(Clear, area);
     frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .block(Block::bordered().title(" Approval required "))
-            .wrap(Wrap { trim: false }),
-        popup,
+        Paragraph::new(Text::from(lines)).block(Block::bordered().title(" Approval ")),
+        area,
     );
 }
 
@@ -594,6 +661,42 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn the_card_shows_the_diff_in_colour() {
+        let mut app = App::new("llama3.2:1b".into());
+        app.session_id = Some("abc".into());
+        app.on_client_event(crate::client::ClientEvent::Confirmation(
+            jarvis_common::ipc::ConfirmationRequest {
+                preview: Some(jarvis_common::ipc::Preview {
+                    kind: "diff".into(),
+                    text: "--- notes.md\n+++ notes.md\n-old line\n+new line\n".into(),
+                }),
+                id: uuid::Uuid::new_v4(),
+                tool: "filesystem.write".into(),
+                args: serde_json::json!({}),
+                prompt: "Write notes.md".into(),
+                choices: vec![],
+            },
+        ));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let mut found = None;
+        for y in 0..buffer.area.height {
+            let row: String = (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol().to_string())
+                .collect();
+            if let Some(x) = row.find("+new line") {
+                found = Some((row[..x].chars().count() as u16, y));
+            }
+        }
+        let (x, y) = found.expect("the diff is shown");
+        assert_eq!(buffer[(x, y)].fg, Color::Green);
+        let shown = screen(&mut app);
+        assert!(shown.contains("y yes · n no · Tab reason"), "{shown}");
     }
 
     #[test]

@@ -148,6 +148,8 @@ pub enum Action {
         id: Uuid,
         approved: bool,
         choice: Option<char>,
+        /// Why not, with a no (6.7b).
+        reason: Option<String>,
     },
     /// Stop a running request without closing the connection.
     Cancel {
@@ -179,7 +181,8 @@ pub struct SessionRow {
 #[derive(Debug)]
 pub enum Overlay {
     Help,
-    Confirm(ConfirmationRequest),
+    /// An approval waiting, shown as a card in the conversation (6.7b).
+    Confirm(Card),
     Sessions {
         rows: Vec<SessionRow>,
         selected: usize,
@@ -359,6 +362,27 @@ pub fn parse_command(text: &str) -> Option<Command> {
         }
         _ => return None,
     })
+}
+
+/// An approval card: the request, how far its preview is scrolled,
+/// whether a reason is being typed, and the draft it parked (6.7b).
+#[derive(Debug, Clone)]
+pub struct Card {
+    pub request: ConfirmationRequest,
+    pub scroll: u16,
+    pub reasoning: bool,
+    pub parked: String,
+}
+
+impl Card {
+    pub fn new(request: ConfirmationRequest) -> Card {
+        Card {
+            request,
+            scroll: 0,
+            reasoning: false,
+            parked: String::new(),
+        }
+    }
 }
 
 /// A message waiting to be sent after the running turn.
@@ -617,8 +641,8 @@ impl App {
         self.cancelling = false;
         // A confirmation can no longer be answered; the daemon will deny the
         // tool after its own timeout, so do not pretend it was sent.
-        if matches!(self.overlay, Some(Overlay::Confirm(_))) {
-            self.overlay = None;
+        if let Some(Overlay::Confirm(card)) = self.overlay.take() {
+            self.input.set(&card.parked);
         }
         self.note(Entry::error(reason));
     }
@@ -631,7 +655,11 @@ impl App {
                 vec![]
             }
             ClientEvent::Confirmation(request) => {
-                self.overlay = Some(Overlay::Confirm(request));
+                // A draft (a steer half-typed) waits, and comes back after:
+                // it must never become the decline reason.
+                let mut card = Card::new(request);
+                card.parked = self.input.take();
+                self.overlay = Some(Overlay::Confirm(card));
                 vec![]
             }
             ClientEvent::Chunk { id, text } => self.on_chunk(id, text),
@@ -1607,7 +1635,9 @@ impl App {
             // abort the turn itself; denying only the tool would let the
             // model continue explaining the denial, which is not what Ctrl+C
             // means here.
-            if let Some(Overlay::Confirm(request)) = self.overlay.take() {
+            if let Some(Overlay::Confirm(card)) = self.overlay.take() {
+                self.input.set(&card.parked);
+                let request = card.request;
                 if matches!(self.pending, Some(Pending::Turn)) {
                     if let Some(id) = self.pending_id {
                         if !self.cancelling {
@@ -1621,6 +1651,7 @@ impl App {
                     id: request.id,
                     approved: false,
                     choice: None,
+                    reason: None,
                 }];
             }
             if matches!(self.pending, Some(Pending::Turn)) {
@@ -1806,25 +1837,73 @@ impl App {
         match overlay {
             Overlay::Help => vec![],
             Overlay::Recall(_) => vec![],
-            Overlay::Confirm(request) => {
-                let answer = |approved, choice| Action::Confirm {
-                    id: request.id,
+            Overlay::Confirm(mut card) => {
+                let id = card.request.id;
+                let answer = |approved, choice, reason| Action::Confirm {
+                    id,
                     approved,
                     choice,
+                    reason,
                 };
+                // Typing a reason: keys edit it; Enter sends the no with it.
+                if card.reasoning {
+                    return match key.code {
+                        KeyCode::Enter => {
+                            let reason = self.input.take().trim().to_string();
+                            self.input.set(&card.parked);
+                            vec![answer(false, None, (!reason.is_empty()).then_some(reason))]
+                        }
+                        KeyCode::Esc => {
+                            self.input.clear();
+                            card.reasoning = false;
+                            self.overlay = Some(Overlay::Confirm(card));
+                            vec![]
+                        }
+                        _ => {
+                            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                            let alt = key.modifiers.contains(KeyModifiers::ALT);
+                            let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+                            self.overlay = Some(Overlay::Confirm(card));
+                            if key.code != KeyCode::Tab {
+                                let _ = self.edit_key(key, ctrl, alt, shift);
+                            }
+                            vec![]
+                        }
+                    };
+                }
+                let choices = card.request.choices.clone();
+                let done = |app: &mut App, card: Card| app.input.set(&card.parked);
                 match key.code {
                     // `y` is the plain yes: the first choice, if any.
                     KeyCode::Char('y') | KeyCode::Char('Y') => {
-                        vec![answer(true, request.choices.first().map(|c| c.key))]
+                        done(self, card);
+                        vec![answer(true, choices.first().map(|c| c.key), None)]
                     }
                     KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                        vec![answer(false, None)]
+                        done(self, card);
+                        vec![answer(false, None, None)]
                     }
-                    KeyCode::Char(c) if request.choices.iter().any(|x| x.key == c) => {
-                        vec![answer(true, Some(c))]
+                    KeyCode::Char(c) if choices.iter().any(|x| x.key == c) => {
+                        done(self, card);
+                        vec![answer(true, Some(c), None)]
+                    }
+                    KeyCode::Tab => {
+                        card.reasoning = true;
+                        self.overlay = Some(Overlay::Confirm(card));
+                        vec![]
+                    }
+                    KeyCode::PageDown => {
+                        card.scroll = card.scroll.saturating_add(10);
+                        self.overlay = Some(Overlay::Confirm(card));
+                        vec![]
+                    }
+                    KeyCode::PageUp => {
+                        card.scroll = card.scroll.saturating_sub(10);
+                        self.overlay = Some(Overlay::Confirm(card));
+                        vec![]
                     }
                     _ => {
-                        self.overlay = Some(Overlay::Confirm(request));
+                        self.overlay = Some(Overlay::Confirm(card));
                         vec![]
                     }
                 }
@@ -2924,18 +3003,132 @@ mod tests {
         assert!(app.input.is_empty());
     }
 
+    fn a_card(choices: Vec<jarvis_common::ipc::Choice>) -> ConfirmationRequest {
+        ConfirmationRequest {
+            preview: Some(jarvis_common::ipc::Preview {
+                kind: "diff".into(),
+                text: (0..40).map(|i| format!("+line {i}\n")).collect(),
+            }),
+            id: Uuid::new_v4(),
+            tool: "filesystem.write".into(),
+            args: json!({}),
+            prompt: "Write notes.md".into(),
+            choices,
+        }
+    }
+
+    fn the_card(app: &App) -> &Card {
+        match &app.overlay {
+            Some(Overlay::Confirm(card)) => card,
+            other => panic!("no card: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_card_parks_the_draft_and_gives_it_back() {
+        // Review Focus 4: a half-typed steer is not the decline reason.
+        let mut app = with_session();
+        app.input.set("use the other fold");
+        app.on_client_event(ClientEvent::Confirmation(a_card(vec![])));
+        assert!(app.input.text().is_empty(), "the draft is parked");
+        let actions = press(&mut app, KeyCode::Char('n'));
+        assert!(matches!(
+            actions.as_slice(),
+            [Action::Confirm {
+                approved: false,
+                reason: None,
+                ..
+            }]
+        ));
+        assert_eq!(app.input.text(), "use the other fold", "and given back");
+    }
+
+    #[test]
+    fn y_and_n_answer_at_once() {
+        let mut app = with_session();
+        app.on_client_event(ClientEvent::Confirmation(a_card(vec![])));
+        let actions = press(&mut app, KeyCode::Char('y'));
+        assert!(matches!(
+            actions.as_slice(),
+            [Action::Confirm { approved: true, .. }]
+        ));
+        assert!(app.overlay.is_none());
+    }
+
+    #[test]
+    fn typing_t_never_starts_a_reason() {
+        let mut app = with_session();
+        let trust = jarvis_common::ipc::Choice {
+            key: 't',
+            label: "trust these".into(),
+        };
+        app.on_client_event(ClientEvent::Confirmation(a_card(vec![trust])));
+        let actions = press(&mut app, KeyCode::Char('t'));
+        assert!(matches!(
+            actions.as_slice(),
+            [Action::Confirm {
+                approved: true,
+                choice: Some('t'),
+                ..
+            }]
+        ));
+        assert!(app.input.text().is_empty(), "t was a choice, never text");
+    }
+
+    #[test]
+    fn tab_then_text_then_enter_declines_with_the_reason() {
+        let mut app = with_session();
+        app.on_client_event(ClientEvent::Confirmation(a_card(vec![])));
+        press(&mut app, KeyCode::Tab);
+        assert!(the_card(&app).reasoning);
+        for c in "try notes/".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        assert!(
+            app.overlay.is_some(),
+            "typing t or n in a reason does not answer"
+        );
+        let actions = press(&mut app, KeyCode::Enter);
+        assert!(matches!(
+            actions.as_slice(),
+            [Action::Confirm { approved: false, reason: Some(r), .. }] if r == "try notes/"
+        ));
+        assert!(app.overlay.is_none());
+    }
+
+    #[test]
+    fn esc_in_reason_mode_leaves_it_without_answering() {
+        let mut app = with_session();
+        app.on_client_event(ClientEvent::Confirmation(a_card(vec![])));
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Char('x'));
+        assert!(press(&mut app, KeyCode::Esc).is_empty());
+        assert!(!the_card(&app).reasoning);
+        assert!(app.input.text().is_empty());
+    }
+
+    #[test]
+    fn pgdn_scrolls_the_preview() {
+        let mut app = with_session();
+        app.on_client_event(ClientEvent::Confirmation(a_card(vec![])));
+        press(&mut app, KeyCode::PageDown);
+        assert!(the_card(&app).scroll > 0);
+        press(&mut app, KeyCode::PageUp);
+        assert_eq!(the_card(&app).scroll, 0);
+    }
+
     #[test]
     fn confirmation_prompts_are_answered_explicitly() {
         let mut app = App::new("test".into());
         let id = Uuid::new_v4();
-        app.overlay = Some(Overlay::Confirm(ConfirmationRequest {
+        app.overlay = Some(Overlay::Confirm(Card::new(ConfirmationRequest {
             preview: None,
             id,
             tool: "shell.run".into(),
             args: json!({"command": "firefox"}),
             prompt: "Run shell command: firefox".into(),
             choices: Vec::new(),
-        }));
+        })));
 
         // An unrelated key must not dismiss or approve the request.
         let actions = press(&mut app, KeyCode::Char('x'));
@@ -2953,7 +3146,7 @@ mod tests {
     #[test]
     fn a_prompt_with_choices_answers_with_the_key_pressed() {
         let prompt = || {
-            Overlay::Confirm(ConfirmationRequest {
+            Overlay::Confirm(Card::new(ConfirmationRequest {
                 preview: None,
                 id: Uuid::nil(),
                 tool: "egress.send".into(),
@@ -2969,7 +3162,7 @@ mod tests {
                         label: "always".into(),
                     },
                 ],
-            })
+            }))
         };
         let mut app = App::new("test".into());
         for (key, expected) in [('a', Some('a')), ('y', Some('y'))] {
@@ -2991,14 +3184,14 @@ mod tests {
     #[test]
     fn disconnect_drops_a_confirmation_that_can_no_longer_be_sent() {
         let mut app = App::new("test".into());
-        app.overlay = Some(Overlay::Confirm(ConfirmationRequest {
+        app.overlay = Some(Overlay::Confirm(Card::new(ConfirmationRequest {
             preview: None,
             id: Uuid::new_v4(),
             tool: "shell.run".into(),
             args: json!({}),
             prompt: "Run?".into(),
             choices: Vec::new(),
-        }));
+        })));
         app.on_disconnected("gone".into());
         assert!(app.overlay.is_none());
         assert!(matches!(app.state, DaemonState::Offline(_)));
@@ -3047,14 +3240,14 @@ mod tests {
         let turn_id = Uuid::new_v4();
         app.begin_request(turn_id, Pending::Turn);
         let confirm_id = Uuid::new_v4();
-        app.overlay = Some(Overlay::Confirm(ConfirmationRequest {
+        app.overlay = Some(Overlay::Confirm(Card::new(ConfirmationRequest {
             preview: None,
             id: confirm_id,
             tool: "shell.run".into(),
             args: json!({"command": "firefox"}),
             prompt: "Run shell command: firefox".into(),
             choices: Vec::new(),
-        }));
+        })));
         let actions = app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert!(matches!(
             actions.as_slice(),

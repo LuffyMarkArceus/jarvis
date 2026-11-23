@@ -208,13 +208,14 @@ fn perform(
                 id,
                 approved,
                 choice,
+                reason,
             } => match client.as_ref() {
                 Some(client) => {
                     diag.line(&format!(
                         "prompt answered: {}",
                         if approved { "yes" } else { "no" }
                     ));
-                    client.confirm(id, approved, choice)
+                    client.confirm(id, approved, choice, reason)
                 }
                 None => app.note(Entry::error(
                     "Cannot answer: the daemon is not connected.".to_string(),
