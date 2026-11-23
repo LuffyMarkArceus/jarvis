@@ -151,6 +151,7 @@ impl SocketConfirmer {
     async fn ask(&self, tool: &str, args: &Value, choices: &[Choice]) -> Option<ConfirmationReply> {
         let prompt = choice_prompt(tool, args, choices);
         let request = ConfirmationRequest {
+            preview: None,
             id: Uuid::new_v4(),
             tool: tool.to_string(),
             args: args.clone(),

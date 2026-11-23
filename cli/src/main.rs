@@ -528,6 +528,7 @@ async fn exchange(
             Message::ConfirmationRequest(request) => {
                 let (approved, choice) = answer_confirmation(&request);
                 let reply = Message::ConfirmationReply(jarvis_common::ipc::ConfirmationReply {
+                    reason: None,
                     id: request.id,
                     approved,
                     choice,

@@ -2660,6 +2660,7 @@ mod tests {
         let mut app = App::new("test".into());
         let id = Uuid::new_v4();
         app.overlay = Some(Overlay::Confirm(ConfirmationRequest {
+            preview: None,
             id,
             tool: "shell.run".into(),
             args: json!({"command": "firefox"}),
@@ -2684,6 +2685,7 @@ mod tests {
     fn a_prompt_with_choices_answers_with_the_key_pressed() {
         let prompt = || {
             Overlay::Confirm(ConfirmationRequest {
+                preview: None,
                 id: Uuid::nil(),
                 tool: "egress.send".into(),
                 args: json!({}),
@@ -2721,6 +2723,7 @@ mod tests {
     fn disconnect_drops_a_confirmation_that_can_no_longer_be_sent() {
         let mut app = App::new("test".into());
         app.overlay = Some(Overlay::Confirm(ConfirmationRequest {
+            preview: None,
             id: Uuid::new_v4(),
             tool: "shell.run".into(),
             args: json!({}),
@@ -2776,6 +2779,7 @@ mod tests {
         app.begin_request(turn_id, Pending::Turn);
         let confirm_id = Uuid::new_v4();
         app.overlay = Some(Overlay::Confirm(ConfirmationRequest {
+            preview: None,
             id: confirm_id,
             tool: "shell.run".into(),
             args: json!({"command": "firefox"}),

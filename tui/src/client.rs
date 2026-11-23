@@ -142,6 +142,8 @@ async fn run(
                             let _ = events.send(ClientEvent::Progress { id: p.id, text: p.text });
                         }
                         Ok(Message::Cancel(_)) | Ok(Message::Request(_)) | Ok(Message::ConfirmationReply(_)) => {}
+                        // Shown from Task 5 (6.7b).
+                        Ok(Message::Step(_)) => {}
                         Err(e) => {
                             let _ = events.send(ClientEvent::Disconnected(format!(
                                 "unreadable message from the daemon: {e}"
@@ -166,6 +168,7 @@ async fn run(
                         approved,
                         choice,
                     } => Message::ConfirmationReply(ConfirmationReply {
+            reason: None,
                         id,
                         approved,
                         choice,

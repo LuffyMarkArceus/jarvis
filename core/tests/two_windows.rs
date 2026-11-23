@@ -226,6 +226,7 @@ impl Window {
 
     async fn reply(&mut self, prompt: uuid::Uuid, approved: bool) {
         let line = Message::ConfirmationReply(ConfirmationReply {
+            reason: None,
             id: prompt,
             approved,
             choice: None,
