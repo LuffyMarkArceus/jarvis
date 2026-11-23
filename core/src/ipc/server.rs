@@ -702,7 +702,7 @@ async fn handle_ask(
         }
     });
 
-    let (result, (unused, used)) = {
+    let (result, (unused, used), changes) = {
         let daemon: &Daemon = daemon;
         let confirmer = SocketConfirmer {
             conn: conn.clone(),
@@ -741,6 +741,7 @@ async fn handle_ask(
                 "timing": timing,
                 "unused_steers": unused_json,
                 "used_steers": used,
+                "changes": changes,
             }),
         ),
         // Cancellation is a client action, not a failure of the request.
@@ -751,6 +752,7 @@ async fn handle_ask(
                 "response": "",
                 "unused_steers": unused_json,
                 "used_steers": used,
+                "changes": changes,
             }),
         ),
         Err(e) => Response::err(id, e.to_string()),

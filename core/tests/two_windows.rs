@@ -692,3 +692,21 @@ async fn steps_reach_the_window() {
         "{states:?}"
     );
 }
+
+#[tokio::test]
+async fn an_answer_carries_the_files_it_changed() {
+    let home = fresh().await;
+    let mut a = Window::open(&home).await;
+    let (ask, prompt) = a.stop_at_a_prompt().await;
+    a.reply(prompt, true).await;
+    let answered = a.response_to(ask).await;
+    let changes = answered.result.unwrap()["changes"].clone();
+    let changes = changes.as_array().expect("a list");
+    assert_eq!(changes.len(), 1, "{changes:?}");
+    assert!(changes[0]["path"].as_str().unwrap().ends_with("notes.md"));
+    assert!(
+        changes[0]["diff"].as_str().unwrap().contains("+hi"),
+        "{:?}",
+        changes[0]
+    );
+}

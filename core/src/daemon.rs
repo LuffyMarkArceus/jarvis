@@ -79,10 +79,12 @@ impl Daemon {
     ) -> (
         Result<(String, String, crate::orchestrator::TurnTiming)>,
         (Vec<crate::conversation::Steer>, Vec<String>),
+        Vec<jarvis_common::ipc::FileChange>,
     ) {
+        let since = chrono::Utc::now();
         let conv = match self.conversation(session) {
             Ok(conv) => conv,
-            Err(e) => return (Err(e), Default::default()),
+            Err(e) => return (Err(e), Default::default(), Vec::new()),
         };
         let Some(_answering) = conv.begin_turn() else {
             return (
@@ -90,13 +92,15 @@ impl Daemon {
                     "This conversation is answering another question. Wait for it, or open another with /new.".into(),
                 )),
                 Default::default(),
+                Vec::new(),
             );
         };
         let result = self
             .answer(&conv, prompt, confirm, cancel, sink, progress, steps)
             .await;
         let outcome = (conv.take_steers(), conv.take_used_steers());
-        (result, outcome)
+        let changes = self.orchestrator.turn_changes(&conv.id, since);
+        (result, outcome, changes)
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -133,6 +133,17 @@ impl UndoStore {
         total.saturating_sub(droppable) + size <= self.limits.max_total_bytes
     }
 
+    /// The file as it was before change `id`; `None` if no copy was kept
+    /// (over the size limit, or the file did not exist).
+    pub fn before(&self, id: &str) -> Result<Option<Vec<u8>>> {
+        let path = self.dir.join(id).join("before");
+        match std::fs::read(&path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Finished copies: id, when, and size of the copy.
     fn finished(&self) -> Vec<(String, DateTime<Utc>, u64)> {
         let Ok(entries) = std::fs::read_dir(&self.dir) else {

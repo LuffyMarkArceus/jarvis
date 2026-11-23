@@ -278,6 +278,18 @@ impl Orchestrator {
         Conversation::new(id, self.starts_remote())
     }
 
+    /// The files conversation `session` changed since `since` (6.7b).
+    pub fn turn_changes(
+        &self,
+        session: &str,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Vec<jarvis_common::ipc::FileChange> {
+        match &self.undo {
+            Some(store) => crate::changes::turn_changes(store, session, since),
+            None => Vec::new(),
+        }
+    }
+
     /// The mode a new conversation starts in (`[modes]`).
     pub fn default_mode(&self) -> crate::modes::Mode {
         crate::modes::Mode::from_config(&self.config.modes)

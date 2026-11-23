@@ -2,6 +2,7 @@
 
 pub mod apps;
 pub mod cancel;
+pub mod changes;
 pub mod config;
 pub mod confirm;
 pub mod context;
