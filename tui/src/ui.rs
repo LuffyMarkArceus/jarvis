@@ -366,6 +366,12 @@ fn draw_overlay(frame: &mut Frame, app: &App, area: Rect) {
     };
     match overlay {
         Overlay::Help => draw_help(frame, area),
+        Overlay::Changes {
+            files,
+            selected,
+            scroll,
+            confirm_revert,
+        } => draw_changes(frame, files, *selected, *scroll, *confirm_revert, area),
         Overlay::Sessions { rows, selected } => {
             draw_sessions(frame, rows, *selected, app.session_id.as_deref(), area)
         }
@@ -438,6 +444,78 @@ fn draw_help(frame: &mut Frame, area: Rect) {
             .wrap(Wrap { trim: false }),
         popup,
     );
+}
+
+/// The diff view: the files on the left, the chosen one's diff on the right.
+fn draw_changes(
+    frame: &mut Frame,
+    files: &[jarvis_common::ipc::FileChange],
+    selected: usize,
+    scroll: u16,
+    confirm_revert: bool,
+    area: Rect,
+) {
+    frame.render_widget(Clear, area);
+    let outer = Block::bordered().title(if confirm_revert {
+        format!(" Revert {} file(s)? y/n ", files.len())
+    } else {
+        " Changes · Up/Down file · PgUp/PgDn scroll · r revert · Esc close ".to_string()
+    });
+    let inner = outer.inner(area);
+    frame.render_widget(outer, area);
+    let parts = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
+        .split(inner);
+    let items: Vec<ListItem> = files
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            let name = std::path::Path::new(&f.path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| f.path.clone());
+            let style = if i == selected {
+                Style::new()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::new()
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!(" {name} "), style),
+                Span::styled(format!("+{}", f.added), Style::new().fg(Color::Green)),
+                Span::raw(" "),
+                Span::styled(format!("-{}", f.removed), Style::new().fg(Color::Red)),
+            ]))
+        })
+        .collect();
+    frame.render_widget(List::new(items), parts[0]);
+    let diff: Vec<Line> = match files.get(selected).and_then(|f| f.diff.as_deref()) {
+        Some(diff) => diff
+            .lines()
+            .skip(scroll as usize)
+            .map(|l| {
+                let colour = if l.starts_with("+++") || l.starts_with("---") {
+                    Color::DarkGray
+                } else if l.starts_with('+') {
+                    Color::Green
+                } else if l.starts_with('-') {
+                    Color::Red
+                } else if l.starts_with("@@") {
+                    Color::Cyan
+                } else {
+                    Color::Reset
+                };
+                Line::styled(l.to_string(), Style::new().fg(colour))
+            })
+            .collect(),
+        None => vec![Line::styled(
+            "No copy was kept of this file (over the size limit), so there is no diff.",
+            Style::new().fg(Color::DarkGray),
+        )],
+    };
+    frame.render_widget(Paragraph::new(Text::from(diff)), parts[1]);
 }
 
 /// How tall a card is: its preview, a title and a key line, at most two
@@ -661,6 +739,42 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn the_diff_view_colours_plus_and_minus() {
+        let mut app = App::new("llama3.2:1b".into());
+        app.overlay = Some(crate::app::Overlay::Changes {
+            files: vec![jarvis_common::ipc::FileChange {
+                undo_ids: vec!["1".into()],
+                path: "/w/b.md".into(),
+                tool: "filesystem.edit".into(),
+                added: 1,
+                removed: 1,
+                diff: Some("--- /w/b.md\n+++ /w/b.md\n-old line\n+new line\n".into()),
+            }],
+            selected: 0,
+            scroll: 0,
+            confirm_revert: false,
+        });
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let colour_of = |text: &str| {
+            for y in 0..buffer.area.height {
+                let row: String = (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect();
+                if let Some(x) = row.find(text) {
+                    return Some(buffer[(row[..x].chars().count() as u16, y)].fg);
+                }
+            }
+            None
+        };
+        assert_eq!(colour_of("+new line"), Some(Color::Green));
+        assert_eq!(colour_of("-old line"), Some(Color::Red));
+        assert!(screen(&mut app).contains("b.md"));
     }
 
     #[test]

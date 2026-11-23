@@ -43,6 +43,11 @@ pub const COMMANDS: &[CommandInfo] = &[
     ),
     c("/go", "[auto]", "carry out the plan above"),
     c(
+        "/changes",
+        "",
+        "what the last turn changed, with r to revert (Ctrl+D)",
+    ),
+    c(
         "/steer",
         "<message>",
         "add to the running turn; the model sees it next step",

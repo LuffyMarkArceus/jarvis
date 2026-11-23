@@ -183,6 +183,13 @@ pub enum Overlay {
     Help,
     /// An approval waiting, shown as a card in the conversation (6.7b).
     Confirm(Card),
+    /// What the last turn changed, file by file, with `r` to revert it.
+    Changes {
+        files: Vec<jarvis_common::ipc::FileChange>,
+        selected: usize,
+        scroll: u16,
+        confirm_revert: bool,
+    },
     Sessions {
         rows: Vec<SessionRow>,
         selected: usize,
@@ -258,6 +265,8 @@ pub enum Command {
     Queue,
     /// `/steer <text>`: into the running turn.
     Steer(String),
+    /// `/changes` (Ctrl+D): the last turn's file changes.
+    Changes,
     Clear,
     Quit,
     /// `/word` that is no command: shown as a mistake, not sent to the
@@ -347,6 +356,7 @@ pub fn parse_command(text: &str) -> Option<Command> {
         "/resume" => Command::Resume,
         "/queue" => Command::Queue,
         "/steer" => Command::Steer(rest),
+        "/changes" => Command::Changes,
         "/tools" => Command::Tools,
         "/session" => Command::Session,
         "/clear" => Command::Clear,
@@ -848,6 +858,7 @@ impl App {
                 | Command::Queue
                 | Command::Resume
                 | Command::Steer(_)
+                | Command::Changes
                 | Command::Timing
                 | Command::Unknown(_)
         );
@@ -945,6 +956,26 @@ impl App {
                 } else {
                     self.send_prompt(text)
                 }
+            }
+            Command::Changes => {
+                let last = self
+                    .entries
+                    .iter()
+                    .rev()
+                    .filter_map(|e| e.work.as_ref())
+                    .find(|w| !w.changes.is_empty());
+                match last {
+                    Some(log) => {
+                        self.overlay = Some(Overlay::Changes {
+                            files: log.changes.clone(),
+                            selected: 0,
+                            scroll: 0,
+                            confirm_revert: false,
+                        });
+                    }
+                    None => self.note(Entry::system("The last turn changed no files.")),
+                }
+                vec![]
             }
             Command::Resume => {
                 let Some(session) = self.session_id.clone() else {
@@ -1702,6 +1733,9 @@ impl App {
         if ctrl && key.code == KeyCode::Char('r') {
             return vec![Action::Reconnect];
         }
+        if ctrl && key.code == KeyCode::Char('d') {
+            return self.run_command(Command::Changes);
+        }
         if ctrl && key.code == KeyCode::Char('o') {
             self.show_steps = !self.show_steps;
             return vec![];
@@ -1837,6 +1871,60 @@ impl App {
         match overlay {
             Overlay::Help => vec![],
             Overlay::Recall(_) => vec![],
+            Overlay::Changes {
+                files,
+                mut selected,
+                mut scroll,
+                confirm_revert,
+            } => {
+                if confirm_revert {
+                    if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+                        // Newest first, across files: undo ids start with
+                        // their time.
+                        let mut ids: Vec<String> =
+                            files.iter().flat_map(|f| f.undo_ids.clone()).collect();
+                        ids.sort_by(|a, b| b.cmp(a));
+                        return ids.into_iter().map(Action::UndoApply).collect();
+                    }
+                    self.overlay = Some(Overlay::Changes {
+                        files,
+                        selected,
+                        scroll,
+                        confirm_revert: false,
+                    });
+                    return vec![];
+                }
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => return vec![],
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        selected = selected.saturating_sub(1);
+                        scroll = 0;
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        selected = (selected + 1).min(files.len().saturating_sub(1));
+                        scroll = 0;
+                    }
+                    KeyCode::PageDown => scroll = scroll.saturating_add(10),
+                    KeyCode::PageUp => scroll = scroll.saturating_sub(10),
+                    KeyCode::Char('r') => {
+                        self.overlay = Some(Overlay::Changes {
+                            files,
+                            selected,
+                            scroll,
+                            confirm_revert: true,
+                        });
+                        return vec![];
+                    }
+                    _ => {}
+                }
+                self.overlay = Some(Overlay::Changes {
+                    files,
+                    selected,
+                    scroll,
+                    confirm_revert: false,
+                });
+                vec![]
+            }
             Overlay::Confirm(mut card) => {
                 let id = card.request.id;
                 let answer = |approved, choice, reason| Action::Confirm {
@@ -2290,6 +2378,108 @@ mod tests {
             removed: 0,
             diff: Some(format!("+++ {path}\n+x\n")),
         }
+    }
+
+    fn turn_with_changes(app: &mut App, changes: serde_json::Value) {
+        running(app, "rename them");
+        let id = app.pending_id.unwrap();
+        app.on_response(Response::ok(
+            id,
+            json!({ "cancelled": true, "response": "", "changes": changes }),
+        ));
+    }
+
+    fn two_files() -> serde_json::Value {
+        json!([
+            { "undo_ids": ["20261122T100002-b2", "20261122T100001-b1"], "path": "/w/b.md",
+              "tool": "filesystem.edit", "added": 1, "removed": 1,
+              "diff": "--- /w/b.md\n+++ /w/b.md\n-old\n+new\n" },
+            { "undo_ids": ["20261122T100000-a1"], "path": "/w/new.md",
+              "tool": "filesystem.write", "added": 30, "removed": 0,
+              "diff": (0..30).map(|i| format!("+l{i}\n")).collect::<String>() }
+        ])
+    }
+
+    fn the_changes(app: &App) -> (usize, u16, bool, usize) {
+        match &app.overlay {
+            Some(Overlay::Changes {
+                files,
+                selected,
+                scroll,
+                confirm_revert,
+            }) => (files.len(), *scroll, *confirm_revert, *selected),
+            other => panic!("no diff view: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ctrl_d_opens_the_last_turns_changes() {
+        let mut app = with_session();
+        key(&mut app, KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert!(app.overlay.is_none());
+        assert!(app
+            .entries
+            .last()
+            .unwrap()
+            .text
+            .contains("The last turn changed no files."));
+        turn_with_changes(&mut app, two_files()); // a cancelled turn's changes
+        key(&mut app, KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert_eq!(the_changes(&app).0, 2);
+        press(&mut app, KeyCode::Esc);
+        assert!(enter(&mut app, "/changes").is_empty());
+        assert_eq!(the_changes(&app).0, 2);
+    }
+
+    #[test]
+    fn up_down_choose_a_file_and_pgdn_scrolls() {
+        let mut app = with_session();
+        turn_with_changes(&mut app, two_files());
+        key(&mut app, KeyCode::Char('d'), KeyModifiers::CONTROL);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(the_changes(&app).3, 1);
+        press(&mut app, KeyCode::PageDown);
+        assert!(the_changes(&app).1 > 0);
+        press(&mut app, KeyCode::Up);
+        assert_eq!(the_changes(&app).3, 0);
+        assert_eq!(the_changes(&app).1, 0, "a new file starts at the top");
+    }
+
+    #[test]
+    fn r_then_y_reverts_exactly_the_turns_ids_newest_first() {
+        // Review Focus 2 and 5: a cancelled turn's changes, a new file.
+        let mut app = with_session();
+        turn_with_changes(&mut app, two_files());
+        key(&mut app, KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert!(press(&mut app, KeyCode::Char('r')).is_empty());
+        assert!(the_changes(&app).2, "asks first");
+        let actions = press(&mut app, KeyCode::Char('y'));
+        let ids: Vec<String> = actions
+            .iter()
+            .map(|a| match a {
+                Action::UndoApply(id) => id.clone(),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                "20261122T100002-b2",
+                "20261122T100001-b1",
+                "20261122T100000-a1"
+            ]
+        );
+        assert!(app.overlay.is_none());
+    }
+
+    #[test]
+    fn r_then_n_does_nothing() {
+        let mut app = with_session();
+        turn_with_changes(&mut app, two_files());
+        key(&mut app, KeyCode::Char('d'), KeyModifiers::CONTROL);
+        press(&mut app, KeyCode::Char('r'));
+        assert!(press(&mut app, KeyCode::Char('n')).is_empty());
+        assert!(!the_changes(&app).2);
     }
 
     #[test]
