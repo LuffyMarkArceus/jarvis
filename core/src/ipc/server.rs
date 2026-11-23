@@ -14,7 +14,7 @@ use crate::cancel::{Cancellation, TurnGuard, TurnRegistry};
 use crate::confirm::choice_prompt;
 use crate::daemon::Daemon;
 use crate::error::{JarvisError, Result};
-use crate::orchestrator::ConfirmationHandler;
+use crate::orchestrator::{Answer, ConfirmationHandler};
 use jarvis_common::ipc::{
     Choice, Chunk, ConfirmationReply, ConfirmationRequest, Message, Progress, Request, Response,
 };
@@ -143,6 +143,22 @@ impl ConfirmationHandler for SocketConfirmer {
             .await
             .and_then(|reply| reply.selected(choices))
     }
+
+    async fn answer(&self, tool: &str, args: &Value, choices: &[Choice]) -> Answer {
+        let Some(reply) = self.ask(tool, args, choices).await else {
+            return Answer::default();
+        };
+        let choice = if choices.is_empty() {
+            reply.approved.then_some('y')
+        } else {
+            reply.selected(choices)
+        };
+        Answer {
+            approved: choice.is_some(),
+            choice,
+            reason: reply.reason.filter(|_| choice.is_none()),
+        }
+    }
 }
 
 impl SocketConfirmer {
@@ -151,7 +167,8 @@ impl SocketConfirmer {
     async fn ask(&self, tool: &str, args: &Value, choices: &[Choice]) -> Option<ConfirmationReply> {
         let prompt = choice_prompt(tool, args, choices);
         let request = ConfirmationRequest {
-            preview: None,
+            // What would change, from the same arguments the gate runs.
+            preview: crate::preview::preview(tool, args),
             id: Uuid::new_v4(),
             tool: tool.to_string(),
             args: args.clone(),

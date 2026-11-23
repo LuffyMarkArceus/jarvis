@@ -507,7 +507,11 @@ pub(super) fn indent(text: &str, n: usize) -> String {
 
 /// If any action was blocked, render the deterministic report.
 pub(super) fn blocked_report(trace: &[ToolOutcome]) -> Option<String> {
-    if trace.iter().any(|t| t.status.is_blocked()) {
+    // A no with a reason does not end the turn: the model was told why.
+    if trace
+        .iter()
+        .any(|t| t.status.is_blocked() && !t.redirects())
+    {
         Some(render_blocked_report(trace))
     } else {
         None

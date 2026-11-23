@@ -22,6 +22,7 @@ pub mod openai;
 pub mod orchestrator;
 pub mod permissions;
 pub mod planner;
+pub mod preview;
 pub mod provider;
 pub mod router;
 pub mod sandbox;

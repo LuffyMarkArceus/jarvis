@@ -55,6 +55,17 @@ impl OutcomeStatus {
     }
 }
 
+impl ToolOutcome {
+    /// Declined with a reason: the owner steering, not stopping (6.7b).
+    pub(super) fn redirects(&self) -> bool {
+        self.status == OutcomeStatus::Declined
+            && self
+                .result
+                .as_ref()
+                .is_some_and(|r| r.get("reason").is_some())
+    }
+}
+
 /// One tool invocation and its result, kept only for the current turn.
 #[derive(Debug, Clone)]
 pub(super) struct ToolOutcome {

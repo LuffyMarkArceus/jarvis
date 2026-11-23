@@ -710,3 +710,22 @@ async fn an_answer_carries_the_files_it_changed() {
         changes[0]
     );
 }
+
+#[tokio::test]
+async fn a_write_prompt_carries_its_diff() {
+    let home = fresh().await;
+    let mut a = Window::open(&home).await;
+    let ask = a.send("ask", json!({ "prompt": WRITE })).await;
+    let request = loop {
+        match a.next_message().await {
+            Message::ConfirmationRequest(c) => break c,
+            Message::Response(r) if r.id == ask => panic!("no prompt: {r:?}"),
+            _ => {}
+        }
+    };
+    let preview = request.preview.expect("a preview");
+    assert_eq!(preview.kind, "diff");
+    assert!(preview.text.contains("+hi"), "{}", preview.text);
+    a.reply(request.id, false).await;
+    a.response_to(ask).await;
+}

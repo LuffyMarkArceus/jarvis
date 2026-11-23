@@ -57,6 +57,13 @@ impl ConfirmationHandler for TimedConfirm<'_> {
         self.add(started);
         answer
     }
+
+    async fn answer(&self, tool: &str, args: &Value, choices: &[Choice]) -> Answer {
+        let started = Instant::now();
+        let answer = self.inner.answer(tool, args, choices).await;
+        self.add(started);
+        answer
+    }
 }
 
 /// The words that carry a request's meaning.

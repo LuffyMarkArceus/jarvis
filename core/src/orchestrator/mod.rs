@@ -121,9 +121,33 @@ pub trait ConfirmationHandler: Send + Sync {
             None
         }
     }
+
+    /// The whole answer, a reason included. A handler that cannot give a
+    /// reason answers through `confirm` or `choose`.
+    async fn answer(&self, tool: &str, args: &Value, choices: &[Choice]) -> Answer {
+        let choice = if choices.is_empty() {
+            self.confirm(tool, args).await.then_some('y')
+        } else {
+            self.choose(tool, args, choices).await
+        };
+        Answer {
+            approved: choice.is_some(),
+            choice,
+            reason: None,
+        }
+    }
 }
 
 pub use jarvis_common::ipc::Choice;
+
+/// An answer to a prompt: yes or no, which choice, and - with a no - why
+/// (6.7b), which reaches the model.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Answer {
+    pub approved: bool,
+    pub choice: Option<char>,
+    pub reason: Option<String>,
+}
 
 /// The name under which sending to a remote provider is confirmed. Not a
 /// real tool: it reuses the confirmation path every client already has.
