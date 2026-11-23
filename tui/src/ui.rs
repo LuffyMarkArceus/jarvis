@@ -388,7 +388,9 @@ fn draw_overlay(frame: &mut Frame, app: &App, area: Rect) {
             draw_sessions(frame, rows, *selected, app.session_id.as_deref(), area)
         }
         Overlay::Recall(rows) => draw_recall(frame, rows, area),
-        Overlay::Models { rows, selected } => draw_models(frame, rows, *selected, area),
+        Overlay::Models { rows, selected } => {
+            draw_models(frame, rows, &app.mode_rows(), *selected, area)
+        }
         // Drawn in the conversation, by draw_card.
         Overlay::Confirm(_) => {}
     }
@@ -656,8 +658,14 @@ fn draw_sessions(
     );
 }
 
-fn draw_models(frame: &mut Frame, rows: &[crate::app::ModelRow], selected: usize, area: Rect) {
-    let items: Vec<ListItem> = if rows.is_empty() {
+fn draw_models(
+    frame: &mut Frame,
+    rows: &[crate::app::ModelRow],
+    modes: &[String],
+    selected: usize,
+    area: Rect,
+) {
+    let mut items: Vec<ListItem> = if rows.is_empty() {
         vec![ListItem::new(Line::styled(
             "No models configured. Press Esc to close.",
             Style::new().fg(Color::DarkGray),
@@ -679,12 +687,28 @@ fn draw_models(frame: &mut Frame, rows: &[crate::app::ModelRow], selected: usize
             })
             .collect()
     };
+    // The mode, under the models (6.7b): Enter moves a row to its next value.
+    items.push(ListItem::new(Line::styled(
+        "  Mode",
+        Style::new().fg(Color::DarkGray),
+    )));
+    for mode in modes {
+        items.push(ListItem::new(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(mode.clone(), Style::new().fg(Color::Magenta)),
+        ])));
+    }
     let height = (items.len() as u16 + 2).min((area.height * 7 / 10).max(5));
     let popup = centered(area, 70, height);
     let mut state = ListState::default();
-    if !rows.is_empty() {
-        state.select(Some(selected.min(rows.len() - 1)));
-    }
+    let model_rows = rows.len().max(1);
+    // Past the models, skip the "Mode" heading row.
+    let shown = if selected < rows.len() {
+        selected
+    } else {
+        model_rows + 1 + (selected - rows.len())
+    };
+    state.select(Some(shown.min(items.len() - 1)));
     frame.render_widget(Clear, popup);
     frame.render_stateful_widget(
         List::new(items)

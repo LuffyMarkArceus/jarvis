@@ -460,6 +460,9 @@ pub struct App {
     pub mode_label: String,
     /// Its autonomy, for Shift+Tab: `plan`, `interactive` or `autopilot`.
     autonomy: String,
+    /// The rest of the mode, for the picker's rows (6.7b).
+    approval: String,
+    sandbox: bool,
     /// When the pending request was sent.
     busy_since: Option<Instant>,
     /// What the pending turn says it is doing now.
@@ -504,6 +507,8 @@ impl App {
             menu_closed: false,
             mode_label: "Interactive · Manual · Sandbox on".into(),
             autonomy: "interactive".into(),
+            approval: "manual".into(),
+            sandbox: true,
             busy_since: None,
             progress: None,
             diag: Vec::new(),
@@ -845,6 +850,54 @@ impl App {
         }
         if let Some(autonomy) = result["mode"]["autonomy"].as_str() {
             self.autonomy = autonomy.to_string();
+        }
+        if let Some(approval) = result["mode"]["approval"].as_str() {
+            self.approval = approval.to_string();
+        }
+        if let Some(sandbox) = result["mode"]["sandbox"].as_bool() {
+            self.sandbox = sandbox;
+        }
+    }
+
+    /// The picker's mode rows, after the models.
+    pub fn mode_rows(&self) -> Vec<String> {
+        let autonomy = match self.autonomy.as_str() {
+            "plan" => "Plan",
+            "autopilot" => "Autopilot",
+            _ => "Interactive",
+        };
+        let approval = match self.approval.as_str() {
+            "assisted" => "Assisted",
+            "allow_all" => "Allow all",
+            _ => "Manual",
+        };
+        vec![
+            format!("Autonomy: {autonomy}"),
+            format!("Approval: {approval}"),
+            format!("Sandbox: {}", if self.sandbox { "on" } else { "off" }),
+        ]
+    }
+
+    /// Enter on mode row `row`: the next value.
+    fn next_mode(&mut self, row: usize) -> Vec<Action> {
+        match row {
+            0 => {
+                let next = match self.autonomy.as_str() {
+                    "interactive" => "autopilot",
+                    "autopilot" => "plan",
+                    _ => "interactive",
+                };
+                self.mode_request("autonomy", next)
+            }
+            1 => {
+                let next = match self.approval.as_str() {
+                    "manual" => "assisted",
+                    "assisted" => "allow_all",
+                    _ => "manual",
+                };
+                self.mode_request("approval", next)
+            }
+            _ => self.mode_request("sandbox", if self.sandbox { "off" } else { "on" }),
         }
     }
 
@@ -2002,7 +2055,8 @@ impl App {
                 }
             }
             Overlay::Models { rows, mut selected } => {
-                let last = rows.len().saturating_sub(1);
+                // The models, then the three mode rows.
+                let last = rows.len() + 2;
                 match key.code {
                     KeyCode::Esc => {}
                     KeyCode::Up | KeyCode::Char('k') => {
@@ -2017,6 +2071,9 @@ impl App {
                         if let Some(row) = rows.get(selected) {
                             return vec![Self::model_set(&row.name, None)];
                         }
+                        let mode_row = selected - rows.len();
+                        self.overlay = Some(Overlay::Models { rows, selected });
+                        return self.next_mode(mode_row);
                     }
                     _ => {
                         self.overlay = Some(Overlay::Models { rows, selected });
@@ -2414,6 +2471,65 @@ mod tests {
                 confirm_revert,
             }) => (files.len(), *scroll, *confirm_revert, *selected),
             other => panic!("no diff view: {other:?}"),
+        }
+    }
+
+    fn picker(app: &mut App) {
+        app.overlay = Some(Overlay::Models {
+            rows: vec![
+                ModelRow {
+                    name: "llama3.2:1b".into(),
+                    remote: false,
+                    current: true,
+                },
+                ModelRow {
+                    name: "qwen2.5:3b".into(),
+                    remote: false,
+                    current: false,
+                },
+            ],
+            selected: 0,
+        });
+    }
+
+    #[test]
+    fn the_picker_lists_mode_rows_after_models() {
+        let mut app = with_session();
+        picker(&mut app);
+        assert_eq!(
+            app.mode_rows(),
+            vec!["Autonomy: Interactive", "Approval: Manual", "Sandbox: on"]
+        );
+        for _ in 0..4 {
+            press(&mut app, KeyCode::Down);
+        }
+        match &app.overlay {
+            Some(Overlay::Models { selected, .. }) => {
+                assert_eq!(*selected, 4, "into the mode rows")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn enter_on_a_mode_row_sends_the_next_value() {
+        let mut app = with_session();
+        for (row, what, next) in [
+            (2, "autonomy", json!("autopilot")),
+            (3, "approval", json!("assisted")),
+            (4, "sandbox", json!(false)),
+        ] {
+            picker(&mut app);
+            if let Some(Overlay::Models { selected, .. }) = &mut app.overlay {
+                *selected = row;
+            }
+            let (method, params) = request_of(&press(&mut app, KeyCode::Enter));
+            assert_eq!(method, "mode.set");
+            assert_eq!(params[what], next, "{what}");
+            assert!(
+                matches!(app.overlay, Some(Overlay::Models { .. })),
+                "the picker stays open"
+            );
         }
     }
 
@@ -3529,9 +3645,13 @@ mod tests {
         let request = Request::new("model.list", json!({}));
         app.begin_request(request.id, Pending::Models);
         app.on_response(Response::ok(request.id, models_reply()));
-        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        // Down to the last model (the mode rows come after it).
+        while let Some(Overlay::Models { rows, selected }) = &app.overlay {
+            if *selected + 1 >= rows.len() {
+                break;
+            }
+            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
         let actions = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         match actions.as_slice() {
             [Action::Request { method, params, .. }] => {
