@@ -107,3 +107,26 @@ async fn a_declined_call_ends_declined() {
     assert_eq!(write_end.state, "declined", "{events:?}");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[tokio::test]
+async fn a_step_detail_never_shows_the_untrusted_tag() {
+    // Review M9: the detail is the output's first line, not Jarvis's label.
+    let (events, dir) = steps_of(|d| {
+        vec![
+            call(
+                "filesystem.read",
+                json!({ "path": d.join("project/a.txt") }),
+            ),
+            answer("it says a"),
+        ]
+    })
+    .await;
+    let read_end = events
+        .iter()
+        .find(|e| e.kind == "tool" && e.state != "running")
+        .expect("the read's end");
+    let detail = read_end.detail.clone().unwrap_or_default();
+    assert!(!detail.contains("<untrusted"), "{detail:?}");
+    assert!(detail.contains('a'), "{detail:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}

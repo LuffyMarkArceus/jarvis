@@ -6,7 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// `text` as lines no wider than `width`.
 pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
@@ -365,6 +365,29 @@ fn wrap(spans: Vec<Span<'static>>, first: &str, rest: &str, width: usize) -> Vec
     for (word, style) in words {
         let joined = word.starts_with('\u{0}');
         let word = word.trim_start_matches('\u{0}').to_string();
+        // A word no line could hold (a URL, a path) is broken across lines
+        // rather than cut off at the edge (review M7).
+        if word.width() > width.saturating_sub(rest.width()).max(1) {
+            if !empty && !joined {
+                line.push(Span::styled(" ".to_string(), style));
+                used += 1;
+            }
+            let mut piece = String::new();
+            for ch in word.chars() {
+                let w = ch.width().unwrap_or(0);
+                if used + w > width && (!piece.is_empty() || !empty) {
+                    line.push(Span::styled(std::mem::take(&mut piece), style));
+                    lines.push(Line::from(std::mem::take(&mut line)));
+                    line.push(Span::raw(rest.to_string()));
+                    used = rest.width();
+                }
+                piece.push(ch);
+                used += w;
+            }
+            line.push(Span::styled(piece, style));
+            empty = false;
+            continue;
+        }
         let need = word.width() + usize::from(!empty && !joined);
         if !empty && used + need > width {
             lines.push(Line::from(std::mem::take(&mut line)));
@@ -526,6 +549,16 @@ mod tests {
             "{:?}",
             texts(&lines)
         );
+    }
+
+    #[test]
+    fn a_word_longer_than_the_line_is_broken_not_cut() {
+        // Review M7: a long URL or path must be readable in full.
+        let word = "https://example.com/".to_string() + &"a".repeat(40);
+        let lines = texts(&render(&format!("see {word} now"), 20));
+        assert!(lines.iter().all(|l| l.chars().count() <= 20), "{lines:?}");
+        assert!(lines.concat().replace(' ', "").contains(&word), "{lines:?}");
+        assert!(lines.concat().ends_with("now"), "{lines:?}");
     }
 
     #[test]

@@ -336,8 +336,10 @@ impl Orchestrator {
             OutcomeStatus::Untrusted => "untrusted",
             OutcomeStatus::Deferred => "deferred",
         };
+        // The output itself, never the `<untrusted>` label around it
+        // (review M9).
         let detail: String = self
-            .for_model(&outcome)
+            .prompt_tool_output(&outcome.output)
             .lines()
             .find(|l| !l.trim().is_empty())
             .unwrap_or("")

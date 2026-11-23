@@ -5,13 +5,23 @@ use crate::undo::UndoStore;
 use chrono::{DateTime, Utc};
 use jarvis_common::ipc::FileChange;
 
+/// Text past this many bytes, before and after together, is not diffed.
+const MAX_DIFF_BYTES: usize = 2 * 1024 * 1024;
+
 /// Lines a diff may run to before it is cut.
 const MAX_DIFF_LINES: usize = 2000;
 
 /// A unified diff of `before` against `after` (3 lines of context), and
 /// the lines added and removed. Cut at 2000 lines, saying so.
 pub fn unified(before: &str, after: &str, path: &str) -> (String, usize, usize) {
-    let diff = similar::TextDiff::from_lines(before, after);
+    // Bounded: a diff runs on the daemon, before a card or after a turn.
+    if before.len() + after.len() > MAX_DIFF_BYTES {
+        let kb = (before.len() + after.len()) / 1024;
+        return (format!("--- {path}\n(too large to diff: {kb} KB)"), 0, 0);
+    }
+    let diff = similar::TextDiff::configure()
+        .timeout(std::time::Duration::from_millis(500))
+        .diff_lines(before, after);
     let (mut added, mut removed) = (0, 0);
     for change in diff.iter_all_changes() {
         match change.tag() {

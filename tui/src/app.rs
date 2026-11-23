@@ -39,18 +39,31 @@ pub struct WorkLog {
     pub failed_turn: bool,
 }
 
+impl WorkLog {
+    /// Whether the turn, once done, keeps a row: it ran a tool, changed a
+    /// file or failed. A plain answer's one model step is not worth one.
+    pub fn worth_a_row(&self) -> bool {
+        self.failed_turn || !self.changes.is_empty() || self.steps.iter().any(|s| s.kind == "tool")
+    }
+}
+
 /// The one row a finished turn's steps fold into.
 pub fn work_row(log: &WorkLog, open: bool) -> String {
+    let plural =
+        |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
     let mut row = format!(
-        "{} {} steps · {:.1} s",
+        "{} {} · {:.1} s",
         if open { "▾" } else { "▸" },
-        log.steps.len(),
+        plural(log.steps.len(), "step", "steps"),
         log.ms as f64 / 1000.0
     );
     if log.failed_turn {
         row.push_str(" · changes: see /undo");
     } else if !log.changes.is_empty() {
-        row.push_str(&format!(" · {} files changed", log.changes.len()));
+        row.push_str(&format!(
+            " · {} changed",
+            plural(log.changes.len(), "file", "files")
+        ));
     }
     let declined = log.steps.iter().filter(|s| s.state == "declined").count();
     if declined > 0 {
@@ -673,7 +686,15 @@ impl App {
                 // A draft (a steer half-typed) waits, and comes back after:
                 // it must never become the decline reason.
                 let mut card = Card::new(request);
-                card.parked = self.input.take();
+                card.parked = match self.overlay.take() {
+                    // A card replacing a stale one keeps the draft that one
+                    // parked; a half-typed reason for it goes (review I5).
+                    Some(Overlay::Confirm(old)) => old.parked,
+                    other => {
+                        self.overlay = other;
+                        self.input.take()
+                    }
+                };
                 self.overlay = Some(Overlay::Confirm(card));
                 vec![]
             }
@@ -1194,6 +1215,19 @@ impl App {
                 if let Some(pos) = self.in_flight.iter().position(|q| q.id == steer_id) {
                     let mut steer = self.in_flight.remove(pos);
                     steer.steer = false;
+                    // The note said it joined the turn; it did not.
+                    let said = format!("steering: {}", steer.text);
+                    if let Some(note) = self
+                        .entries
+                        .iter_mut()
+                        .rev()
+                        .find(|e| e.role == Role::System && e.text == said)
+                    {
+                        note.text = format!(
+                            "queued instead (the turn could not take it): {}",
+                            steer.text
+                        );
+                    }
                     if let Some(session) = self.session_id.clone() {
                         self.queues.entry(session).or_default().push_back(steer);
                     }
@@ -1254,6 +1288,13 @@ impl App {
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
         if turn_ended {
+            // The turn is over: any card it raised can no longer be answered
+            // (the daemon timed it out), so it closes (review I5).
+            if matches!(self.overlay, Some(Overlay::Confirm(_))) {
+                if let Some(Overlay::Confirm(card)) = self.overlay.take() {
+                    self.input.set(&card.parked);
+                }
+            }
             let result = response.result.as_ref();
             let ms = result
                 .and_then(|r| r["timing"]["total_ms"].as_u64())
@@ -2010,7 +2051,19 @@ impl App {
                             let alt = key.modifiers.contains(KeyModifiers::ALT);
                             let shift = key.modifiers.contains(KeyModifiers::SHIFT);
                             self.overlay = Some(Overlay::Confirm(card));
-                            if key.code != KeyCode::Tab {
+                            // Text editing only: nothing that recalls a
+                            // message, changes a mode or sends (review M6).
+                            let editing = matches!(
+                                key.code,
+                                KeyCode::Char(_)
+                                    | KeyCode::Backspace
+                                    | KeyCode::Delete
+                                    | KeyCode::Left
+                                    | KeyCode::Right
+                                    | KeyCode::Home
+                                    | KeyCode::End
+                            );
+                            if editing {
                                 let _ = self.edit_key(key, ctrl, alt, shift);
                             }
                             vec![]
@@ -2654,6 +2707,40 @@ mod tests {
         assert_eq!(
             work_row(&log, true),
             "▾ 3 steps · 12.4 s · 2 files changed · 1 declined"
+        );
+    }
+
+    #[test]
+    fn the_row_says_one_step_and_one_file() {
+        let id = Uuid::new_v4();
+        let log = WorkLog {
+            request: id,
+            steps: vec![step(id, 1, "tool", "done")],
+            done: true,
+            ms: 1000,
+            changes: vec![change("/w/a.md")],
+            open: false,
+            failed_turn: false,
+        };
+        assert_eq!(work_row(&log, false), "▸ 1 step · 1.0 s · 1 file changed");
+    }
+
+    #[test]
+    fn a_steer_turned_away_says_it_was_queued() {
+        let mut app = with_session();
+        running(&mut app, "first");
+        let (request, _) = enter_steer(&mut app, "/steer use Pictures");
+        app.on_response(Response::ok(request, json!({ "status": "not_running" })));
+        let texts: Vec<&str> = app.entries.iter().map(|e| e.text.as_str()).collect();
+        assert!(
+            !texts.iter().any(|t| t.starts_with("steering:")),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("queued") && t.contains("use Pictures")),
+            "{texts:?}"
         );
     }
 
@@ -3355,6 +3442,30 @@ mod tests {
     }
 
     #[test]
+    fn a_card_closes_when_its_turn_ends_and_gives_the_draft_back() {
+        // Review I5: the daemon timed the card out; the turn's answer came.
+        let mut app = with_session();
+        running(&mut app, "tidy up");
+        app.input.set("half a steer");
+        app.on_client_event(ClientEvent::Confirmation(a_card(vec![])));
+        let id = app.pending_id.unwrap();
+        app.on_response(Response::ok(id, json!({ "response": "gave up" })));
+        assert!(app.overlay.is_none(), "a stale card is gone");
+        assert_eq!(app.input.text(), "half a steer");
+    }
+
+    #[test]
+    fn a_second_card_keeps_the_first_cards_draft() {
+        // Review I5: the draft parked by the first card is not lost.
+        let mut app = with_session();
+        app.input.set("half a steer");
+        app.on_client_event(ClientEvent::Confirmation(a_card(vec![])));
+        app.on_client_event(ClientEvent::Confirmation(a_card(vec![])));
+        press(&mut app, KeyCode::Char('y'));
+        assert_eq!(app.input.text(), "half a steer");
+    }
+
+    #[test]
     fn y_and_n_answer_at_once() {
         let mut app = with_session();
         app.on_client_event(ClientEvent::Confirmation(a_card(vec![])));
@@ -3405,6 +3516,31 @@ mod tests {
             [Action::Confirm { approved: false, reason: Some(r), .. }] if r == "try notes/"
         ));
         assert!(app.overlay.is_none());
+    }
+
+    #[test]
+    fn reason_mode_keys_only_edit_the_reason() {
+        // Review M6: no queued message or history line lands in a reason.
+        let mut app = with_session();
+        running(&mut app, "tidy up");
+        app.follow_up = FollowUp::Queue;
+        enter(&mut app, "next thing");
+        assert_eq!(queued(&app), vec!["next thing".to_string()]);
+        app.history.push("an old message".into());
+        app.on_client_event(ClientEvent::Confirmation(a_card(vec![])));
+        press(&mut app, KeyCode::Tab);
+        // On an empty reason, these would recall a message.
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
+        press(&mut app, KeyCode::Up);
+        assert!(app.input.text().is_empty(), "got {:?}", app.input.text());
+        assert!(press(&mut app, KeyCode::BackTab).is_empty());
+        for c in "no".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL));
+        press(&mut app, KeyCode::Char('x'));
+        assert_eq!(app.input.text(), "xno");
+        assert_eq!(queued(&app), vec!["next thing".to_string()]);
     }
 
     #[test]

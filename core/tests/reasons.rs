@@ -82,3 +82,12 @@ async fn a_plain_no_ends_the_turn_as_before() {
     let saw = model_saw_after_no(None).await;
     assert!(!saw.contains("was declined by the user"), "{saw}");
 }
+
+#[tokio::test]
+async fn a_reason_is_the_owners_words_not_untrusted_output() {
+    // Review of 6.7b: the reason was labelled as the declined tool's output,
+    // so it reached the model inside <untrusted> tags, as data.
+    let saw = model_saw_after_no(Some("use notes/ instead")).await;
+    assert!(saw.contains("use notes/ instead"), "{saw}");
+    assert!(!saw.contains("<untrusted source"), "{saw}");
+}

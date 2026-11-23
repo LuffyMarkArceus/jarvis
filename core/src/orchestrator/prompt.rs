@@ -77,6 +77,16 @@ impl Orchestrator {
     /// what was cut. The user-facing rendering uses the full output.
     /// A tool's result as it goes into the conversation: shortened, and
     /// marked when it is untrusted.
+    /// The label of an outcome's result as the model is given it: the
+    /// owner's, for a no with a reason (6.7b); the tool's, otherwise.
+    pub(super) fn result_label(outcome: &ToolOutcome) -> Label {
+        if outcome.redirects() {
+            Label::of(Origin::User)
+        } else {
+            Label::of_tool(&outcome.name, &outcome.args)
+        }
+    }
+
     pub(super) fn for_model(&self, outcome: &ToolOutcome) -> String {
         self.marked(outcome, self.prompt_tool_output(&outcome.output))
     }
@@ -84,7 +94,8 @@ impl Orchestrator {
     /// `text` from `outcome`, wrapped in `<untrusted>` if the outcome's own
     /// origin is untrusted and marking is on.
     pub(super) fn marked(&self, outcome: &ToolOutcome, text: String) -> String {
-        if !self.config.security.mark_untrusted {
+        // A no with a reason is the owner's words, not the tool's output.
+        if !self.config.security.mark_untrusted || outcome.redirects() {
             return text;
         }
         let label = Label::of_tool(&outcome.name, &outcome.args);
