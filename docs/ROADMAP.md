@@ -118,12 +118,22 @@ Following T3 Code (the owner's choice over Claude Code's ways):
   running turn at its next step; one that comes too late is queued.
 * [Spec](superpowers/specs/2026-11-21-tui-input-design.md).
 
-## Milestone 6.7b - the transcript (next)
+## Milestone 6.7b - the transcript (done, 2026-11-23)
 
-The work log folding into one row per turn (with "N files changed" and diffs
-from the undo copies), approval cards in the conversation with diffs and a
-reply that declines with a reason, markdown in answers, modes in the picker.
-Spec first.
+Following T3 Code:
+
+* Step events: each step live, then one row per turn (Ctrl+O, click).
+* A turn's file changes as diffs from the undo copies; Ctrl+D, `r` reverts.
+* Approval cards with a diff preview; Tab and a reason declines and tells the
+  model why, and the turn goes on (live: the model re-proposed with the
+  reason and the second card showed it).
+* Markdown in answers; modes in the Ctrl+P picker.
+* [Spec](superpowers/specs/2026-11-21-tui-transcript-design.md).
+
+## Phase 7 - design (next)
+
+Unattended jobs, each under a mode as its ceiling (`Mode::within`). Spec
+first.
 
 ## Milestone 6.3 - OS sandbox (done, 2026-11-09)
 
