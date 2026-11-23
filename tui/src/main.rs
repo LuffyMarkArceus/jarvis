@@ -9,6 +9,7 @@ mod client;
 mod commands;
 mod diag;
 mod input;
+mod markdown;
 mod ui;
 mod wrap;
 

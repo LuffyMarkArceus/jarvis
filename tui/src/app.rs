@@ -1321,6 +1321,11 @@ impl App {
         }
     }
 
+    /// The entry still streaming in, if any.
+    pub fn streaming_index(&self) -> Option<usize> {
+        self.streaming.as_ref().map(|s| s.index)
+    }
+
     /// This conversation's queue, if it has one.
     pub fn queue(&self) -> Option<&std::collections::VecDeque<Queued>> {
         self.session_id.as_ref().and_then(|s| self.queues.get(s))

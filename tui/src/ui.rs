@@ -111,7 +111,8 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::bordered().title(" Conversation ");
     let inner = block.inner(area);
     let width = inner.width.max(1) as usize;
-    let (mut lines, work_lines) = transcript_lines(&app.entries, width, app.show_steps);
+    let (mut lines, work_lines) =
+        transcript_lines(&app.entries, width, app.show_steps, app.streaming_index());
     // What waits for the running turn: dim, at the end, as in T3 Code.
     for queued in app.queue().into_iter().flatten() {
         let what = if queued.steer {
@@ -155,6 +156,7 @@ fn transcript_lines(
     entries: &[Entry],
     width: usize,
     show_steps: bool,
+    streaming: Option<usize>,
 ) -> (Vec<Line<'static>>, Vec<(usize, usize)>) {
     let mut lines = Vec::new();
     let mut rows = Vec::new();
@@ -201,8 +203,18 @@ fn transcript_lines(
             Role::System | Role::Error => dim,
             _ => Style::new(),
         };
-        for wrapped in wrap::wrap(&entry.text, body_width) {
-            lines.push(Line::styled(format!("  {wrapped}"), body_style));
+        if entry.role == Role::Assistant && streaming != Some(index) {
+            // A finished answer is Markdown (6.7b); a streaming one stays
+            // plain until it is whole.
+            for line in crate::markdown::render(&entry.text, body_width) {
+                let mut spans = vec![Span::raw("  ")];
+                spans.extend(line.spans);
+                lines.push(Line::from(spans));
+            }
+        } else {
+            for wrapped in wrap::wrap(&entry.text, body_width) {
+                lines.push(Line::styled(format!("  {wrapped}"), body_style));
+            }
         }
         if let Some(footer) = &entry.footer {
             lines.push(Line::styled(format!("  {footer}"), dim));
@@ -814,6 +826,27 @@ mod tests {
     }
 
     #[test]
+    fn a_streaming_answer_is_plain() {
+        let entries = vec![Entry::assistant("**bold** answer")];
+        let (live, _) = transcript_lines(&entries, 40, false, Some(0));
+        let text = |lines: &[Line]| {
+            lines
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert!(text(&live).contains("**bold** answer"), "{}", text(&live));
+        let (done, _) = transcript_lines(&entries, 40, false, None);
+        assert!(text(&done).contains("  bold answer"), "{}", text(&done));
+    }
+
+    #[test]
     fn the_folded_row_draws() {
         let mut app = App::new("llama3.2:1b".into());
         app.session_id = Some("abc".into());
@@ -861,7 +894,7 @@ mod tests {
     #[test]
     fn transcript_has_labels_and_blank_separators() {
         let entries = vec![Entry::user("hello"), Entry::assistant("hi")];
-        let (lines, _) = transcript_lines(&entries, 40, false);
+        let (lines, _) = transcript_lines(&entries, 40, false, None);
         let text: Vec<String> = lines
             .iter()
             .map(|line| {
