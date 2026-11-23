@@ -57,7 +57,7 @@ impl Daemon {
         sink: Option<&UnboundedSender<String>>,
         progress: Option<&UnboundedSender<String>>,
     ) -> Result<(String, String, crate::orchestrator::TurnTiming)> {
-        self.ask_steered(session, prompt, confirm, cancel, sink, progress)
+        self.ask_steered(session, prompt, confirm, cancel, sink, progress, None)
             .await
             .0
     }
@@ -66,7 +66,7 @@ impl Daemon {
     /// ids of those used. Collected while the turn still holds the
     /// conversation, so another window's next turn cannot take them
     /// (6.7a review).
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub async fn ask_steered(
         &self,
         session: &str,
@@ -75,6 +75,7 @@ impl Daemon {
         cancel: Option<&Cancellation>,
         sink: Option<&UnboundedSender<String>>,
         progress: Option<&UnboundedSender<String>>,
+        steps: Option<&UnboundedSender<jarvis_common::ipc::StepEvent>>,
     ) -> (
         Result<(String, String, crate::orchestrator::TurnTiming)>,
         (Vec<crate::conversation::Steer>, Vec<String>),
@@ -92,12 +93,13 @@ impl Daemon {
             );
         };
         let result = self
-            .answer(&conv, prompt, confirm, cancel, sink, progress)
+            .answer(&conv, prompt, confirm, cancel, sink, progress, steps)
             .await;
         let outcome = (conv.take_steers(), conv.take_used_steers());
         (result, outcome)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn answer(
         &self,
         conv: &Arc<Conversation>,
@@ -106,13 +108,14 @@ impl Daemon {
         cancel: Option<&Cancellation>,
         sink: Option<&UnboundedSender<String>>,
         progress: Option<&UnboundedSender<String>>,
+        steps: Option<&UnboundedSender<jarvis_common::ipc::StepEvent>>,
     ) -> Result<(String, String, crate::orchestrator::TurnTiming)> {
         let conv = conv.clone();
         let orch = &self.orchestrator;
         let session_id = conv.id.clone();
         self.conversations.used(&conv);
         let (result, footer, timing) = orch
-            .run_with_footer(&conv, prompt, confirm, cancel, sink, progress)
+            .run_with_footer(&conv, prompt, confirm, cancel, sink, progress, steps)
             .await?;
         // Title a conversation that has none yet, from its first question,
         // once it has an answer. Not "exactly two messages": a steer (6.7a)

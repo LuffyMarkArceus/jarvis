@@ -119,6 +119,7 @@ fn ask_with(
                 cancel.as_ref(),
                 None,
                 progress.as_ref(),
+                None,
             )
             .await
     })

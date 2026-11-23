@@ -221,6 +221,9 @@ pub(super) struct TurnRecorder<'c> {
     pub(super) not_done: std::sync::Mutex<Vec<String>>,
     /// Plan mode refused an action of this turn.
     pub(super) plan_refused: std::sync::atomic::AtomicBool,
+    /// Where each step is reported as it starts and ends (6.7b).
+    pub(super) steps: Option<tokio::sync::mpsc::UnboundedSender<jarvis_common::ipc::StepEvent>>,
+    step_count: std::sync::atomic::AtomicU32,
 }
 
 impl<'c> TurnRecorder<'c> {
@@ -246,6 +249,51 @@ impl<'c> TurnRecorder<'c> {
             spill_withheld: Default::default(),
             not_done: Default::default(),
             plan_refused: Default::default(),
+            steps: None,
+            step_count: Default::default(),
+        }
+    }
+
+    /// A step starts: its number, for `step_end`.
+    pub(super) fn step_start(&self, kind: &'static str, name: &str, summary: String) -> u32 {
+        let n = self
+            .step_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        if let Some(steps) = &self.steps {
+            let _ = steps.send(jarvis_common::ipc::StepEvent {
+                step: n,
+                kind,
+                name: name.to_string(),
+                summary,
+                state: "running",
+                detail: None,
+                ms: None,
+            });
+        }
+        n
+    }
+
+    /// Step `n` ended, as `state`.
+    pub(super) fn step_end(
+        &self,
+        n: u32,
+        kind: &'static str,
+        name: &str,
+        state: &'static str,
+        detail: Option<String>,
+        ms: u64,
+    ) {
+        if let Some(steps) = &self.steps {
+            let _ = steps.send(jarvis_common::ipc::StepEvent {
+                step: n,
+                kind,
+                name: name.to_string(),
+                summary: String::new(),
+                state,
+                detail,
+                ms: Some(ms),
+            });
         }
     }
 

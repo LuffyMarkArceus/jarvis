@@ -302,7 +302,7 @@ async fn a_long_turn_reports_what_it_is_doing() {
         yes: true,
     };
     jarvis
-        .run_turn_observed(&conv, WRITE, Some(&yes), None, None, Some(&tx))
+        .run_turn_observed(&conv, WRITE, Some(&yes), None, None, Some(&tx), None)
         .await
         .unwrap();
     drop(tx);

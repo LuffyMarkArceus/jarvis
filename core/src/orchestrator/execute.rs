@@ -311,6 +311,7 @@ impl Orchestrator {
         rec: &TurnRecorder<'_>,
     ) -> ToolOutcome {
         rec.step(describe_step(&name, &args));
+        let step = rec.step_start("tool", &name, describe_step(&name, &args));
         let started = std::time::Instant::now();
         let outcome = self
             .gate_and_run(
@@ -326,6 +327,31 @@ impl Orchestrator {
             rec.plan_refused
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
+        let state = match outcome.status {
+            OutcomeStatus::Succeeded => "done",
+            OutcomeStatus::Failed => "failed",
+            OutcomeStatus::Denied => "denied",
+            OutcomeStatus::Declined | OutcomeStatus::NeedsConfirmation => "declined",
+            OutcomeStatus::Withheld => "withheld",
+            OutcomeStatus::Untrusted => "untrusted",
+            OutcomeStatus::Deferred => "deferred",
+        };
+        let detail: String = self
+            .for_model(&outcome)
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .chars()
+            .take(60)
+            .collect();
+        rec.step_end(
+            step,
+            "tool",
+            &outcome.name,
+            state,
+            (!detail.is_empty()).then_some(detail),
+            started.elapsed().as_millis() as u64,
+        );
         rec.tool_time(&outcome.name, started.elapsed());
         rec.tool(&outcome, status_label(&outcome.status));
         outcome

@@ -527,6 +527,7 @@ impl Orchestrator {
     }
 
     /// One turn's answer and its footer, for clients that show both.
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_with_footer(
         &self,
         conv: &Conversation,
@@ -535,9 +536,10 @@ impl Orchestrator {
         cancel: Option<&Cancellation>,
         sink: Option<&UnboundedSender<String>>,
         progress: Option<&UnboundedSender<String>>,
+        steps: Option<&UnboundedSender<jarvis_common::ipc::StepEvent>>,
     ) -> Result<(String, String, TurnTiming)> {
         let report = self
-            .run_turn_observed(conv, input, confirm, cancel, sink, progress)
+            .run_turn_observed(conv, input, confirm, cancel, sink, progress, steps)
             .await?;
         let footer = footer(&report);
         Ok((report.answer, footer, report.timing))
@@ -553,13 +555,14 @@ impl Orchestrator {
         cancel: Option<&Cancellation>,
         sink: Option<&UnboundedSender<String>>,
     ) -> Result<TurnReport> {
-        self.run_turn_observed(conv, input, confirm, cancel, sink, None)
+        self.run_turn_observed(conv, input, confirm, cancel, sink, None, None)
             .await
     }
 
     /// [`Self::run_turn`], also saying on `progress` what the turn is doing
     /// now - "asking nemotron (step 3)", "searching the web" - so a client
     /// can tell a long turn from a stuck one.
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_turn_observed(
         &self,
         conv: &Conversation,
@@ -568,12 +571,14 @@ impl Orchestrator {
         cancel: Option<&Cancellation>,
         sink: Option<&UnboundedSender<String>>,
         progress: Option<&UnboundedSender<String>>,
+        steps: Option<&UnboundedSender<jarvis_common::ipc::StepEvent>>,
     ) -> Result<TurnReport> {
         // Measured here, around everything, so every way a turn ends -
         // answered, cancelled, failed - is logged with its timing.
         let started = std::time::Instant::now();
         let mut rec = TurnRecorder::new(conv);
         rec.progress = progress.cloned();
+        rec.steps = steps.cloned();
         // Autopilot never prompts: whatever would, is answered no and listed.
         let no_prompts = autopilot::NoPrompts {
             not_done: &rec.not_done,

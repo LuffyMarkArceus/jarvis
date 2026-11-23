@@ -674,12 +674,24 @@ async fn handle_ask(
     // Progress ("asking nemotron (step 3)") goes out through the same task,
     // so it is written in order with the chunks.
     let (progress, mut steps) = mpsc::unbounded_channel::<String>();
+    // Each step as it starts and ends (6.7b), through the same task too.
+    let (step_tx, mut step_rx) = mpsc::unbounded_channel::<jarvis_common::ipc::StepEvent>();
     let writer = conn.clone();
     let chunk_task = tokio::spawn(async move {
         loop {
             let message = tokio::select! {
                 Some(text) = chunks.recv() => Message::Chunk(Chunk { id, text }),
                 Some(text) = steps.recv() => Message::Progress(Progress { id, text }),
+                Some(e) = step_rx.recv() => Message::Step(jarvis_common::ipc::Step {
+                    id,
+                    step: e.step,
+                    kind: e.kind.to_string(),
+                    name: e.name,
+                    summary: e.summary,
+                    state: e.state.to_string(),
+                    detail: e.detail,
+                    ms: e.ms,
+                }),
                 else => break,
             };
             if let Err(e) = writer.send(&message).await {
@@ -704,12 +716,14 @@ async fn handle_ask(
                 Some(&cancel),
                 Some(&sink),
                 Some(&progress),
+                Some(&step_tx),
             )
             .await
     };
 
     drop(sink);
     drop(progress);
+    drop(step_tx);
     let _ = chunk_task.await;
 
     // The window keeps each steer it sent until told how it went (6.7a).

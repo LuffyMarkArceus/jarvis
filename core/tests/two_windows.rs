@@ -669,3 +669,26 @@ async fn a_conversation_with_an_extra_message_still_gets_a_title() {
         .unwrap();
     assert_ne!(mine["title"], "New Session", "{mine}");
 }
+
+#[tokio::test]
+async fn steps_reach_the_window() {
+    let home = fresh().await;
+    let mut a = Window::open(&home).await;
+    let (ask, prompt) = a.stop_at_a_prompt().await;
+    a.reply(prompt, false).await;
+    let mut states = Vec::new();
+    loop {
+        match a.next_message().await {
+            Message::Step(step) => {
+                assert_eq!(step.id, ask);
+                states.push((step.kind.clone(), step.state.clone()));
+            }
+            Message::Response(r) if r.id == ask => break,
+            _ => {}
+        }
+    }
+    assert!(
+        states.contains(&("tool".to_string(), "declined".to_string())),
+        "{states:?}"
+    );
+}

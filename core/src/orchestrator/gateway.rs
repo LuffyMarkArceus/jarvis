@@ -413,11 +413,34 @@ impl Orchestrator {
             short_model(&cfg.default_model),
             rec.model_calls() + 1
         ));
+        let step = rec.step_start(
+            "model",
+            &cfg.default_model,
+            format!("asking {}", short_model(&cfg.default_model)),
+        );
         let started = std::time::Instant::now();
-        let mut turn = match stream_to {
-            Some(sink) => client.chat_turn_streaming(chat, cancel, sink).await?,
-            None => client.chat_turn(chat, cancel).await?,
+        let called = match stream_to {
+            Some(sink) => client.chat_turn_streaming(chat, cancel, sink).await,
+            None => client.chat_turn(chat, cancel).await,
         };
+        let ms = started.elapsed().as_millis() as u64;
+        let mut turn = match called {
+            Ok(turn) => turn,
+            Err(e) => {
+                let short: String = e.to_string().chars().take(60).collect();
+                rec.step_end(step, "model", &cfg.default_model, "failed", Some(short), ms);
+                return Err(e);
+            }
+        };
+        let tokens = turn.prompt_tokens.unwrap_or(0) + turn.completion_tokens.unwrap_or(0);
+        rec.step_end(
+            step,
+            "model",
+            &cfg.default_model,
+            "done",
+            (tokens > 0).then(|| format!("{tokens} tokens")),
+            ms,
+        );
         rec.model_time(&cfg.default_model, started.elapsed(), &turn);
         // For a remote turn the footer names where the data went (the host),
         // not the wire format: "openai" for an OpenRouter model misleads.
