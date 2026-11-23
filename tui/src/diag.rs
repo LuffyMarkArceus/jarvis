@@ -75,7 +75,7 @@ impl Diag {
                     if response.ok { "ok" } else { "error" }
                 ));
             }
-            ClientEvent::Chunk { .. } | ClientEvent::Progress { .. } => {}
+            ClientEvent::Chunk { .. } | ClientEvent::Progress { .. } | ClientEvent::Step(_) => {}
         }
     }
 }

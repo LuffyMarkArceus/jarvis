@@ -116,6 +116,9 @@ fn handle_input_event(app: &mut App, event: Event) -> Vec<Action> {
             match mouse.kind {
                 MouseEventKind::ScrollUp => app.on_wheel(true),
                 MouseEventKind::ScrollDown => app.on_wheel(false),
+                MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                    app.on_click(mouse.row)
+                }
                 _ => {}
             }
             Vec::new()

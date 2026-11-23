@@ -20,6 +20,43 @@ pub enum Role {
     Assistant,
     System,
     Error,
+    /// A turn's steps: live, then one row (6.7b).
+    Work,
+}
+
+/// The steps of one turn, and the files it changed (6.7b).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkLog {
+    /// The `ask` request it belongs to.
+    pub request: Uuid,
+    pub steps: Vec<jarvis_common::ipc::Step>,
+    pub done: bool,
+    pub ms: u64,
+    pub changes: Vec<jarvis_common::ipc::FileChange>,
+    /// Opened by a click.
+    pub open: bool,
+    /// The turn failed: its reply could not say what it changed.
+    pub failed_turn: bool,
+}
+
+/// The one row a finished turn's steps fold into.
+pub fn work_row(log: &WorkLog, open: bool) -> String {
+    let mut row = format!(
+        "{} {} steps · {:.1} s",
+        if open { "▾" } else { "▸" },
+        log.steps.len(),
+        log.ms as f64 / 1000.0
+    );
+    if log.failed_turn {
+        row.push_str(" · changes: see /undo");
+    } else if !log.changes.is_empty() {
+        row.push_str(&format!(" · {} files changed", log.changes.len()));
+    }
+    let declined = log.steps.iter().filter(|s| s.state == "declined").count();
+    if declined > 0 {
+        row.push_str(&format!(" · {declined} declined"));
+    }
+    row
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +65,8 @@ pub struct Entry {
     pub text: String,
     /// Under an answer: what produced it and where it ran.
     pub footer: Option<String>,
+    /// A turn's steps (`Role::Work` only).
+    pub work: Option<WorkLog>,
 }
 
 impl Entry {
@@ -36,6 +75,7 @@ impl Entry {
             role: Role::User,
             text: text.into(),
             footer: None,
+            work: None,
         }
     }
 
@@ -44,6 +84,7 @@ impl Entry {
             role: Role::Assistant,
             text: text.into(),
             footer: None,
+            work: None,
         }
     }
 
@@ -52,6 +93,7 @@ impl Entry {
             role: Role::System,
             text: text.into(),
             footer: None,
+            work: None,
         }
     }
 
@@ -60,6 +102,7 @@ impl Entry {
             role: Role::Error,
             text: text.into(),
             footer: None,
+            work: None,
         }
     }
 }
@@ -362,6 +405,10 @@ pub struct App {
     pub continue_last: bool,
     /// The terminal tells Shift+Enter (and Ctrl+Enter) from Enter.
     pub keyboard_enhanced: bool,
+    /// Ctrl+O: every turn's steps open (6.7b).
+    pub show_steps: bool,
+    /// Where each work row was drawn: (screen row, entry index), for clicks.
+    pub work_rows: Vec<(u16, usize)>,
     /// Messages typed while a turn ran, per conversation (6.7a).
     pub queues: std::collections::HashMap<String, std::collections::VecDeque<Queued>>,
     /// Conversations whose queue waits for `/resume`.
@@ -412,6 +459,8 @@ impl App {
             last_timing: None,
             continue_last: false,
             keyboard_enhanced: false,
+            show_steps: false,
+            work_rows: Vec::new(),
             queues: Default::default(),
             held: Default::default(),
             follow_up: FollowUp::Queue,
@@ -586,6 +635,10 @@ impl App {
                 vec![]
             }
             ClientEvent::Chunk { id, text } => self.on_chunk(id, text),
+            ClientEvent::Step(step) => {
+                self.on_step(step);
+                vec![]
+            }
             ClientEvent::Progress { id, text } => {
                 if self.pending_id == Some(id) {
                     self.progress = Some(text);
@@ -629,6 +682,22 @@ impl App {
     }
 
     pub fn begin_request(&mut self, id: Uuid, pending: Pending) {
+        if matches!(pending, Pending::Turn) {
+            self.entries.push(Entry {
+                role: Role::Work,
+                text: String::new(),
+                footer: None,
+                work: Some(WorkLog {
+                    request: id,
+                    steps: Vec::new(),
+                    done: false,
+                    ms: 0,
+                    changes: Vec::new(),
+                    open: false,
+                    failed_turn: false,
+                }),
+            });
+        }
         self.pending_id = Some(id);
         self.pending = Some(pending);
         self.busy_since = Some(Instant::now());
@@ -1072,6 +1141,22 @@ impl App {
                 .and_then(|r| r.get("cancelled"))
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+        if turn_ended {
+            let result = response.result.as_ref();
+            let ms = result
+                .and_then(|r| r["timing"]["total_ms"].as_u64())
+                .unwrap_or(0);
+            let changes: Vec<jarvis_common::ipc::FileChange> = result
+                .and_then(|r| serde_json::from_value(r["changes"].clone()).ok())
+                .unwrap_or_default();
+            let failed = !response.ok;
+            if let Some(log) = self.work_log_mut(response.id) {
+                log.done = true;
+                log.ms = ms;
+                log.changes = changes;
+                log.failed_turn = failed;
+            }
+        }
         let mut actions = self.on_response_inner(response);
         if turn_ended {
             if answered {
@@ -1092,6 +1177,12 @@ impl App {
     /// A turn whose answer will not come: every steer sent into it goes
     /// back to the front of the queue, and the queue waits for `/resume`.
     fn abandon_turn(&mut self) {
+        if let (Some(Pending::Turn), Some(id)) = (&self.pending, self.pending_id) {
+            if let Some(log) = self.work_log_mut(id) {
+                log.done = true;
+                log.failed_turn = true;
+            }
+        }
         if matches!(self.pending, Some(Pending::Turn)) || !self.in_flight.is_empty() {
             let back: Vec<Queued> = self.in_flight.drain(..).collect();
             self.requeue_front(back);
@@ -1136,6 +1227,39 @@ impl App {
     pub fn steer_sent(&mut self, request: Uuid, steer: Queued) {
         self.steer_requests.insert(request, steer.id);
         self.in_flight.push(steer);
+    }
+
+    fn work_log_mut(&mut self, request: Uuid) -> Option<&mut WorkLog> {
+        self.entries
+            .iter_mut()
+            .rev()
+            .filter_map(|e| e.work.as_mut())
+            .find(|w| w.request == request)
+    }
+
+    /// A step started or ended: the end keeps what the start said.
+    fn on_step(&mut self, step: jarvis_common::ipc::Step) {
+        let Some(log) = self.work_log_mut(step.id) else {
+            return;
+        };
+        match log.steps.iter_mut().find(|s| s.step == step.step) {
+            Some(known) => {
+                known.state = step.state;
+                known.detail = step.detail;
+                known.ms = step.ms;
+            }
+            None => log.steps.push(step),
+        }
+    }
+
+    /// A click at screen row `row`: a work row there opens or closes.
+    pub fn on_click(&mut self, row: u16) {
+        let Some(&(_, index)) = self.work_rows.iter().find(|(r, _)| *r == row) else {
+            return;
+        };
+        if let Some(log) = self.entries.get_mut(index).and_then(|e| e.work.as_mut()) {
+            log.open = !log.open;
+        }
     }
 
     /// This conversation's queue, if it has one.
@@ -1546,6 +1670,10 @@ impl App {
         }
         if ctrl && key.code == KeyCode::Char('r') {
             return vec![Action::Reconnect];
+        }
+        if ctrl && key.code == KeyCode::Char('o') {
+            self.show_steps = !self.show_steps;
+            return vec![];
         }
 
         // The `/` menu takes its keys first while it is open.
@@ -2045,6 +2173,147 @@ mod tests {
         assert!(app.held.contains("abc"));
     }
 
+    fn step(id: Uuid, n: u32, kind: &str, state: &str) -> jarvis_common::ipc::Step {
+        jarvis_common::ipc::Step {
+            id,
+            step: n,
+            kind: kind.into(),
+            name: if kind == "tool" {
+                "filesystem.list_dir".into()
+            } else {
+                "qwen".into()
+            },
+            summary: if state == "running" {
+                format!("{kind} {n}")
+            } else {
+                String::new()
+            },
+            state: state.into(),
+            detail: (state != "running").then(|| "ok".into()),
+            ms: None,
+        }
+    }
+
+    fn work_entry(app: &App) -> &WorkLog {
+        app.entries
+            .iter()
+            .rev()
+            .find_map(|e| e.work.as_ref())
+            .expect("a work entry")
+    }
+
+    fn change(path: &str) -> jarvis_common::ipc::FileChange {
+        jarvis_common::ipc::FileChange {
+            undo_ids: vec![format!("id-{path}")],
+            path: path.into(),
+            tool: "filesystem.write".into(),
+            added: 1,
+            removed: 0,
+            diff: Some(format!("+++ {path}\n+x\n")),
+        }
+    }
+
+    #[test]
+    fn steps_show_live_then_fold() {
+        let mut app = with_session();
+        running(&mut app, "list the files");
+        let id = app.pending_id.unwrap();
+        app.on_client_event(ClientEvent::Step(step(id, 1, "model", "running")));
+        app.on_client_event(ClientEvent::Step(step(id, 1, "model", "done")));
+        app.on_client_event(ClientEvent::Step(step(id, 2, "tool", "running")));
+        let log = work_entry(&app);
+        assert_eq!(log.steps.len(), 2);
+        assert_eq!(log.steps[0].state, "done");
+        assert_eq!(
+            log.steps[0].summary, "model 1",
+            "the end keeps the start's summary"
+        );
+        assert!(!log.done);
+        app.on_client_event(ClientEvent::Step(step(id, 2, "tool", "done")));
+        app.on_response(Response::ok(
+            id,
+            json!({ "response": "two files", "timing": { "total_ms": 12400 },
+                    "changes": [change("/w/a.md")] }),
+        ));
+        let log = work_entry(&app);
+        assert!(log.done);
+        assert_eq!(log.ms, 12400);
+        assert_eq!(log.changes.len(), 1);
+    }
+
+    #[test]
+    fn the_row_counts_steps_files_and_declines() {
+        let id = Uuid::new_v4();
+        let log = WorkLog {
+            request: id,
+            steps: vec![
+                step(id, 1, "model", "done"),
+                step(id, 2, "tool", "declined"),
+                step(id, 3, "model", "done"),
+            ],
+            done: true,
+            ms: 12400,
+            changes: vec![change("/w/a.md"), change("/w/b.md")],
+            open: false,
+            failed_turn: false,
+        };
+        assert_eq!(
+            work_row(&log, false),
+            "▸ 3 steps · 12.4 s · 2 files changed · 1 declined"
+        );
+        assert_eq!(
+            work_row(&log, true),
+            "▾ 3 steps · 12.4 s · 2 files changed · 1 declined"
+        );
+    }
+
+    #[test]
+    fn ctrl_o_opens_every_turn() {
+        let mut app = with_session();
+        assert!(!app.show_steps);
+        key(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
+        assert!(app.show_steps);
+        key(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
+        assert!(!app.show_steps);
+    }
+
+    #[test]
+    fn a_click_on_a_row_opens_that_turn_only() {
+        let mut app = with_session();
+        running(&mut app, "one");
+        end_turn(&mut app, "answer");
+        running(&mut app, "two");
+        end_turn(&mut app, "answer");
+        let works: Vec<usize> = app
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.work.is_some())
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(works.len(), 2);
+        app.work_rows = vec![(5, works[0]), (9, works[1])];
+        app.on_click(9);
+        assert!(!app.entries[works[0]].work.as_ref().unwrap().open);
+        assert!(app.entries[works[1]].work.as_ref().unwrap().open);
+        app.on_click(9);
+        assert!(!app.entries[works[1]].work.as_ref().unwrap().open);
+    }
+
+    #[test]
+    fn a_failed_turn_points_to_undo() {
+        let mut app = with_session();
+        running(&mut app, "one");
+        end_turn(&mut app, "error");
+        let log = work_entry(&app);
+        assert!(log.failed_turn && log.done);
+        assert!(
+            work_row(log, false).contains("changes: see /undo"),
+            "{}",
+            work_row(log, false)
+        );
+    }
+
     #[test]
     fn a_used_steer_is_not_sent_again() {
         let mut app = with_session();
@@ -2521,9 +2790,9 @@ mod tests {
         app.begin_request(request.id, Pending::Turn);
         let actions = app.on_response(Response::ok(Uuid::new_v4(), json!({"response": "x"})));
         assert!(actions.is_empty());
-        assert_eq!(
-            app.entries.last().map(|entry| entry.role),
-            Some(Role::System)
+        assert!(
+            !app.entries.iter().any(|e| e.role == Role::Assistant),
+            "another request's answer was shown"
         );
         assert!(app.is_busy(), "the real response is still outstanding");
     }

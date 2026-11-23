@@ -32,6 +32,8 @@ pub enum ClientEvent {
         id: Uuid,
         text: String,
     },
+    /// A step of a running turn started or ended (6.7b).
+    Step(jarvis_common::ipc::Step),
     /// What a running request is doing now.
     Progress {
         id: Uuid,
@@ -142,8 +144,9 @@ async fn run(
                             let _ = events.send(ClientEvent::Progress { id: p.id, text: p.text });
                         }
                         Ok(Message::Cancel(_)) | Ok(Message::Request(_)) | Ok(Message::ConfirmationReply(_)) => {}
-                        // Shown from Task 5 (6.7b).
-                        Ok(Message::Step(_)) => {}
+                        Ok(Message::Step(step)) => {
+                            let _ = events.send(ClientEvent::Step(step));
+                        }
                         Err(e) => {
                             let _ = events.send(ClientEvent::Disconnected(format!(
                                 "unreadable message from the daemon: {e}"

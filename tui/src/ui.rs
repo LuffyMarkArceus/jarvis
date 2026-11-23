@@ -91,7 +91,7 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::bordered().title(" Conversation ");
     let inner = block.inner(area);
     let width = inner.width.max(1) as usize;
-    let mut lines = transcript_lines(&app.entries, width);
+    let (mut lines, work_lines) = transcript_lines(&app.entries, width, app.show_steps);
     // What waits for the running turn: dim, at the end, as in T3 Code.
     for queued in app.queue().into_iter().flatten() {
         let what = if queued.steer {
@@ -118,12 +118,26 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
         app.scroll = app.max_scroll;
     }
     let offset = (app.max_scroll - app.scroll).min(u16::MAX as usize) as u16;
+    // Where each work row landed on screen, for a click to find it.
+    app.work_rows = work_lines
+        .into_iter()
+        .filter(|(line, _)| {
+            *line >= offset as usize && *line < offset as usize + inner.height as usize
+        })
+        .map(|(line, index)| ((line - offset as usize) as u16 + inner.y, index))
+        .collect();
 
     frame.render_widget(Paragraph::new(lines).block(block).scroll((offset, 0)), area);
 }
 
-fn transcript_lines(entries: &[Entry], width: usize) -> Vec<Line<'static>> {
+/// The transcript as lines, and where each work row is: (line, entry).
+fn transcript_lines(
+    entries: &[Entry],
+    width: usize,
+    show_steps: bool,
+) -> (Vec<Line<'static>>, Vec<(usize, usize)>) {
     let mut lines = Vec::new();
+    let mut rows = Vec::new();
     let body_width = width.saturating_sub(2).max(1);
     let dim = Style::new().fg(Color::DarkGray);
 
@@ -131,11 +145,32 @@ fn transcript_lines(entries: &[Entry], width: usize) -> Vec<Line<'static>> {
         if index > 0 {
             lines.push(Line::raw(""));
         }
+        if let Some(log) = &entry.work {
+            let open = log.open || show_steps;
+            if log.done {
+                rows.push((lines.len(), index));
+                let style = if log.failed_turn {
+                    Style::new().fg(Color::Red)
+                } else {
+                    dim
+                };
+                lines.push(Line::styled(
+                    format!("  {}", crate::app::work_row(log, open)),
+                    style,
+                ));
+            }
+            if !log.done || open {
+                for step in &log.steps {
+                    lines.push(step_line(step, body_width));
+                }
+            }
+            continue;
+        }
         let (label, colour) = match entry.role {
             Role::User => ("You", Color::Cyan),
             Role::Assistant => ("Jarvis", Color::Green),
             Role::System => ("system", Color::Yellow),
-            Role::Error => ("error", Color::Red),
+            Role::Error | Role::Work => ("error", Color::Red),
         };
         lines.push(Line::from(Span::styled(
             label,
@@ -154,7 +189,31 @@ fn transcript_lines(entries: &[Entry], width: usize) -> Vec<Line<'static>> {
         }
     }
 
-    lines
+    (lines, rows)
+}
+
+/// One step: its mark, what it is, and how it went.
+fn step_line(step: &jarvis_common::ipc::Step, width: usize) -> Line<'static> {
+    let (mark, colour) = match step.state.as_str() {
+        "running" => ("◐", Color::Cyan),
+        "done" => ("●", Color::Green),
+        "failed" | "denied" | "untrusted" => ("✗", Color::Red),
+        "declined" | "withheld" => ("⊘", Color::Yellow),
+        "deferred" => ("⋯", Color::Magenta),
+        _ => ("·", Color::DarkGray),
+    };
+    let summary: String = step.summary.chars().take(width.saturating_sub(6)).collect();
+    let mut spans = vec![
+        Span::styled(format!("  {mark} "), Style::new().fg(colour)),
+        Span::raw(summary),
+    ];
+    if let Some(detail) = &step.detail {
+        spans.push(Span::styled(
+            format!("  {detail}"),
+            Style::new().fg(Color::DarkGray),
+        ));
+    }
+    Line::from(spans)
 }
 
 /// The keys that apply in the input box now.
@@ -538,6 +597,20 @@ mod tests {
     }
 
     #[test]
+    fn the_folded_row_draws() {
+        let mut app = App::new("llama3.2:1b".into());
+        app.session_id = Some("abc".into());
+        let id = uuid::Uuid::new_v4();
+        app.begin_request(id, crate::app::Pending::Turn);
+        app.on_response(jarvis_common::ipc::Response::ok(
+            id,
+            serde_json::json!({ "response": "done", "timing": { "total_ms": 2000 } }),
+        ));
+        let shown = screen(&mut app);
+        assert!(shown.contains("▸ 0 steps · 2.0 s"), "{shown}");
+    }
+
+    #[test]
     fn the_queue_shows_at_the_end_and_in_the_hint() {
         let mut app = App::new("llama3.2:1b".into());
         app.session_id = Some("abc".into());
@@ -571,7 +644,7 @@ mod tests {
     #[test]
     fn transcript_has_labels_and_blank_separators() {
         let entries = vec![Entry::user("hello"), Entry::assistant("hi")];
-        let lines = transcript_lines(&entries, 40);
+        let (lines, _) = transcript_lines(&entries, 40, false);
         let text: Vec<String> = lines
             .iter()
             .map(|line| {
