@@ -311,6 +311,7 @@ impl Orchestrator {
         rec: &TurnRecorder<'_>,
     ) -> ToolOutcome {
         rec.step(describe_step(&name, &args));
+        let step = rec.step_start("tool", &name, describe_step(&name, &args));
         let started = std::time::Instant::now();
         let outcome = self
             .gate_and_run(
@@ -326,6 +327,33 @@ impl Orchestrator {
             rec.plan_refused
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
+        let state = match outcome.status {
+            OutcomeStatus::Succeeded => "done",
+            OutcomeStatus::Failed => "failed",
+            OutcomeStatus::Denied => "denied",
+            OutcomeStatus::Declined | OutcomeStatus::NeedsConfirmation => "declined",
+            OutcomeStatus::Withheld => "withheld",
+            OutcomeStatus::Untrusted => "untrusted",
+            OutcomeStatus::Deferred => "deferred",
+        };
+        // The output itself, never the `<untrusted>` label around it
+        // (review M9).
+        let detail: String = self
+            .prompt_tool_output(&outcome.output)
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .chars()
+            .take(60)
+            .collect();
+        rec.step_end(
+            step,
+            "tool",
+            &outcome.name,
+            state,
+            (!detail.is_empty()).then_some(detail),
+            started.elapsed().as_millis() as u64,
+        );
         rec.tool_time(&outcome.name, started.elapsed());
         rec.tool(&outcome, status_label(&outcome.status));
         outcome
@@ -497,15 +525,24 @@ impl Orchestrator {
             }
             Decision::Ask => match confirm {
                 Some(handler) => {
-                    if handler.confirm(&name, &args).await {
+                    let answer = handler.answer(&name, &args, &[]).await;
+                    if answer.approved {
                         self.run_tool(conv, name, args, "confirmed", verdict.pattern)
                             .await
                     } else {
-                        let msg = format!(
-                            "Tool {} was declined by the user. Args: {}",
-                            name,
-                            compact_args(&args)
-                        );
+                        let reason = answer.reason.filter(|r| !r.trim().is_empty());
+                        let msg = match &reason {
+                            // A no with a reason is the owner steering: the
+                            // model hears why and the turn goes on (6.7b).
+                            Some(reason) => {
+                                format!("Tool {} was declined by the user: {}", name, reason.trim())
+                            }
+                            None => format!(
+                                "Tool {} was declined by the user. Args: {}",
+                                name,
+                                compact_args(&args)
+                            ),
+                        };
                         let _ = self.permissions.log_audit(
                             Some(&conv.id),
                             &name,
@@ -518,7 +555,7 @@ impl Orchestrator {
                             args,
                             status: OutcomeStatus::Declined,
                             output: msg,
-                            result: None,
+                            result: reason.map(|r| json!({ "reason": r })),
                             pattern: verdict.pattern,
                         }
                     }
@@ -630,7 +667,9 @@ impl Orchestrator {
                     .into(),
             },
         ];
-        match handler.choose(&name, &shown, &choices).await {
+        let answer = handler.answer(&name, &shown, &choices).await;
+        let reason = answer.reason.clone().filter(|r| !r.trim().is_empty());
+        match answer.choice.filter(|_| answer.approved) {
             Some(key) => {
                 if key == 't' {
                     self.trust.trust(&conv.id, untrusted);
@@ -646,12 +685,17 @@ impl Orchestrator {
                 self.run_tool(conv, name, args, "confirmed", pattern).await
             }
             None => {
-                let msg = format!(
-                    "Tool {} was declined by the user ({}). Args: {}",
-                    name,
-                    why,
-                    compact_args(&args)
-                );
+                let msg = match &reason {
+                    Some(reason) => {
+                        format!("Tool {} was declined by the user: {}", name, reason.trim())
+                    }
+                    None => format!(
+                        "Tool {} was declined by the user ({}). Args: {}",
+                        name,
+                        why,
+                        compact_args(&args)
+                    ),
+                };
                 let _ = self.permissions.log_audit(
                     Some(&conv.id),
                     &name,
@@ -664,7 +708,7 @@ impl Orchestrator {
                     args,
                     status: OutcomeStatus::Declined,
                     output: msg,
-                    result: None,
+                    result: reason.map(|r| json!({ "reason": r })),
                     pattern,
                 }
             }

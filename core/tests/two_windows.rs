@@ -226,6 +226,7 @@ impl Window {
 
     async fn reply(&mut self, prompt: uuid::Uuid, approved: bool) {
         let line = Message::ConfirmationReply(ConfirmationReply {
+            reason: None,
             id: prompt,
             approved,
             choice: None,
@@ -667,4 +668,64 @@ async fn a_conversation_with_an_extra_message_still_gets_a_title() {
         .cloned()
         .unwrap();
     assert_ne!(mine["title"], "New Session", "{mine}");
+}
+
+#[tokio::test]
+async fn steps_reach_the_window() {
+    let home = fresh().await;
+    let mut a = Window::open(&home).await;
+    let (ask, prompt) = a.stop_at_a_prompt().await;
+    a.reply(prompt, false).await;
+    let mut states = Vec::new();
+    loop {
+        match a.next_message().await {
+            Message::Step(step) => {
+                assert_eq!(step.id, ask);
+                states.push((step.kind.clone(), step.state.clone()));
+            }
+            Message::Response(r) if r.id == ask => break,
+            _ => {}
+        }
+    }
+    assert!(
+        states.contains(&("tool".to_string(), "declined".to_string())),
+        "{states:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_answer_carries_the_files_it_changed() {
+    let home = fresh().await;
+    let mut a = Window::open(&home).await;
+    let (ask, prompt) = a.stop_at_a_prompt().await;
+    a.reply(prompt, true).await;
+    let answered = a.response_to(ask).await;
+    let changes = answered.result.unwrap()["changes"].clone();
+    let changes = changes.as_array().expect("a list");
+    assert_eq!(changes.len(), 1, "{changes:?}");
+    assert!(changes[0]["path"].as_str().unwrap().ends_with("notes.md"));
+    assert!(
+        changes[0]["diff"].as_str().unwrap().contains("+hi"),
+        "{:?}",
+        changes[0]
+    );
+}
+
+#[tokio::test]
+async fn a_write_prompt_carries_its_diff() {
+    let home = fresh().await;
+    let mut a = Window::open(&home).await;
+    let ask = a.send("ask", json!({ "prompt": WRITE })).await;
+    let request = loop {
+        match a.next_message().await {
+            Message::ConfirmationRequest(c) => break c,
+            Message::Response(r) if r.id == ask => panic!("no prompt: {r:?}"),
+            _ => {}
+        }
+    };
+    let preview = request.preview.expect("a preview");
+    assert_eq!(preview.kind, "diff");
+    assert!(preview.text.contains("+hi"), "{}", preview.text);
+    a.reply(request.id, false).await;
+    a.response_to(ask).await;
 }

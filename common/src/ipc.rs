@@ -57,6 +57,18 @@ pub struct ConfirmationRequest {
     /// reads as the first choice or none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub choices: Vec<Choice>,
+    /// What would change: a diff of the file, or the command and where it
+    /// runs (6.7b). Built by the daemon, which can read the file now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<Preview>,
+}
+
+/// The change an approval would allow, shown in its card.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Preview {
+    /// `diff` or `command`.
+    pub kind: String,
+    pub text: String,
 }
 
 /// One way to approve a prompt, chosen with a single key.
@@ -75,6 +87,9 @@ pub struct ConfirmationReply {
     /// The key of the chosen [`Choice`], when the prompt offered choices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub choice: Option<char>,
+    /// Why not, with a no: it reaches the model (6.7b).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 impl ConfirmationReply {
@@ -111,6 +126,52 @@ pub struct Progress {
     pub text: String,
 }
 
+/// One step of a turn, as it starts (`running`) and as it ends (6.7b).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Step {
+    /// The id of the `ask` [`Request`] it belongs to.
+    pub id: Uuid,
+    /// Counts from 1 within the turn; the start and end share it.
+    pub step: u32,
+    /// `model` or `tool`.
+    pub kind: String,
+    pub name: String,
+    pub summary: String,
+    /// `running`, `done`, `failed`, `declined`, `denied`, `deferred`,
+    /// `withheld` or `untrusted`.
+    pub state: String,
+    #[serde(default)]
+    pub detail: Option<String>,
+    #[serde(default)]
+    pub ms: Option<u64>,
+}
+
+/// A [`Step`] before the server adds its request id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepEvent {
+    pub step: u32,
+    pub kind: &'static str,
+    pub name: String,
+    pub summary: String,
+    pub state: &'static str,
+    pub detail: Option<String>,
+    pub ms: Option<u64>,
+}
+
+/// A file a turn changed, for its row and the diff view (6.7b).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileChange {
+    /// The undo entries that changed it this turn, newest first.
+    pub undo_ids: Vec<String>,
+    pub path: String,
+    pub tool: String,
+    pub added: usize,
+    pub removed: usize,
+    /// A unified diff; `None` when no copy was kept to diff against.
+    #[serde(default)]
+    pub diff: Option<String>,
+}
+
 /// Ask the daemon to stop a running request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Cancel {
@@ -129,6 +190,7 @@ pub enum Message {
     Chunk(Chunk),
     Cancel(Cancel),
     Progress(Progress),
+    Step(Step),
 }
 
 impl Message {
@@ -186,6 +248,63 @@ impl Response {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn step_round_trips() {
+        let step = Message::Step(Step {
+            id: Uuid::new_v4(),
+            step: 2,
+            kind: "tool".into(),
+            name: "filesystem.list_dir".into(),
+            summary: "looking through files".into(),
+            state: "done".into(),
+            detail: Some("34 entries".into()),
+            ms: Some(12),
+        });
+        let line = step.encode();
+        assert!(line.contains("\"type\":\"step\""), "{line}");
+        match Message::decode(&line).unwrap() {
+            Message::Step(back) => {
+                assert_eq!(back.step, 2);
+                assert_eq!(back.detail.as_deref(), Some("34 entries"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn confirmation_without_preview_or_reason_still_parses() {
+        let id = Uuid::new_v4();
+        let old = format!(
+            r#"{{"type":"confirmation_request","id":"{id}","tool":"shell.run","args":{{}},"prompt":"run it?"}}"#
+        );
+        match Message::decode(&old).unwrap() {
+            Message::ConfirmationRequest(r) => assert!(r.preview.is_none()),
+            other => panic!("{other:?}"),
+        }
+        let reply = format!(r#"{{"type":"confirmation_reply","id":"{id}","approved":false}}"#);
+        match Message::decode(&reply).unwrap() {
+            Message::ConfirmationReply(r) => assert!(r.reason.is_none()),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_change_round_trips() {
+        let change = FileChange {
+            undo_ids: vec!["b".into(), "a".into()],
+            path: "/w/notes.md".into(),
+            tool: "filesystem.edit".into(),
+            added: 2,
+            removed: 1,
+            diff: None,
+        };
+        let back: FileChange =
+            serde_json::from_value(serde_json::to_value(&change).unwrap()).unwrap();
+        assert_eq!(back.undo_ids, vec!["b", "a"]);
+        assert!(back.diff.is_none());
+    }
 
     #[test]
     fn a_reply_selects_a_choice_and_an_old_client_still_works() {
@@ -200,6 +319,7 @@ mod tests {
             },
         ];
         let reply = |approved, choice| ConfirmationReply {
+            reason: None,
             id: Uuid::nil(),
             approved,
             choice,
@@ -218,7 +338,6 @@ mod tests {
         assert_eq!(old.choice, None);
     }
 
-    use super::*;
     use serde_json::json;
 
     #[test]
@@ -251,6 +370,7 @@ mod tests {
     #[test]
     fn confirmation_roundtrips() {
         let request = ConfirmationRequest {
+            preview: None,
             id: Uuid::new_v4(),
             tool: "shell.run".to_string(),
             args: json!({"command": "firefox"}),

@@ -2,6 +2,7 @@
 
 pub mod apps;
 pub mod cancel;
+pub mod changes;
 pub mod config;
 pub mod confirm;
 pub mod context;
@@ -21,6 +22,7 @@ pub mod openai;
 pub mod orchestrator;
 pub mod permissions;
 pub mod planner;
+pub mod preview;
 pub mod provider;
 pub mod router;
 pub mod sandbox;

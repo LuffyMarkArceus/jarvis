@@ -14,7 +14,7 @@ use crate::cancel::{Cancellation, TurnGuard, TurnRegistry};
 use crate::confirm::choice_prompt;
 use crate::daemon::Daemon;
 use crate::error::{JarvisError, Result};
-use crate::orchestrator::ConfirmationHandler;
+use crate::orchestrator::{Answer, ConfirmationHandler};
 use jarvis_common::ipc::{
     Choice, Chunk, ConfirmationReply, ConfirmationRequest, Message, Progress, Request, Response,
 };
@@ -143,6 +143,22 @@ impl ConfirmationHandler for SocketConfirmer {
             .await
             .and_then(|reply| reply.selected(choices))
     }
+
+    async fn answer(&self, tool: &str, args: &Value, choices: &[Choice]) -> Answer {
+        let Some(reply) = self.ask(tool, args, choices).await else {
+            return Answer::default();
+        };
+        let choice = if choices.is_empty() {
+            reply.approved.then_some('y')
+        } else {
+            reply.selected(choices)
+        };
+        Answer {
+            approved: choice.is_some(),
+            choice,
+            reason: reply.reason.filter(|_| choice.is_none()),
+        }
+    }
 }
 
 impl SocketConfirmer {
@@ -151,6 +167,8 @@ impl SocketConfirmer {
     async fn ask(&self, tool: &str, args: &Value, choices: &[Choice]) -> Option<ConfirmationReply> {
         let prompt = choice_prompt(tool, args, choices);
         let request = ConfirmationRequest {
+            // What would change, from the same arguments the gate runs.
+            preview: crate::preview::preview(tool, args),
             id: Uuid::new_v4(),
             tool: tool.to_string(),
             args: args.clone(),
@@ -673,12 +691,24 @@ async fn handle_ask(
     // Progress ("asking nemotron (step 3)") goes out through the same task,
     // so it is written in order with the chunks.
     let (progress, mut steps) = mpsc::unbounded_channel::<String>();
+    // Each step as it starts and ends (6.7b), through the same task too.
+    let (step_tx, mut step_rx) = mpsc::unbounded_channel::<jarvis_common::ipc::StepEvent>();
     let writer = conn.clone();
     let chunk_task = tokio::spawn(async move {
         loop {
             let message = tokio::select! {
                 Some(text) = chunks.recv() => Message::Chunk(Chunk { id, text }),
                 Some(text) = steps.recv() => Message::Progress(Progress { id, text }),
+                Some(e) = step_rx.recv() => Message::Step(jarvis_common::ipc::Step {
+                    id,
+                    step: e.step,
+                    kind: e.kind.to_string(),
+                    name: e.name,
+                    summary: e.summary,
+                    state: e.state.to_string(),
+                    detail: e.detail,
+                    ms: e.ms,
+                }),
                 else => break,
             };
             if let Err(e) = writer.send(&message).await {
@@ -689,7 +719,7 @@ async fn handle_ask(
         }
     });
 
-    let (result, (unused, used)) = {
+    let (result, (unused, used), changes) = {
         let daemon: &Daemon = daemon;
         let confirmer = SocketConfirmer {
             conn: conn.clone(),
@@ -703,12 +733,14 @@ async fn handle_ask(
                 Some(&cancel),
                 Some(&sink),
                 Some(&progress),
+                Some(&step_tx),
             )
             .await
     };
 
     drop(sink);
     drop(progress);
+    drop(step_tx);
     let _ = chunk_task.await;
 
     // The window keeps each steer it sent until told how it went (6.7a).
@@ -726,6 +758,7 @@ async fn handle_ask(
                 "timing": timing,
                 "unused_steers": unused_json,
                 "used_steers": used,
+                "changes": changes,
             }),
         ),
         // Cancellation is a client action, not a failure of the request.
@@ -736,6 +769,7 @@ async fn handle_ask(
                 "response": "",
                 "unused_steers": unused_json,
                 "used_steers": used,
+                "changes": changes,
             }),
         ),
         Err(e) => Response::err(id, e.to_string()),

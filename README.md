@@ -323,6 +323,24 @@ turn, and the model sees it at its next step. `[tui] follow_up = "steer"` makes
 Enter steer and Ctrl+Enter queue. A steer that came too late to be used is
 queued instead, so nothing you type is lost.
 
+### The conversation
+
+While a turn works, its steps show live - `◐` running, `●` done, `⊘` declined
+- and when it ends they fold into one row: `▸ 5 steps · 12.4 s · 2 files
+changed`. Ctrl+O opens every turn's steps; a click opens one.
+
+**Ctrl+D** (or `/changes`) shows what the last turn changed, file by file, as
+coloured diffs from the undo copies; `r` reverts that turn's files (it asks
+first). Answers are rendered as Markdown: headings, bold, lists, quotes, code
+blocks and tables.
+
+**Approvals** are a card at the foot of the conversation, with a diff of the
+change (or the command and where it runs). `y` yes, `n` no - or **Tab** to
+type a reason, and Enter: the no and your reason go to the model, which can
+try another way ("no, put it in notes/ instead"). A half-typed message waits
+while the card is open and comes back after. Ctrl+P lists the models and,
+under them, the mode: Enter moves a row to its next value.
+
 ### Modes
 
 Each conversation has three settings, shown in the TUI header

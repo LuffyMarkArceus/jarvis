@@ -57,7 +57,7 @@ impl Daemon {
         sink: Option<&UnboundedSender<String>>,
         progress: Option<&UnboundedSender<String>>,
     ) -> Result<(String, String, crate::orchestrator::TurnTiming)> {
-        self.ask_steered(session, prompt, confirm, cancel, sink, progress)
+        self.ask_steered(session, prompt, confirm, cancel, sink, progress, None)
             .await
             .0
     }
@@ -66,7 +66,7 @@ impl Daemon {
     /// ids of those used. Collected while the turn still holds the
     /// conversation, so another window's next turn cannot take them
     /// (6.7a review).
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub async fn ask_steered(
         &self,
         session: &str,
@@ -75,13 +75,16 @@ impl Daemon {
         cancel: Option<&Cancellation>,
         sink: Option<&UnboundedSender<String>>,
         progress: Option<&UnboundedSender<String>>,
+        steps: Option<&UnboundedSender<jarvis_common::ipc::StepEvent>>,
     ) -> (
         Result<(String, String, crate::orchestrator::TurnTiming)>,
         (Vec<crate::conversation::Steer>, Vec<String>),
+        Vec<jarvis_common::ipc::FileChange>,
     ) {
+        let since = chrono::Utc::now();
         let conv = match self.conversation(session) {
             Ok(conv) => conv,
-            Err(e) => return (Err(e), Default::default()),
+            Err(e) => return (Err(e), Default::default(), Vec::new()),
         };
         let Some(_answering) = conv.begin_turn() else {
             return (
@@ -89,15 +92,18 @@ impl Daemon {
                     "This conversation is answering another question. Wait for it, or open another with /new.".into(),
                 )),
                 Default::default(),
+                Vec::new(),
             );
         };
         let result = self
-            .answer(&conv, prompt, confirm, cancel, sink, progress)
+            .answer(&conv, prompt, confirm, cancel, sink, progress, steps)
             .await;
         let outcome = (conv.take_steers(), conv.take_used_steers());
-        (result, outcome)
+        let changes = self.orchestrator.turn_changes(&conv.id, since);
+        (result, outcome, changes)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn answer(
         &self,
         conv: &Arc<Conversation>,
@@ -106,13 +112,14 @@ impl Daemon {
         cancel: Option<&Cancellation>,
         sink: Option<&UnboundedSender<String>>,
         progress: Option<&UnboundedSender<String>>,
+        steps: Option<&UnboundedSender<jarvis_common::ipc::StepEvent>>,
     ) -> Result<(String, String, crate::orchestrator::TurnTiming)> {
         let conv = conv.clone();
         let orch = &self.orchestrator;
         let session_id = conv.id.clone();
         self.conversations.used(&conv);
         let (result, footer, timing) = orch
-            .run_with_footer(&conv, prompt, confirm, cancel, sink, progress)
+            .run_with_footer(&conv, prompt, confirm, cancel, sink, progress, steps)
             .await?;
         // Title a conversation that has none yet, from its first question,
         // once it has an answer. Not "exactly two messages": a steer (6.7a)

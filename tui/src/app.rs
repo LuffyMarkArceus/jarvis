@@ -20,6 +20,56 @@ pub enum Role {
     Assistant,
     System,
     Error,
+    /// A turn's steps: live, then one row (6.7b).
+    Work,
+}
+
+/// The steps of one turn, and the files it changed (6.7b).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkLog {
+    /// The `ask` request it belongs to.
+    pub request: Uuid,
+    pub steps: Vec<jarvis_common::ipc::Step>,
+    pub done: bool,
+    pub ms: u64,
+    pub changes: Vec<jarvis_common::ipc::FileChange>,
+    /// Opened by a click.
+    pub open: bool,
+    /// The turn failed: its reply could not say what it changed.
+    pub failed_turn: bool,
+}
+
+impl WorkLog {
+    /// Whether the turn, once done, keeps a row: it ran a tool, changed a
+    /// file or failed. A plain answer's one model step is not worth one.
+    pub fn worth_a_row(&self) -> bool {
+        self.failed_turn || !self.changes.is_empty() || self.steps.iter().any(|s| s.kind == "tool")
+    }
+}
+
+/// The one row a finished turn's steps fold into.
+pub fn work_row(log: &WorkLog, open: bool) -> String {
+    let plural =
+        |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    let mut row = format!(
+        "{} {} · {:.1} s",
+        if open { "▾" } else { "▸" },
+        plural(log.steps.len(), "step", "steps"),
+        log.ms as f64 / 1000.0
+    );
+    if log.failed_turn {
+        row.push_str(" · changes: see /undo");
+    } else if !log.changes.is_empty() {
+        row.push_str(&format!(
+            " · {} changed",
+            plural(log.changes.len(), "file", "files")
+        ));
+    }
+    let declined = log.steps.iter().filter(|s| s.state == "declined").count();
+    if declined > 0 {
+        row.push_str(&format!(" · {declined} declined"));
+    }
+    row
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +78,8 @@ pub struct Entry {
     pub text: String,
     /// Under an answer: what produced it and where it ran.
     pub footer: Option<String>,
+    /// A turn's steps (`Role::Work` only).
+    pub work: Option<WorkLog>,
 }
 
 impl Entry {
@@ -36,6 +88,7 @@ impl Entry {
             role: Role::User,
             text: text.into(),
             footer: None,
+            work: None,
         }
     }
 
@@ -44,6 +97,7 @@ impl Entry {
             role: Role::Assistant,
             text: text.into(),
             footer: None,
+            work: None,
         }
     }
 
@@ -52,6 +106,7 @@ impl Entry {
             role: Role::System,
             text: text.into(),
             footer: None,
+            work: None,
         }
     }
 
@@ -60,6 +115,7 @@ impl Entry {
             role: Role::Error,
             text: text.into(),
             footer: None,
+            work: None,
         }
     }
 }
@@ -105,6 +161,8 @@ pub enum Action {
         id: Uuid,
         approved: bool,
         choice: Option<char>,
+        /// Why not, with a no (6.7b).
+        reason: Option<String>,
     },
     /// Stop a running request without closing the connection.
     Cancel {
@@ -136,7 +194,15 @@ pub struct SessionRow {
 #[derive(Debug)]
 pub enum Overlay {
     Help,
-    Confirm(ConfirmationRequest),
+    /// An approval waiting, shown as a card in the conversation (6.7b).
+    Confirm(Card),
+    /// What the last turn changed, file by file, with `r` to revert it.
+    Changes {
+        files: Vec<jarvis_common::ipc::FileChange>,
+        selected: usize,
+        scroll: u16,
+        confirm_revert: bool,
+    },
     Sessions {
         rows: Vec<SessionRow>,
         selected: usize,
@@ -212,6 +278,8 @@ pub enum Command {
     Queue,
     /// `/steer <text>`: into the running turn.
     Steer(String),
+    /// `/changes` (Ctrl+D): the last turn's file changes.
+    Changes,
     Clear,
     Quit,
     /// `/word` that is no command: shown as a mistake, not sent to the
@@ -301,6 +369,7 @@ pub fn parse_command(text: &str) -> Option<Command> {
         "/resume" => Command::Resume,
         "/queue" => Command::Queue,
         "/steer" => Command::Steer(rest),
+        "/changes" => Command::Changes,
         "/tools" => Command::Tools,
         "/session" => Command::Session,
         "/clear" => Command::Clear,
@@ -316,6 +385,27 @@ pub fn parse_command(text: &str) -> Option<Command> {
         }
         _ => return None,
     })
+}
+
+/// An approval card: the request, how far its preview is scrolled,
+/// whether a reason is being typed, and the draft it parked (6.7b).
+#[derive(Debug, Clone)]
+pub struct Card {
+    pub request: ConfirmationRequest,
+    pub scroll: u16,
+    pub reasoning: bool,
+    pub parked: String,
+}
+
+impl Card {
+    pub fn new(request: ConfirmationRequest) -> Card {
+        Card {
+            request,
+            scroll: 0,
+            reasoning: false,
+            parked: String::new(),
+        }
+    }
 }
 
 /// A message waiting to be sent after the running turn.
@@ -362,6 +452,10 @@ pub struct App {
     pub continue_last: bool,
     /// The terminal tells Shift+Enter (and Ctrl+Enter) from Enter.
     pub keyboard_enhanced: bool,
+    /// Ctrl+O: every turn's steps open (6.7b).
+    pub show_steps: bool,
+    /// Where each work row was drawn: (screen row, entry index), for clicks.
+    pub work_rows: Vec<(u16, usize)>,
     /// Messages typed while a turn ran, per conversation (6.7a).
     pub queues: std::collections::HashMap<String, std::collections::VecDeque<Queued>>,
     /// Conversations whose queue waits for `/resume`.
@@ -379,6 +473,9 @@ pub struct App {
     pub mode_label: String,
     /// Its autonomy, for Shift+Tab: `plan`, `interactive` or `autopilot`.
     autonomy: String,
+    /// The rest of the mode, for the picker's rows (6.7b).
+    approval: String,
+    sandbox: bool,
     /// When the pending request was sent.
     busy_since: Option<Instant>,
     /// What the pending turn says it is doing now.
@@ -412,6 +509,8 @@ impl App {
             last_timing: None,
             continue_last: false,
             keyboard_enhanced: false,
+            show_steps: false,
+            work_rows: Vec::new(),
             queues: Default::default(),
             held: Default::default(),
             follow_up: FollowUp::Queue,
@@ -421,6 +520,8 @@ impl App {
             menu_closed: false,
             mode_label: "Interactive · Manual · Sandbox on".into(),
             autonomy: "interactive".into(),
+            approval: "manual".into(),
+            sandbox: true,
             busy_since: None,
             progress: None,
             diag: Vec::new(),
@@ -568,8 +669,8 @@ impl App {
         self.cancelling = false;
         // A confirmation can no longer be answered; the daemon will deny the
         // tool after its own timeout, so do not pretend it was sent.
-        if matches!(self.overlay, Some(Overlay::Confirm(_))) {
-            self.overlay = None;
+        if let Some(Overlay::Confirm(card)) = self.overlay.take() {
+            self.input.set(&card.parked);
         }
         self.note(Entry::error(reason));
     }
@@ -582,10 +683,26 @@ impl App {
                 vec![]
             }
             ClientEvent::Confirmation(request) => {
-                self.overlay = Some(Overlay::Confirm(request));
+                // A draft (a steer half-typed) waits, and comes back after:
+                // it must never become the decline reason.
+                let mut card = Card::new(request);
+                card.parked = match self.overlay.take() {
+                    // A card replacing a stale one keeps the draft that one
+                    // parked; a half-typed reason for it goes (review I5).
+                    Some(Overlay::Confirm(old)) => old.parked,
+                    other => {
+                        self.overlay = other;
+                        self.input.take()
+                    }
+                };
+                self.overlay = Some(Overlay::Confirm(card));
                 vec![]
             }
             ClientEvent::Chunk { id, text } => self.on_chunk(id, text),
+            ClientEvent::Step(step) => {
+                self.on_step(step);
+                vec![]
+            }
             ClientEvent::Progress { id, text } => {
                 if self.pending_id == Some(id) {
                     self.progress = Some(text);
@@ -629,6 +746,22 @@ impl App {
     }
 
     pub fn begin_request(&mut self, id: Uuid, pending: Pending) {
+        if matches!(pending, Pending::Turn) {
+            self.entries.push(Entry {
+                role: Role::Work,
+                text: String::new(),
+                footer: None,
+                work: Some(WorkLog {
+                    request: id,
+                    steps: Vec::new(),
+                    done: false,
+                    ms: 0,
+                    changes: Vec::new(),
+                    open: false,
+                    failed_turn: false,
+                }),
+            });
+        }
         self.pending_id = Some(id);
         self.pending = Some(pending);
         self.busy_since = Some(Instant::now());
@@ -739,6 +872,54 @@ impl App {
         if let Some(autonomy) = result["mode"]["autonomy"].as_str() {
             self.autonomy = autonomy.to_string();
         }
+        if let Some(approval) = result["mode"]["approval"].as_str() {
+            self.approval = approval.to_string();
+        }
+        if let Some(sandbox) = result["mode"]["sandbox"].as_bool() {
+            self.sandbox = sandbox;
+        }
+    }
+
+    /// The picker's mode rows, after the models.
+    pub fn mode_rows(&self) -> Vec<String> {
+        let autonomy = match self.autonomy.as_str() {
+            "plan" => "Plan",
+            "autopilot" => "Autopilot",
+            _ => "Interactive",
+        };
+        let approval = match self.approval.as_str() {
+            "assisted" => "Assisted",
+            "allow_all" => "Allow all",
+            _ => "Manual",
+        };
+        vec![
+            format!("Autonomy: {autonomy}"),
+            format!("Approval: {approval}"),
+            format!("Sandbox: {}", if self.sandbox { "on" } else { "off" }),
+        ]
+    }
+
+    /// Enter on mode row `row`: the next value.
+    fn next_mode(&mut self, row: usize) -> Vec<Action> {
+        match row {
+            0 => {
+                let next = match self.autonomy.as_str() {
+                    "interactive" => "autopilot",
+                    "autopilot" => "plan",
+                    _ => "interactive",
+                };
+                self.mode_request("autonomy", next)
+            }
+            1 => {
+                let next = match self.approval.as_str() {
+                    "manual" => "assisted",
+                    "assisted" => "allow_all",
+                    _ => "manual",
+                };
+                self.mode_request("approval", next)
+            }
+            _ => self.mode_request("sandbox", if self.sandbox { "off" } else { "on" }),
+        }
     }
 
     fn run_command(&mut self, command: Command) -> Vec<Action> {
@@ -751,6 +932,7 @@ impl App {
                 | Command::Queue
                 | Command::Resume
                 | Command::Steer(_)
+                | Command::Changes
                 | Command::Timing
                 | Command::Unknown(_)
         );
@@ -848,6 +1030,26 @@ impl App {
                 } else {
                     self.send_prompt(text)
                 }
+            }
+            Command::Changes => {
+                let last = self
+                    .entries
+                    .iter()
+                    .rev()
+                    .filter_map(|e| e.work.as_ref())
+                    .find(|w| !w.changes.is_empty());
+                match last {
+                    Some(log) => {
+                        self.overlay = Some(Overlay::Changes {
+                            files: log.changes.clone(),
+                            selected: 0,
+                            scroll: 0,
+                            confirm_revert: false,
+                        });
+                    }
+                    None => self.note(Entry::system("The last turn changed no files.")),
+                }
+                vec![]
             }
             Command::Resume => {
                 let Some(session) = self.session_id.clone() else {
@@ -1013,6 +1215,19 @@ impl App {
                 if let Some(pos) = self.in_flight.iter().position(|q| q.id == steer_id) {
                     let mut steer = self.in_flight.remove(pos);
                     steer.steer = false;
+                    // The note said it joined the turn; it did not.
+                    let said = format!("steering: {}", steer.text);
+                    if let Some(note) = self
+                        .entries
+                        .iter_mut()
+                        .rev()
+                        .find(|e| e.role == Role::System && e.text == said)
+                    {
+                        note.text = format!(
+                            "queued instead (the turn could not take it): {}",
+                            steer.text
+                        );
+                    }
                     if let Some(session) = self.session_id.clone() {
                         self.queues.entry(session).or_default().push_back(steer);
                     }
@@ -1072,6 +1287,29 @@ impl App {
                 .and_then(|r| r.get("cancelled"))
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+        if turn_ended {
+            // The turn is over: any card it raised can no longer be answered
+            // (the daemon timed it out), so it closes (review I5).
+            if matches!(self.overlay, Some(Overlay::Confirm(_))) {
+                if let Some(Overlay::Confirm(card)) = self.overlay.take() {
+                    self.input.set(&card.parked);
+                }
+            }
+            let result = response.result.as_ref();
+            let ms = result
+                .and_then(|r| r["timing"]["total_ms"].as_u64())
+                .unwrap_or(0);
+            let changes: Vec<jarvis_common::ipc::FileChange> = result
+                .and_then(|r| serde_json::from_value(r["changes"].clone()).ok())
+                .unwrap_or_default();
+            let failed = !response.ok;
+            if let Some(log) = self.work_log_mut(response.id) {
+                log.done = true;
+                log.ms = ms;
+                log.changes = changes;
+                log.failed_turn = failed;
+            }
+        }
         let mut actions = self.on_response_inner(response);
         if turn_ended {
             if answered {
@@ -1092,6 +1330,12 @@ impl App {
     /// A turn whose answer will not come: every steer sent into it goes
     /// back to the front of the queue, and the queue waits for `/resume`.
     fn abandon_turn(&mut self) {
+        if let (Some(Pending::Turn), Some(id)) = (&self.pending, self.pending_id) {
+            if let Some(log) = self.work_log_mut(id) {
+                log.done = true;
+                log.failed_turn = true;
+            }
+        }
         if matches!(self.pending, Some(Pending::Turn)) || !self.in_flight.is_empty() {
             let back: Vec<Queued> = self.in_flight.drain(..).collect();
             self.requeue_front(back);
@@ -1136,6 +1380,44 @@ impl App {
     pub fn steer_sent(&mut self, request: Uuid, steer: Queued) {
         self.steer_requests.insert(request, steer.id);
         self.in_flight.push(steer);
+    }
+
+    fn work_log_mut(&mut self, request: Uuid) -> Option<&mut WorkLog> {
+        self.entries
+            .iter_mut()
+            .rev()
+            .filter_map(|e| e.work.as_mut())
+            .find(|w| w.request == request)
+    }
+
+    /// A step started or ended: the end keeps what the start said.
+    fn on_step(&mut self, step: jarvis_common::ipc::Step) {
+        let Some(log) = self.work_log_mut(step.id) else {
+            return;
+        };
+        match log.steps.iter_mut().find(|s| s.step == step.step) {
+            Some(known) => {
+                known.state = step.state;
+                known.detail = step.detail;
+                known.ms = step.ms;
+            }
+            None => log.steps.push(step),
+        }
+    }
+
+    /// A click at screen row `row`: a work row there opens or closes.
+    pub fn on_click(&mut self, row: u16) {
+        let Some(&(_, index)) = self.work_rows.iter().find(|(r, _)| *r == row) else {
+            return;
+        };
+        if let Some(log) = self.entries.get_mut(index).and_then(|e| e.work.as_mut()) {
+            log.open = !log.open;
+        }
+    }
+
+    /// The entry still streaming in, if any.
+    pub fn streaming_index(&self) -> Option<usize> {
+        self.streaming.as_ref().map(|s| s.index)
     }
 
     /// This conversation's queue, if it has one.
@@ -1483,7 +1765,9 @@ impl App {
             // abort the turn itself; denying only the tool would let the
             // model continue explaining the denial, which is not what Ctrl+C
             // means here.
-            if let Some(Overlay::Confirm(request)) = self.overlay.take() {
+            if let Some(Overlay::Confirm(card)) = self.overlay.take() {
+                self.input.set(&card.parked);
+                let request = card.request;
                 if matches!(self.pending, Some(Pending::Turn)) {
                     if let Some(id) = self.pending_id {
                         if !self.cancelling {
@@ -1497,6 +1781,7 @@ impl App {
                     id: request.id,
                     approved: false,
                     choice: None,
+                    reason: None,
                 }];
             }
             if matches!(self.pending, Some(Pending::Turn)) {
@@ -1546,6 +1831,13 @@ impl App {
         }
         if ctrl && key.code == KeyCode::Char('r') {
             return vec![Action::Reconnect];
+        }
+        if ctrl && key.code == KeyCode::Char('d') {
+            return self.run_command(Command::Changes);
+        }
+        if ctrl && key.code == KeyCode::Char('o') {
+            self.show_steps = !self.show_steps;
+            return vec![];
         }
 
         // The `/` menu takes its keys first while it is open.
@@ -1678,31 +1970,146 @@ impl App {
         match overlay {
             Overlay::Help => vec![],
             Overlay::Recall(_) => vec![],
-            Overlay::Confirm(request) => {
-                let answer = |approved, choice| Action::Confirm {
-                    id: request.id,
+            Overlay::Changes {
+                files,
+                mut selected,
+                mut scroll,
+                confirm_revert,
+            } => {
+                if confirm_revert {
+                    if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+                        // Newest first, across files: undo ids start with
+                        // their time.
+                        let mut ids: Vec<String> =
+                            files.iter().flat_map(|f| f.undo_ids.clone()).collect();
+                        ids.sort_by(|a, b| b.cmp(a));
+                        return ids.into_iter().map(Action::UndoApply).collect();
+                    }
+                    self.overlay = Some(Overlay::Changes {
+                        files,
+                        selected,
+                        scroll,
+                        confirm_revert: false,
+                    });
+                    return vec![];
+                }
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => return vec![],
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        selected = selected.saturating_sub(1);
+                        scroll = 0;
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        selected = (selected + 1).min(files.len().saturating_sub(1));
+                        scroll = 0;
+                    }
+                    KeyCode::PageDown => scroll = scroll.saturating_add(10),
+                    KeyCode::PageUp => scroll = scroll.saturating_sub(10),
+                    KeyCode::Char('r') => {
+                        self.overlay = Some(Overlay::Changes {
+                            files,
+                            selected,
+                            scroll,
+                            confirm_revert: true,
+                        });
+                        return vec![];
+                    }
+                    _ => {}
+                }
+                self.overlay = Some(Overlay::Changes {
+                    files,
+                    selected,
+                    scroll,
+                    confirm_revert: false,
+                });
+                vec![]
+            }
+            Overlay::Confirm(mut card) => {
+                let id = card.request.id;
+                let answer = |approved, choice, reason| Action::Confirm {
+                    id,
                     approved,
                     choice,
+                    reason,
                 };
+                // Typing a reason: keys edit it; Enter sends the no with it.
+                if card.reasoning {
+                    return match key.code {
+                        KeyCode::Enter => {
+                            let reason = self.input.take().trim().to_string();
+                            self.input.set(&card.parked);
+                            vec![answer(false, None, (!reason.is_empty()).then_some(reason))]
+                        }
+                        KeyCode::Esc => {
+                            self.input.clear();
+                            card.reasoning = false;
+                            self.overlay = Some(Overlay::Confirm(card));
+                            vec![]
+                        }
+                        _ => {
+                            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                            let alt = key.modifiers.contains(KeyModifiers::ALT);
+                            let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+                            self.overlay = Some(Overlay::Confirm(card));
+                            // Text editing only: nothing that recalls a
+                            // message, changes a mode or sends (review M6).
+                            let editing = matches!(
+                                key.code,
+                                KeyCode::Char(_)
+                                    | KeyCode::Backspace
+                                    | KeyCode::Delete
+                                    | KeyCode::Left
+                                    | KeyCode::Right
+                                    | KeyCode::Home
+                                    | KeyCode::End
+                            );
+                            if editing {
+                                let _ = self.edit_key(key, ctrl, alt, shift);
+                            }
+                            vec![]
+                        }
+                    };
+                }
+                let choices = card.request.choices.clone();
+                let done = |app: &mut App, card: Card| app.input.set(&card.parked);
                 match key.code {
                     // `y` is the plain yes: the first choice, if any.
                     KeyCode::Char('y') | KeyCode::Char('Y') => {
-                        vec![answer(true, request.choices.first().map(|c| c.key))]
+                        done(self, card);
+                        vec![answer(true, choices.first().map(|c| c.key), None)]
                     }
                     KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                        vec![answer(false, None)]
+                        done(self, card);
+                        vec![answer(false, None, None)]
                     }
-                    KeyCode::Char(c) if request.choices.iter().any(|x| x.key == c) => {
-                        vec![answer(true, Some(c))]
+                    KeyCode::Char(c) if choices.iter().any(|x| x.key == c) => {
+                        done(self, card);
+                        vec![answer(true, Some(c), None)]
+                    }
+                    KeyCode::Tab => {
+                        card.reasoning = true;
+                        self.overlay = Some(Overlay::Confirm(card));
+                        vec![]
+                    }
+                    KeyCode::PageDown => {
+                        card.scroll = card.scroll.saturating_add(10);
+                        self.overlay = Some(Overlay::Confirm(card));
+                        vec![]
+                    }
+                    KeyCode::PageUp => {
+                        card.scroll = card.scroll.saturating_sub(10);
+                        self.overlay = Some(Overlay::Confirm(card));
+                        vec![]
                     }
                     _ => {
-                        self.overlay = Some(Overlay::Confirm(request));
+                        self.overlay = Some(Overlay::Confirm(card));
                         vec![]
                     }
                 }
             }
             Overlay::Models { rows, mut selected } => {
-                let last = rows.len().saturating_sub(1);
+                // The models, then the three mode rows.
+                let last = rows.len() + 2;
                 match key.code {
                     KeyCode::Esc => {}
                     KeyCode::Up | KeyCode::Char('k') => {
@@ -1717,6 +2124,9 @@ impl App {
                         if let Some(row) = rows.get(selected) {
                             return vec![Self::model_set(&row.name, None)];
                         }
+                        let mode_row = selected - rows.len();
+                        self.overlay = Some(Overlay::Models { rows, selected });
+                        return self.next_mode(mode_row);
                     }
                     _ => {
                         self.overlay = Some(Overlay::Models { rows, selected });
@@ -1767,10 +2177,21 @@ impl App {
     }
 
     pub fn on_paste(&mut self, text: &str) {
-        if self.overlay.is_some() {
-            return;
+        // Into a reason being typed; over any other overlay it goes nowhere.
+        match &self.overlay {
+            None => {}
+            Some(Overlay::Confirm(card)) if card.reasoning => {}
+            Some(_) => return,
         }
-        self.input.insert_str(&text.replace("\r\n", "\n"));
+        // Terminals send a pasted newline as a carriage return.
+        let text: String = text
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .replace('\t', "    ")
+            .chars()
+            .filter(|c| *c == '\n' || !c.is_control())
+            .collect();
+        self.input.insert_str(&text);
     }
 
     fn history_previous(&mut self) {
@@ -2043,6 +2464,342 @@ mod tests {
         app.on_disconnected("gone".into());
         assert_eq!(queued(&app), vec!["s", "q1", "q2"]);
         assert!(app.held.contains("abc"));
+    }
+
+    fn step(id: Uuid, n: u32, kind: &str, state: &str) -> jarvis_common::ipc::Step {
+        jarvis_common::ipc::Step {
+            id,
+            step: n,
+            kind: kind.into(),
+            name: if kind == "tool" {
+                "filesystem.list_dir".into()
+            } else {
+                "qwen".into()
+            },
+            summary: if state == "running" {
+                format!("{kind} {n}")
+            } else {
+                String::new()
+            },
+            state: state.into(),
+            detail: (state != "running").then(|| "ok".into()),
+            ms: None,
+        }
+    }
+
+    fn work_entry(app: &App) -> &WorkLog {
+        app.entries
+            .iter()
+            .rev()
+            .find_map(|e| e.work.as_ref())
+            .expect("a work entry")
+    }
+
+    fn change(path: &str) -> jarvis_common::ipc::FileChange {
+        jarvis_common::ipc::FileChange {
+            undo_ids: vec![format!("id-{path}")],
+            path: path.into(),
+            tool: "filesystem.write".into(),
+            added: 1,
+            removed: 0,
+            diff: Some(format!("+++ {path}\n+x\n")),
+        }
+    }
+
+    fn turn_with_changes(app: &mut App, changes: serde_json::Value) {
+        running(app, "rename them");
+        let id = app.pending_id.unwrap();
+        app.on_response(Response::ok(
+            id,
+            json!({ "cancelled": true, "response": "", "changes": changes }),
+        ));
+    }
+
+    fn two_files() -> serde_json::Value {
+        json!([
+            { "undo_ids": ["20261122T100002-b2", "20261122T100001-b1"], "path": "/w/b.md",
+              "tool": "filesystem.edit", "added": 1, "removed": 1,
+              "diff": "--- /w/b.md\n+++ /w/b.md\n-old\n+new\n" },
+            { "undo_ids": ["20261122T100000-a1"], "path": "/w/new.md",
+              "tool": "filesystem.write", "added": 30, "removed": 0,
+              "diff": (0..30).map(|i| format!("+l{i}\n")).collect::<String>() }
+        ])
+    }
+
+    fn the_changes(app: &App) -> (usize, u16, bool, usize) {
+        match &app.overlay {
+            Some(Overlay::Changes {
+                files,
+                selected,
+                scroll,
+                confirm_revert,
+            }) => (files.len(), *scroll, *confirm_revert, *selected),
+            other => panic!("no diff view: {other:?}"),
+        }
+    }
+
+    fn picker(app: &mut App) {
+        app.overlay = Some(Overlay::Models {
+            rows: vec![
+                ModelRow {
+                    name: "llama3.2:1b".into(),
+                    remote: false,
+                    current: true,
+                },
+                ModelRow {
+                    name: "qwen2.5:3b".into(),
+                    remote: false,
+                    current: false,
+                },
+            ],
+            selected: 0,
+        });
+    }
+
+    #[test]
+    fn the_picker_lists_mode_rows_after_models() {
+        let mut app = with_session();
+        picker(&mut app);
+        assert_eq!(
+            app.mode_rows(),
+            vec!["Autonomy: Interactive", "Approval: Manual", "Sandbox: on"]
+        );
+        for _ in 0..4 {
+            press(&mut app, KeyCode::Down);
+        }
+        match &app.overlay {
+            Some(Overlay::Models { selected, .. }) => {
+                assert_eq!(*selected, 4, "into the mode rows")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn enter_on_a_mode_row_sends_the_next_value() {
+        let mut app = with_session();
+        for (row, what, next) in [
+            (2, "autonomy", json!("autopilot")),
+            (3, "approval", json!("assisted")),
+            (4, "sandbox", json!(false)),
+        ] {
+            picker(&mut app);
+            if let Some(Overlay::Models { selected, .. }) = &mut app.overlay {
+                *selected = row;
+            }
+            let (method, params) = request_of(&press(&mut app, KeyCode::Enter));
+            assert_eq!(method, "mode.set");
+            assert_eq!(params[what], next, "{what}");
+            assert!(
+                matches!(app.overlay, Some(Overlay::Models { .. })),
+                "the picker stays open"
+            );
+        }
+    }
+
+    #[test]
+    fn ctrl_d_opens_the_last_turns_changes() {
+        let mut app = with_session();
+        key(&mut app, KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert!(app.overlay.is_none());
+        assert!(app
+            .entries
+            .last()
+            .unwrap()
+            .text
+            .contains("The last turn changed no files."));
+        turn_with_changes(&mut app, two_files()); // a cancelled turn's changes
+        key(&mut app, KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert_eq!(the_changes(&app).0, 2);
+        press(&mut app, KeyCode::Esc);
+        assert!(enter(&mut app, "/changes").is_empty());
+        assert_eq!(the_changes(&app).0, 2);
+    }
+
+    #[test]
+    fn up_down_choose_a_file_and_pgdn_scrolls() {
+        let mut app = with_session();
+        turn_with_changes(&mut app, two_files());
+        key(&mut app, KeyCode::Char('d'), KeyModifiers::CONTROL);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(the_changes(&app).3, 1);
+        press(&mut app, KeyCode::PageDown);
+        assert!(the_changes(&app).1 > 0);
+        press(&mut app, KeyCode::Up);
+        assert_eq!(the_changes(&app).3, 0);
+        assert_eq!(the_changes(&app).1, 0, "a new file starts at the top");
+    }
+
+    #[test]
+    fn r_then_y_reverts_exactly_the_turns_ids_newest_first() {
+        // Review Focus 2 and 5: a cancelled turn's changes, a new file.
+        let mut app = with_session();
+        turn_with_changes(&mut app, two_files());
+        key(&mut app, KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert!(press(&mut app, KeyCode::Char('r')).is_empty());
+        assert!(the_changes(&app).2, "asks first");
+        let actions = press(&mut app, KeyCode::Char('y'));
+        let ids: Vec<String> = actions
+            .iter()
+            .map(|a| match a {
+                Action::UndoApply(id) => id.clone(),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                "20261122T100002-b2",
+                "20261122T100001-b1",
+                "20261122T100000-a1"
+            ]
+        );
+        assert!(app.overlay.is_none());
+    }
+
+    #[test]
+    fn r_then_n_does_nothing() {
+        let mut app = with_session();
+        turn_with_changes(&mut app, two_files());
+        key(&mut app, KeyCode::Char('d'), KeyModifiers::CONTROL);
+        press(&mut app, KeyCode::Char('r'));
+        assert!(press(&mut app, KeyCode::Char('n')).is_empty());
+        assert!(!the_changes(&app).2);
+    }
+
+    #[test]
+    fn steps_show_live_then_fold() {
+        let mut app = with_session();
+        running(&mut app, "list the files");
+        let id = app.pending_id.unwrap();
+        app.on_client_event(ClientEvent::Step(step(id, 1, "model", "running")));
+        app.on_client_event(ClientEvent::Step(step(id, 1, "model", "done")));
+        app.on_client_event(ClientEvent::Step(step(id, 2, "tool", "running")));
+        let log = work_entry(&app);
+        assert_eq!(log.steps.len(), 2);
+        assert_eq!(log.steps[0].state, "done");
+        assert_eq!(
+            log.steps[0].summary, "model 1",
+            "the end keeps the start's summary"
+        );
+        assert!(!log.done);
+        app.on_client_event(ClientEvent::Step(step(id, 2, "tool", "done")));
+        app.on_response(Response::ok(
+            id,
+            json!({ "response": "two files", "timing": { "total_ms": 12400 },
+                    "changes": [change("/w/a.md")] }),
+        ));
+        let log = work_entry(&app);
+        assert!(log.done);
+        assert_eq!(log.ms, 12400);
+        assert_eq!(log.changes.len(), 1);
+    }
+
+    #[test]
+    fn the_row_counts_steps_files_and_declines() {
+        let id = Uuid::new_v4();
+        let log = WorkLog {
+            request: id,
+            steps: vec![
+                step(id, 1, "model", "done"),
+                step(id, 2, "tool", "declined"),
+                step(id, 3, "model", "done"),
+            ],
+            done: true,
+            ms: 12400,
+            changes: vec![change("/w/a.md"), change("/w/b.md")],
+            open: false,
+            failed_turn: false,
+        };
+        assert_eq!(
+            work_row(&log, false),
+            "▸ 3 steps · 12.4 s · 2 files changed · 1 declined"
+        );
+        assert_eq!(
+            work_row(&log, true),
+            "▾ 3 steps · 12.4 s · 2 files changed · 1 declined"
+        );
+    }
+
+    #[test]
+    fn the_row_says_one_step_and_one_file() {
+        let id = Uuid::new_v4();
+        let log = WorkLog {
+            request: id,
+            steps: vec![step(id, 1, "tool", "done")],
+            done: true,
+            ms: 1000,
+            changes: vec![change("/w/a.md")],
+            open: false,
+            failed_turn: false,
+        };
+        assert_eq!(work_row(&log, false), "▸ 1 step · 1.0 s · 1 file changed");
+    }
+
+    #[test]
+    fn a_steer_turned_away_says_it_was_queued() {
+        let mut app = with_session();
+        running(&mut app, "first");
+        let (request, _) = enter_steer(&mut app, "/steer use Pictures");
+        app.on_response(Response::ok(request, json!({ "status": "not_running" })));
+        let texts: Vec<&str> = app.entries.iter().map(|e| e.text.as_str()).collect();
+        assert!(
+            !texts.iter().any(|t| t.starts_with("steering:")),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("queued") && t.contains("use Pictures")),
+            "{texts:?}"
+        );
+    }
+
+    #[test]
+    fn ctrl_o_opens_every_turn() {
+        let mut app = with_session();
+        assert!(!app.show_steps);
+        key(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
+        assert!(app.show_steps);
+        key(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
+        assert!(!app.show_steps);
+    }
+
+    #[test]
+    fn a_click_on_a_row_opens_that_turn_only() {
+        let mut app = with_session();
+        running(&mut app, "one");
+        end_turn(&mut app, "answer");
+        running(&mut app, "two");
+        end_turn(&mut app, "answer");
+        let works: Vec<usize> = app
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.work.is_some())
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(works.len(), 2);
+        app.work_rows = vec![(5, works[0]), (9, works[1])];
+        app.on_click(9);
+        assert!(!app.entries[works[0]].work.as_ref().unwrap().open);
+        assert!(app.entries[works[1]].work.as_ref().unwrap().open);
+        app.on_click(9);
+        assert!(!app.entries[works[1]].work.as_ref().unwrap().open);
+    }
+
+    #[test]
+    fn a_failed_turn_points_to_undo() {
+        let mut app = with_session();
+        running(&mut app, "one");
+        end_turn(&mut app, "error");
+        let log = work_entry(&app);
+        assert!(log.failed_turn && log.done);
+        assert!(
+            work_row(log, false).contains("changes: see /undo"),
+            "{}",
+            work_row(log, false)
+        );
     }
 
     #[test]
@@ -2521,9 +3278,9 @@ mod tests {
         app.begin_request(request.id, Pending::Turn);
         let actions = app.on_response(Response::ok(Uuid::new_v4(), json!({"response": "x"})));
         assert!(actions.is_empty());
-        assert_eq!(
-            app.entries.last().map(|entry| entry.role),
-            Some(Role::System)
+        assert!(
+            !app.entries.iter().any(|e| e.role == Role::Assistant),
+            "another request's answer was shown"
         );
         assert!(app.is_busy(), "the real response is still outstanding");
     }
@@ -2655,17 +3412,200 @@ mod tests {
         assert!(app.input.is_empty());
     }
 
+    fn a_card(choices: Vec<jarvis_common::ipc::Choice>) -> ConfirmationRequest {
+        ConfirmationRequest {
+            preview: Some(jarvis_common::ipc::Preview {
+                kind: "diff".into(),
+                text: (0..40).map(|i| format!("+line {i}\n")).collect(),
+            }),
+            id: Uuid::new_v4(),
+            tool: "filesystem.write".into(),
+            args: json!({}),
+            prompt: "Write notes.md".into(),
+            choices,
+        }
+    }
+
+    fn the_card(app: &App) -> &Card {
+        match &app.overlay {
+            Some(Overlay::Confirm(card)) => card,
+            other => panic!("no card: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_card_parks_the_draft_and_gives_it_back() {
+        // Review Focus 4: a half-typed steer is not the decline reason.
+        let mut app = with_session();
+        app.input.set("use the other fold");
+        app.on_client_event(ClientEvent::Confirmation(a_card(vec![])));
+        assert!(app.input.text().is_empty(), "the draft is parked");
+        let actions = press(&mut app, KeyCode::Char('n'));
+        assert!(matches!(
+            actions.as_slice(),
+            [Action::Confirm {
+                approved: false,
+                reason: None,
+                ..
+            }]
+        ));
+        assert_eq!(app.input.text(), "use the other fold", "and given back");
+    }
+
+    #[test]
+    fn a_card_closes_when_its_turn_ends_and_gives_the_draft_back() {
+        // Review I5: the daemon timed the card out; the turn's answer came.
+        let mut app = with_session();
+        running(&mut app, "tidy up");
+        app.input.set("half a steer");
+        app.on_client_event(ClientEvent::Confirmation(a_card(vec![])));
+        let id = app.pending_id.unwrap();
+        app.on_response(Response::ok(id, json!({ "response": "gave up" })));
+        assert!(app.overlay.is_none(), "a stale card is gone");
+        assert_eq!(app.input.text(), "half a steer");
+    }
+
+    #[test]
+    fn a_second_card_keeps_the_first_cards_draft() {
+        // Review I5: the draft parked by the first card is not lost.
+        let mut app = with_session();
+        app.input.set("half a steer");
+        app.on_client_event(ClientEvent::Confirmation(a_card(vec![])));
+        app.on_client_event(ClientEvent::Confirmation(a_card(vec![])));
+        press(&mut app, KeyCode::Char('y'));
+        assert_eq!(app.input.text(), "half a steer");
+    }
+
+    #[test]
+    fn a_paste_keeps_its_lines_and_no_control_characters() {
+        // Terminals send a pasted newline as a carriage return.
+        let mut app = with_session();
+        app.on_paste("one\rtwo\r\nthree\nfour\tx\x1b[2J");
+        assert_eq!(app.input.text(), "one\ntwo\nthree\nfour    x[2J");
+    }
+
+    #[test]
+    fn a_paste_goes_into_a_reason_but_never_answers_a_card() {
+        let mut app = with_session();
+        app.on_client_event(ClientEvent::Confirmation(a_card(vec![])));
+        app.on_paste("y");
+        assert!(app.input.text().is_empty());
+        press(&mut app, KeyCode::Tab);
+        app.on_paste("use notes/");
+        assert_eq!(app.input.text(), "use notes/");
+    }
+
+    #[test]
+    fn y_and_n_answer_at_once() {
+        let mut app = with_session();
+        app.on_client_event(ClientEvent::Confirmation(a_card(vec![])));
+        let actions = press(&mut app, KeyCode::Char('y'));
+        assert!(matches!(
+            actions.as_slice(),
+            [Action::Confirm { approved: true, .. }]
+        ));
+        assert!(app.overlay.is_none());
+    }
+
+    #[test]
+    fn typing_t_never_starts_a_reason() {
+        let mut app = with_session();
+        let trust = jarvis_common::ipc::Choice {
+            key: 't',
+            label: "trust these".into(),
+        };
+        app.on_client_event(ClientEvent::Confirmation(a_card(vec![trust])));
+        let actions = press(&mut app, KeyCode::Char('t'));
+        assert!(matches!(
+            actions.as_slice(),
+            [Action::Confirm {
+                approved: true,
+                choice: Some('t'),
+                ..
+            }]
+        ));
+        assert!(app.input.text().is_empty(), "t was a choice, never text");
+    }
+
+    #[test]
+    fn tab_then_text_then_enter_declines_with_the_reason() {
+        let mut app = with_session();
+        app.on_client_event(ClientEvent::Confirmation(a_card(vec![])));
+        press(&mut app, KeyCode::Tab);
+        assert!(the_card(&app).reasoning);
+        for c in "try notes/".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        assert!(
+            app.overlay.is_some(),
+            "typing t or n in a reason does not answer"
+        );
+        let actions = press(&mut app, KeyCode::Enter);
+        assert!(matches!(
+            actions.as_slice(),
+            [Action::Confirm { approved: false, reason: Some(r), .. }] if r == "try notes/"
+        ));
+        assert!(app.overlay.is_none());
+    }
+
+    #[test]
+    fn reason_mode_keys_only_edit_the_reason() {
+        // Review M6: no queued message or history line lands in a reason.
+        let mut app = with_session();
+        running(&mut app, "tidy up");
+        app.follow_up = FollowUp::Queue;
+        enter(&mut app, "next thing");
+        assert_eq!(queued(&app), vec!["next thing".to_string()]);
+        app.history.push("an old message".into());
+        app.on_client_event(ClientEvent::Confirmation(a_card(vec![])));
+        press(&mut app, KeyCode::Tab);
+        // On an empty reason, these would recall a message.
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
+        press(&mut app, KeyCode::Up);
+        assert!(app.input.text().is_empty(), "got {:?}", app.input.text());
+        assert!(press(&mut app, KeyCode::BackTab).is_empty());
+        for c in "no".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL));
+        press(&mut app, KeyCode::Char('x'));
+        assert_eq!(app.input.text(), "xno");
+        assert_eq!(queued(&app), vec!["next thing".to_string()]);
+    }
+
+    #[test]
+    fn esc_in_reason_mode_leaves_it_without_answering() {
+        let mut app = with_session();
+        app.on_client_event(ClientEvent::Confirmation(a_card(vec![])));
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Char('x'));
+        assert!(press(&mut app, KeyCode::Esc).is_empty());
+        assert!(!the_card(&app).reasoning);
+        assert!(app.input.text().is_empty());
+    }
+
+    #[test]
+    fn pgdn_scrolls_the_preview() {
+        let mut app = with_session();
+        app.on_client_event(ClientEvent::Confirmation(a_card(vec![])));
+        press(&mut app, KeyCode::PageDown);
+        assert!(the_card(&app).scroll > 0);
+        press(&mut app, KeyCode::PageUp);
+        assert_eq!(the_card(&app).scroll, 0);
+    }
+
     #[test]
     fn confirmation_prompts_are_answered_explicitly() {
         let mut app = App::new("test".into());
         let id = Uuid::new_v4();
-        app.overlay = Some(Overlay::Confirm(ConfirmationRequest {
+        app.overlay = Some(Overlay::Confirm(Card::new(ConfirmationRequest {
+            preview: None,
             id,
             tool: "shell.run".into(),
             args: json!({"command": "firefox"}),
             prompt: "Run shell command: firefox".into(),
             choices: Vec::new(),
-        }));
+        })));
 
         // An unrelated key must not dismiss or approve the request.
         let actions = press(&mut app, KeyCode::Char('x'));
@@ -2683,7 +3623,8 @@ mod tests {
     #[test]
     fn a_prompt_with_choices_answers_with_the_key_pressed() {
         let prompt = || {
-            Overlay::Confirm(ConfirmationRequest {
+            Overlay::Confirm(Card::new(ConfirmationRequest {
+                preview: None,
                 id: Uuid::nil(),
                 tool: "egress.send".into(),
                 args: json!({}),
@@ -2698,7 +3639,7 @@ mod tests {
                         label: "always".into(),
                     },
                 ],
-            })
+            }))
         };
         let mut app = App::new("test".into());
         for (key, expected) in [('a', Some('a')), ('y', Some('y'))] {
@@ -2720,13 +3661,14 @@ mod tests {
     #[test]
     fn disconnect_drops_a_confirmation_that_can_no_longer_be_sent() {
         let mut app = App::new("test".into());
-        app.overlay = Some(Overlay::Confirm(ConfirmationRequest {
+        app.overlay = Some(Overlay::Confirm(Card::new(ConfirmationRequest {
+            preview: None,
             id: Uuid::new_v4(),
             tool: "shell.run".into(),
             args: json!({}),
             prompt: "Run?".into(),
             choices: Vec::new(),
-        }));
+        })));
         app.on_disconnected("gone".into());
         assert!(app.overlay.is_none());
         assert!(matches!(app.state, DaemonState::Offline(_)));
@@ -2775,13 +3717,14 @@ mod tests {
         let turn_id = Uuid::new_v4();
         app.begin_request(turn_id, Pending::Turn);
         let confirm_id = Uuid::new_v4();
-        app.overlay = Some(Overlay::Confirm(ConfirmationRequest {
+        app.overlay = Some(Overlay::Confirm(Card::new(ConfirmationRequest {
+            preview: None,
             id: confirm_id,
             tool: "shell.run".into(),
             args: json!({"command": "firefox"}),
             prompt: "Run shell command: firefox".into(),
             choices: Vec::new(),
-        }));
+        })));
         let actions = app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert!(matches!(
             actions.as_slice(),
@@ -2868,9 +3811,13 @@ mod tests {
         let request = Request::new("model.list", json!({}));
         app.begin_request(request.id, Pending::Models);
         app.on_response(Response::ok(request.id, models_reply()));
-        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        // Down to the last model (the mode rows come after it).
+        while let Some(Overlay::Models { rows, selected }) = &app.overlay {
+            if *selected + 1 >= rows.len() {
+                break;
+            }
+            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
         let actions = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         match actions.as_slice() {
             [Action::Request { method, params, .. }] => {

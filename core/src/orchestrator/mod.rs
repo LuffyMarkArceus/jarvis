@@ -121,9 +121,33 @@ pub trait ConfirmationHandler: Send + Sync {
             None
         }
     }
+
+    /// The whole answer, a reason included. A handler that cannot give a
+    /// reason answers through `confirm` or `choose`.
+    async fn answer(&self, tool: &str, args: &Value, choices: &[Choice]) -> Answer {
+        let choice = if choices.is_empty() {
+            self.confirm(tool, args).await.then_some('y')
+        } else {
+            self.choose(tool, args, choices).await
+        };
+        Answer {
+            approved: choice.is_some(),
+            choice,
+            reason: None,
+        }
+    }
 }
 
 pub use jarvis_common::ipc::Choice;
+
+/// An answer to a prompt: yes or no, which choice, and - with a no - why
+/// (6.7b), which reaches the model.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Answer {
+    pub approved: bool,
+    pub choice: Option<char>,
+    pub reason: Option<String>,
+}
 
 /// The name under which sending to a remote provider is confirmed. Not a
 /// real tool: it reuses the confirmation path every client already has.
@@ -276,6 +300,18 @@ impl Orchestrator {
             let _ = m.create_session(&id);
         }
         Conversation::new(id, self.starts_remote())
+    }
+
+    /// The files conversation `session` changed since `since` (6.7b).
+    pub fn turn_changes(
+        &self,
+        session: &str,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Vec<jarvis_common::ipc::FileChange> {
+        match &self.undo {
+            Some(store) => crate::changes::turn_changes(store, session, since),
+            None => Vec::new(),
+        }
     }
 
     /// The mode a new conversation starts in (`[modes]`).
@@ -527,6 +563,7 @@ impl Orchestrator {
     }
 
     /// One turn's answer and its footer, for clients that show both.
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_with_footer(
         &self,
         conv: &Conversation,
@@ -535,9 +572,10 @@ impl Orchestrator {
         cancel: Option<&Cancellation>,
         sink: Option<&UnboundedSender<String>>,
         progress: Option<&UnboundedSender<String>>,
+        steps: Option<&UnboundedSender<jarvis_common::ipc::StepEvent>>,
     ) -> Result<(String, String, TurnTiming)> {
         let report = self
-            .run_turn_observed(conv, input, confirm, cancel, sink, progress)
+            .run_turn_observed(conv, input, confirm, cancel, sink, progress, steps)
             .await?;
         let footer = footer(&report);
         Ok((report.answer, footer, report.timing))
@@ -553,13 +591,14 @@ impl Orchestrator {
         cancel: Option<&Cancellation>,
         sink: Option<&UnboundedSender<String>>,
     ) -> Result<TurnReport> {
-        self.run_turn_observed(conv, input, confirm, cancel, sink, None)
+        self.run_turn_observed(conv, input, confirm, cancel, sink, None, None)
             .await
     }
 
     /// [`Self::run_turn`], also saying on `progress` what the turn is doing
     /// now - "asking nemotron (step 3)", "searching the web" - so a client
     /// can tell a long turn from a stuck one.
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_turn_observed(
         &self,
         conv: &Conversation,
@@ -568,12 +607,14 @@ impl Orchestrator {
         cancel: Option<&Cancellation>,
         sink: Option<&UnboundedSender<String>>,
         progress: Option<&UnboundedSender<String>>,
+        steps: Option<&UnboundedSender<jarvis_common::ipc::StepEvent>>,
     ) -> Result<TurnReport> {
         // Measured here, around everything, so every way a turn ends -
         // answered, cancelled, failed - is logged with its timing.
         let started = std::time::Instant::now();
         let mut rec = TurnRecorder::new(conv);
         rec.progress = progress.cloned();
+        rec.steps = steps.cloned();
         // Autopilot never prompts: whatever would, is answered no and listed.
         let no_prompts = autopilot::NoPrompts {
             not_done: &rec.not_done,

@@ -50,7 +50,7 @@ pub(super) fn push_synthetic_exchange(
     ));
     messages.push(
         ChatMessage::tool_result(&outcome.name, seen)
-            .with_label(Label::of_tool(&outcome.name, &outcome.args)),
+            .with_label(Orchestrator::result_label(outcome)),
     );
 }
 
@@ -299,7 +299,7 @@ impl Orchestrator {
                     let outcome = self.execute_native_call(call, plan, confirm, rec).await;
                     messages.push(
                         ChatMessage::tool_result(&outcome.name, &self.for_model(&outcome))
-                            .with_label(Label::of_tool(&outcome.name, &outcome.args)),
+                            .with_label(Self::result_label(&outcome)),
                     );
                     trace.push(outcome);
                     if cancel.is_some_and(Cancellation::is_cancelled) {
@@ -345,7 +345,7 @@ impl Orchestrator {
                             "user",
                             &format!("Result of {}:\n{}", outcome.name, self.for_model(&outcome)),
                         )
-                        .with_label(Label::of_tool(&outcome.name, &outcome.args)),
+                        .with_label(Self::result_label(&outcome)),
                     );
                     trace.push(outcome);
                     if cancel.is_some_and(Cancellation::is_cancelled) {

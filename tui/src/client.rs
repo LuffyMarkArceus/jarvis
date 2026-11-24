@@ -32,6 +32,8 @@ pub enum ClientEvent {
         id: Uuid,
         text: String,
     },
+    /// A step of a running turn started or ended (6.7b).
+    Step(jarvis_common::ipc::Step),
     /// What a running request is doing now.
     Progress {
         id: Uuid,
@@ -47,6 +49,7 @@ enum Command {
         id: Uuid,
         approved: bool,
         choice: Option<char>,
+        reason: Option<String>,
     },
     Cancel {
         id: Uuid,
@@ -75,11 +78,12 @@ impl Client {
         let _ = self.commands.send(Command::Request(request));
     }
 
-    pub fn confirm(&self, id: Uuid, approved: bool, choice: Option<char>) {
+    pub fn confirm(&self, id: Uuid, approved: bool, choice: Option<char>, reason: Option<String>) {
         let _ = self.commands.send(Command::Confirm {
             id,
             approved,
             choice,
+            reason,
         });
     }
 
@@ -142,6 +146,10 @@ async fn run(
                             let _ = events.send(ClientEvent::Progress { id: p.id, text: p.text });
                         }
                         Ok(Message::Cancel(_)) | Ok(Message::Request(_)) | Ok(Message::ConfirmationReply(_)) => {}
+                        Ok(Message::Step(step)) => {
+                            let _ = events.send(ClientEvent::Step(step));
+                        }
+                        Err(_) if skippable(&line) => {}
                         Err(e) => {
                             let _ = events.send(ClientEvent::Disconnected(format!(
                                 "unreadable message from the daemon: {e}"
@@ -165,10 +173,12 @@ async fn run(
                         id,
                         approved,
                         choice,
+                        reason,
                     } => Message::ConfirmationReply(ConfirmationReply {
                         id,
                         approved,
                         choice,
+                        reason,
                     }),
                     Command::Cancel { id } => Message::Cancel(Cancel { id }),
                 };
@@ -181,6 +191,21 @@ async fn run(
             }
         }
     }
+}
+
+/// A line this TUI cannot read but can safely pass over: well-formed, and
+/// not a response (a newer daemon's message kind, say). A response it cannot
+/// read would leave a request waiting forever, so that still disconnects
+/// (review M8).
+fn skippable(line: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(line)
+        .ok()
+        .and_then(|v| {
+            v.get("type")
+                .and_then(|t| t.as_str())
+                .map(|t| t != "response")
+        })
+        .unwrap_or(false)
 }
 
 async fn write_message(
@@ -201,5 +226,22 @@ fn connect_message(socket: &Path, error: &std::io::Error) -> String {
         )
     } else {
         format!("could not connect to {}: {error}", socket.display())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unknown_message_kind_is_skipped() {
+        assert!(skippable(r#"{"type":"something_new","id":"x"}"#));
+    }
+
+    #[test]
+    fn a_broken_response_or_garbage_is_not() {
+        assert!(!skippable(r#"{"type":"response","id":3}"#));
+        assert!(!skippable("not json"));
+        assert!(!skippable(r#"{"id":"x"}"#));
     }
 }
