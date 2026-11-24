@@ -54,6 +54,21 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             frame.set_cursor_position(cursor);
         }
     }
+    scrub(frame.buffer_mut());
+}
+
+/// The last step before the terminal: no control character, and nothing that
+/// reorders text, whatever drew it. A carriage return garbles the screen; an
+/// escape or a bidi override could hide what a card asks the owner to approve.
+fn scrub(buffer: &mut ratatui::buffer::Buffer) {
+    let unsafe_char =
+        |c: char| c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}');
+    for cell in &mut buffer.content {
+        if cell.symbol().chars().any(unsafe_char) {
+            let clean: String = cell.symbol().chars().filter(|c| !unsafe_char(*c)).collect();
+            cell.set_symbol(if clean.is_empty() { "·" } else { &clean });
+        }
+    }
 }
 
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
@@ -959,6 +974,40 @@ mod tests {
         assert!(text(&live).contains("**bold** answer"), "{}", text(&live));
         let (done, _) = transcript_lines(&entries, 40, false, None);
         assert!(text(&done).contains("  bold answer"), "{}", text(&done));
+    }
+
+    #[test]
+    fn no_control_character_reaches_the_terminal() {
+        // A carriage return or escape in a preview could hide what the owner
+        // approves; one in an answer garbles the screen.
+        let mut app = App::new("llama3.2:1b".into());
+        app.session_id = Some("abc".into());
+        app.entries.push(crate::app::Entry::assistant(
+            "an\rswer \x1b[2J x".to_string(),
+        ));
+        app.entries
+            .push(crate::app::Entry::system("no\rte \u{202e}x".to_string()));
+        app.input.set("in\rput");
+        app.on_client_event(crate::client::ClientEvent::Confirmation(
+            jarvis_common::ipc::ConfirmationRequest {
+                id: uuid::Uuid::new_v4(),
+                tool: "shell.run".into(),
+                args: serde_json::json!({}),
+                prompt: "Run\rx".into(),
+                choices: vec![],
+                preview: Some(jarvis_common::ipc::Preview {
+                    kind: "command".into(),
+                    text: "$ rm x\recho safe \x1b[8m \u{202e}".into(),
+                }),
+            },
+        ));
+        let shown = screen(&mut app);
+        let bad: Vec<char> = shown
+            .chars()
+            .filter(|c| (c.is_control() && *c != '\n') || *c == '\u{202e}')
+            .collect();
+        assert!(bad.is_empty(), "{bad:?}");
+        assert!(shown.contains("rm x"), "{shown}");
     }
 
     #[test]

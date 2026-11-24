@@ -2177,10 +2177,21 @@ impl App {
     }
 
     pub fn on_paste(&mut self, text: &str) {
-        if self.overlay.is_some() {
-            return;
+        // Into a reason being typed; over any other overlay it goes nowhere.
+        match &self.overlay {
+            None => {}
+            Some(Overlay::Confirm(card)) if card.reasoning => {}
+            Some(_) => return,
         }
-        self.input.insert_str(&text.replace("\r\n", "\n"));
+        // Terminals send a pasted newline as a carriage return.
+        let text: String = text
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .replace('\t', "    ")
+            .chars()
+            .filter(|c| *c == '\n' || !c.is_control())
+            .collect();
+        self.input.insert_str(&text);
     }
 
     fn history_previous(&mut self) {
@@ -3463,6 +3474,25 @@ mod tests {
         app.on_client_event(ClientEvent::Confirmation(a_card(vec![])));
         press(&mut app, KeyCode::Char('y'));
         assert_eq!(app.input.text(), "half a steer");
+    }
+
+    #[test]
+    fn a_paste_keeps_its_lines_and_no_control_characters() {
+        // Terminals send a pasted newline as a carriage return.
+        let mut app = with_session();
+        app.on_paste("one\rtwo\r\nthree\nfour\tx\x1b[2J");
+        assert_eq!(app.input.text(), "one\ntwo\nthree\nfour    x[2J");
+    }
+
+    #[test]
+    fn a_paste_goes_into_a_reason_but_never_answers_a_card() {
+        let mut app = with_session();
+        app.on_client_event(ClientEvent::Confirmation(a_card(vec![])));
+        app.on_paste("y");
+        assert!(app.input.text().is_empty());
+        press(&mut app, KeyCode::Tab);
+        app.on_paste("use notes/");
+        assert_eq!(app.input.text(), "use notes/");
     }
 
     #[test]
