@@ -621,3 +621,23 @@ async fn an_auto_approved_write_with_no_lasting_copy_is_not_made() {
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "x".repeat(100));
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn interactive_adds_no_mode_line_to_the_prompt() {
+    // "Ask one short question if ambiguous" cost llama3.2:1b two cases
+    // (3/3 -> 0/3, BASELINES 2026-11-24); Interactive is the default
+    // behaviour, so it needs no line. Plan and Autopilot still say theirs.
+    use crate::modes::{Autonomy, Mode};
+    let with = |autonomy| {
+        with_mode_line(
+            "base".to_string(),
+            &Mode {
+                autonomy,
+                ..Mode::default()
+            },
+        )
+    };
+    assert_eq!(with(Autonomy::Interactive), "base");
+    assert!(with(Autonomy::Plan).contains("Plan mode"));
+    assert!(with(Autonomy::Autopilot).contains("Autopilot"));
+}

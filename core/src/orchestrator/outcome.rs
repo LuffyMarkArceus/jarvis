@@ -7,6 +7,9 @@ use super::*;
 pub(super) enum OutcomeStatus {
     Succeeded,
     Failed,
+    /// Not run: the call lacked its required arguments and went back to the
+    /// model to fix. Kept apart from `Failed`, which may have run.
+    Malformed,
     /// Explicitly denied by the permission policy.
     Denied,
     /// The user was asked and said no.
@@ -41,6 +44,7 @@ impl OutcomeStatus {
         match self {
             OutcomeStatus::Succeeded => "executed",
             OutcomeStatus::Failed => "failed",
+            OutcomeStatus::Malformed => "not run: arguments missing",
             OutcomeStatus::Denied => "denied by policy",
             OutcomeStatus::Declined => "declined",
             OutcomeStatus::NeedsConfirmation => {
@@ -177,7 +181,7 @@ pub struct ToolTiming {
 pub struct ToolCallRecord {
     pub name: String,
     pub args: Value,
-    /// `executed`, `failed`, `denied`, `declined`, `needs_confirmation`,
+    /// `executed`, `failed`, `malformed` (not run: arguments missing), `denied`, `declined`, `needs_confirmation`,
     /// `withheld` (not sent, for what it would send off this machine), or
     /// `not_offered` for a call outside the turn's plan.
     pub status: &'static str,
@@ -535,6 +539,7 @@ pub(super) fn status_label(status: &OutcomeStatus) -> &'static str {
     match status {
         OutcomeStatus::Succeeded => "executed",
         OutcomeStatus::Failed => "failed",
+        OutcomeStatus::Malformed => "malformed",
         OutcomeStatus::Denied => "denied",
         OutcomeStatus::Declined => "declined",
         OutcomeStatus::NeedsConfirmation => "needs_confirmation",

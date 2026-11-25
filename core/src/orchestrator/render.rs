@@ -198,7 +198,10 @@ pub(super) fn compact_output(tool: &str, res: &Value) -> String {
 /// Render the user-facing reply for a successful tool call. Deterministic:
 /// every fact in the reply comes straight from the tool result.
 pub(super) fn render_tool_output(outcome: &ToolOutcome) -> String {
-    if outcome.status == OutcomeStatus::Failed {
+    if matches!(
+        outcome.status,
+        OutcomeStatus::Failed | OutcomeStatus::Malformed
+    ) {
         return outcome.output.clone();
     }
 
