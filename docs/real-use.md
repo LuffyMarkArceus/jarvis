@@ -127,3 +127,6 @@ sending its listing to the remote model ("always allow" stops that).
 | A turn's steps vanished after it ended; an approval showed one line, not the change | ours | Steps fold into one row; approvals are cards with a diff |
 | A "no" told the model nothing, so it retried the same thing | ours | Tab and a reason: the model hears why (live: it re-proposed "2 (two)" after "write it as 2 (two)") |
 | Planning the reason feature: a no ended the turn, so a reason could never reach the model | ours, caught in Task 4 | A no with a reason lets the turn go on; a plain no still ends it |
+| Wet run: a multi-line paste garbled the screen until a restart (a terminal sends a pasted newline as `\r`), and a paste into a reason was dropped | ours | Paste keeps its lines; the drawn screen is scrubbed of control and bidi characters, so a card cannot be spoofed either |
+| Wet run: a plain answer got a "1 steps" row; a steer that came too late still read "steering:" | ours | No row without a tool, a change or a failure; the note says "queued instead" |
+| A long command was cut off in its approval card | ours | The card wraps |
