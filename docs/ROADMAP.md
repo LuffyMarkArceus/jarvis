@@ -128,6 +128,8 @@ Following T3 Code:
   model why, and the turn goes on (live: the model re-proposed with the
   reason and the second card showed it).
 * Markdown in answers; modes in the Ctrl+P picker.
+* Nothing drawn can hold a control or bidi-override character: an approval
+  card shows what will run.
 * [Spec](superpowers/specs/2026-11-21-tui-transcript-design.md).
 
 ## Phase 7 - design (next)

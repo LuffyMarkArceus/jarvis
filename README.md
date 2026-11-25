@@ -5,7 +5,8 @@ Python sidecars + TypeScript UI.
 
 ## Status
 
-Phase 6 is done: prompt-injection defences (actions after untrusted content
+Phase 6 is done through Milestone 6.7 (sandbox, parallel conversations, modes, the
+TUI after T3 Code), and Phase 7 is next. It holds: prompt-injection defences (actions after untrusted content
 ask, naming the source; data-carrying fetches ask; untrusted text is
 marked) and undo for Jarvis's file changes, on top of Phase 5's eval
 harness and local/remote model tiers with privacy rules. What is open and

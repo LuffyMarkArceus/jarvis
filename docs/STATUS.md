@@ -4,15 +4,15 @@ Where Jarvis is, what is open, and where to read more. Updated at the end of
 every phase, as part of finishing it. The plan ahead is in
 [ROADMAP.md](ROADMAP.md).
 
-Last updated: 2026-11-09, after Milestone 6.3 (main `6e7216b`).
+Last updated: 2026-11-24, after Milestone 6.7b (main `e0aed78`).
 
 ## At a glance
 
 | | |
 | --- | --- |
-| Code | Rust workspace (`core`, `cli`, `tui`, `common`) + Python MCP sidecars; ~28k lines of Rust |
-| Tests | 498 (`cargo test --workspace`), CI on every push, with real bubblewrap |
-| Evals | 57 cases (`jarvis eval`), five models measured: qwen2.5:3b 91.2%, llama3.2:1b 83.6%, nemotron-3-ultra 98.2%, north-mini-code 100%, flint 96.3% ([BASELINES](../evals/BASELINES.md)) |
+| Code | Rust workspace (`core`, `cli`, `tui`, `common`) + Python MCP sidecars; ~43k lines of Rust |
+| Tests | 807 (`cargo test --workspace`), CI on every push, with real bubblewrap |
+| Evals | 60 cases (`jarvis eval`); at e0aed78: qwen2.5:3b 93.3%, llama3.2:1b 85.6%, nemotron-3-ultra 96.7% ([BASELINES](../evals/BASELINES.md)) |
 | Models | local: Ollama (llama3.2:1b for development, qwen2.5:3b for verification); remote: OpenRouter free tier (nemotron-3-ultra) |
 | Lessons | 29 entries in the [learning log](learning/README.md) |
 
@@ -35,10 +35,21 @@ earlier sessions and is not in the repository.
 | 6.1 | Relay note, router fixes, a request never runs twice, orchestrator split | 2026-11-05 | learning #27-28 |
 | 6.2 | Earlier-turn marking, `filesystem.delete` with undo, large-file limits, eval sandbox (`work_dir`) and honesty fixes | 2026-11-09 | [ROADMAP](ROADMAP.md) |
 | 6.3 | OS sandbox for commands (bubblewrap), keys out of command environments, an always-asked way out; five-model run | 2026-11-09 | [sandbox](design/sandbox.md) |
+| 6.4 | Turn timing, `turns.jsonl`, `/bad` `/good`, `jarvis report` | 2026-11-17 | [ROADMAP](ROADMAP.md) |
+| 6.5 | One conversation per window; turns in parallel, a GPU queue that spills to the remote tier | 2026-11-20 | [ROADMAP](ROADMAP.md) |
+| 6.6 | Modes: autonomy, approval, sandbox, per conversation | 2026-11-20 | [spec](superpowers/specs/2026-11-20-modes-design.md) |
+| 6.7 | TUI after T3 Code: text editing, queue and steer, steps, approval cards, diffs and revert, Markdown | 2026-11-23 | [spec](superpowers/specs/2026-11-21-tui-transcript-design.md) |
 
 ## Open items
 
 The order they will be done in is in the roadmap.
+
+**From the 6.7b verification**
+
+* The Interactive mode line costs llama3.2:1b two cases (BASELINES 2026-11-24).
+* The eval check `not_executed` counts a call returned unrun as run.
+* A shell approval card shows its command three times; the Changes view clips
+  long lines; the shell card does not show the working folder.
 
 **Phase 6 follow-ups**
 
