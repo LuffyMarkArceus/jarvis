@@ -199,7 +199,13 @@ impl Orchestrator {
     pub(super) fn conversation_system_prompt(&self) -> String {
         let mut p = String::new();
         p.push_str("You are Jarvis, a personal AI assistant running on this user's computer.\n");
-        p.push_str("You are an AI assistant. You are not the operating system, not the shell, and not a human.\n\n");
+        p.push_str("You are an AI assistant. You are not the operating system, not the shell, and not a human.\n");
+        // Without it, "latest" and "the last two weeks" are judged against
+        // the model's training data (real use, 2026-11-26).
+        p.push_str(&format!(
+            "Today is {}, local time.\n\n",
+            chrono::Local::now().format("%A, %-d %B %Y")
+        ));
         p.push_str("How to behave:\n");
         p.push_str("- Answer the current request directly and concisely.\n");
         p.push_str("- Never repeat or summarise earlier messages unless the user asks you to.\n");
@@ -268,8 +274,21 @@ impl Orchestrator {
         rec: &TurnRecorder<'_>,
         input: &str,
         prompt: String,
+        web: bool,
     ) -> Recalled {
         let prompt = with_mode_line(prompt, &rec.pinned.mode);
+        // A web question is about the world now: old conversations only
+        // mislead it (real use, 2026-11-26).
+        if web {
+            let spill = self
+                .can_spill(rec)
+                .then(|| (prompt.clone(), Label::default()));
+            return Recalled {
+                prompt,
+                label: Label::default(),
+                spill,
+            };
+        }
         let remote = destination_of(&self.turn_tier(rec).0).is_remote();
         let spill = self.can_spill(rec).then(|| {
             let (block, label) = self

@@ -275,3 +275,74 @@ class ProtocolTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BoundedReadTests(unittest.TestCase):
+    """Real use (2026-11-26): every fetch of a 1-2 MB Wikipedia page ran
+    into the daemon's 60 s limit. A fetch reads a bounded amount, in a
+    bounded time, and says which bound it hit."""
+
+    def serve(self, handler_body):
+        import http.server
+        import threading
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 - the stdlib's name
+                handler_body(self)
+
+            def log_message(self, *args):
+                pass
+
+        httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        httpd.daemon_threads = True
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.shutdown)
+        return f"http://127.0.0.1:{httpd.server_address[1]}/"
+
+    def test_a_huge_page_is_read_only_up_to_the_cap(self):
+        sent = []
+
+        def body(h):
+            h.send_response(200)
+            h.send_header("Content-Type", "text/html")
+            h.end_headers()
+            chunk = b"<p>" + b"word " * 2000 + b"</p>"
+            try:
+                for _ in range(1000):  # about 10 MB if read to the end
+                    h.wfile.write(chunk)
+                    sent.append(len(chunk))
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        url = self.serve(body)
+        text = server.fetch_url(url)
+        self.assertIn("word", text)
+        import time
+
+        time.sleep(0.2)
+        self.assertLess(sum(sent), 4 * server.MAX_READ_BYTES)
+
+    def test_a_trickling_page_gives_up_at_the_deadline(self):
+        import time
+
+        def body(h):
+            h.send_response(200)
+            h.send_header("Content-Type", "text/html")
+            h.end_headers()
+            try:
+                for _ in range(100):
+                    h.wfile.write(b"<p>slow</p>")
+                    h.wfile.flush()
+                    time.sleep(0.2)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        url = self.serve(body)
+        old = server.FETCH_DEADLINE
+        server.FETCH_DEADLINE = 1.0
+        self.addCleanup(setattr, server, "FETCH_DEADLINE", old)
+        started = time.monotonic()
+        with self.assertRaises(Exception) as caught:
+            server.fetch_url(url)
+        self.assertLess(time.monotonic() - started, 3.0)
+        self.assertIn("took longer than", str(caught.exception))

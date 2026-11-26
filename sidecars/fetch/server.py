@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import sys
 import urllib.request
 from html import unescape
@@ -29,6 +30,12 @@ DEFAULT_MAX_LENGTH = 6000
 MAX_ALLOWED_LENGTH = 20000
 MIN_ALLOWED_LENGTH = 500
 USER_AGENT = "Mozilla/5.0 (compatible; Jarvis/1.0)"
+# A page is read up to MAX_READ_BYTES within FETCH_DEADLINE seconds. Only
+# 6000 characters are kept, and a Wikipedia page is 1-2 MB: read whole on a
+# slow link, every fetch ran into the daemon's 60 s limit (real use,
+# 2026-11-26). The article's start is in the first half megabyte.
+MAX_READ_BYTES = 512 * 1024
+FETCH_DEADLINE = 20.0
 
 # Tags that never contribute readable article text. `nav`/`aside`/`footer`
 # are skipped as subtrees, not just as empty elements: on modern Wikipedia the
@@ -382,6 +389,24 @@ def format_result(url: str, title: Optional[str], body: str, max_length: int) ->
     return out
 
 
+def read_bounded(response, started: float) -> bytes:
+    """Up to MAX_READ_BYTES of *response*, or an error past FETCH_DEADLINE."""
+    chunks = []
+    total = 0
+    while total < MAX_READ_BYTES:
+        if time.monotonic() - started > FETCH_DEADLINE:
+            raise TimeoutError(
+                f"the page took longer than {FETCH_DEADLINE:.0f} s to load; "
+                "try another result or answer from what was found"
+            )
+        chunk = response.read1(min(64 * 1024, MAX_READ_BYTES - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    return b"".join(chunks)
+
+
 def fetch_url(url: str, max_length: int = DEFAULT_MAX_LENGTH) -> str:
     """Fetch *url* and return clean text. Raises on network/HTTP errors."""
     if not url:
@@ -403,9 +428,10 @@ def fetch_url(url: str, max_length: int = DEFAULT_MAX_LENGTH) -> str:
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5",
         },
     )
+    started = time.monotonic()
     with urllib.request.urlopen(request, timeout=15) as response:
         content_type = response.headers.get("Content-Type", "")
-        raw = response.read()
+        raw = read_bounded(response, started)
 
     charset = "utf-8"
     match = re.search(r"charset=([^;\s]+)", content_type, re.I)

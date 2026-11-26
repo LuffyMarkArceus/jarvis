@@ -103,6 +103,9 @@ async fn a_steer_reaches_the_next_model_call_and_memory() {
         "{}",
         requests[1]
     );
+    // Real use (2026-11-26): "check AMD as well", steered into a question
+    // about Nvidia, got only AMD answered. The model is told a steer adds.
+    assert!(requests[1].contains("does not replace"), "{}", requests[1]);
     let stored = MemoryManager::new(s.config.clone())
         .unwrap()
         .get_recent_messages(&s.conv.id, 20)

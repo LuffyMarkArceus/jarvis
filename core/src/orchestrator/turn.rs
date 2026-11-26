@@ -109,7 +109,7 @@ impl Orchestrator {
         sink: Option<&UnboundedSender<String>>,
         rec: &TurnRecorder<'_>,
     ) -> Result<String> {
-        let recalled = self.with_recall(rec, input, self.conversation_prompt_for(history));
+        let recalled = self.with_recall(rec, input, self.conversation_prompt_for(history), false);
         let mut plan = context::assemble(&recalled.prompt, input, history, &self.config.context, 0);
         self.mark_history(&mut plan.messages);
         self.log_plan(&plan);
@@ -148,7 +148,14 @@ impl Orchestrator {
     fn take_steers_into(&self, messages: &mut Vec<ChatMessage>, rec: &TurnRecorder<'_>) {
         for steer in rec.conversation.take_steers() {
             let label = Label::of(Origin::User);
-            messages.push(ChatMessage::text("user", &steer.text).with_label(label.clone()));
+            // A steer adds to the request: "check AMD as well" during a
+            // question about Nvidia got only AMD answered (real use,
+            // 2026-11-26). Memory keeps the owner's words alone.
+            let said = format!(
+                "{}\n\n(Sent while you were working on my request above. It adds to or adjusts that request; it does not replace it unless it says so. Answer all of it.)",
+                steer.text
+            );
+            messages.push(ChatMessage::text("user", &said).with_label(label.clone()));
             if let Some(memory) = &self.memory {
                 let _ = memory.add_labeled_message(
                     &rec.conversation.id,
@@ -189,7 +196,7 @@ impl Orchestrator {
         // The offered tools are the request's tools. There is no second
         // filter here, and no way for the prompt to mention anything else.
         let tools = plan.schemas();
-        let recalled = self.with_recall(rec, input, self.tool_system_prompt(&plan.tools));
+        let recalled = self.with_recall(rec, input, self.tool_system_prompt(&plan.tools), plan.web);
         let reserved = self.tool_schema_tokens(&tools);
         let assembled = context::assemble(
             &recalled.prompt,
