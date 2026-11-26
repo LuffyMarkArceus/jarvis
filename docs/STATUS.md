@@ -46,8 +46,8 @@ The order they will be done in is in the roadmap.
 
 **From the 6.7b verification**
 
-* The Interactive mode line costs llama3.2:1b two cases (BASELINES 2026-11-24).
-* The eval check `not_executed` counts a call returned unrun as run.
+* The Interactive mode line costs llama3.2:1b two cases and earns qwen2.5:3b
+  two; kept for qwen (BASELINES 2026-11-25). A better wording may serve both.
 * A shell approval card shows its command three times; the Changes view clips
   long lines; the shell card does not show the working folder.
 
