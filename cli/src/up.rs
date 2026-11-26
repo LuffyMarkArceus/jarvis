@@ -69,6 +69,16 @@ pub fn local_ollama(config: &Config) -> Option<String> {
     })
 }
 
+/// `docker` arguments that start each `[up] containers` entry.
+pub fn container_starts(config: &Config) -> Vec<Vec<String>> {
+    config
+        .up
+        .containers
+        .iter()
+        .map(|name| vec!["start".to_string(), name.clone()])
+        .collect()
+}
+
 /// Arguments for `jarvis-tui`.
 pub fn tui_args(continue_last: bool) -> Vec<&'static str> {
     if continue_last {
@@ -143,6 +153,24 @@ pub async fn run(restart: bool, tui: bool, continue_last: bool) -> anyhow::Resul
         }
     }
 
+    // Containers Jarvis uses, such as a local SearXNG.
+    for args in container_starts(&config) {
+        let name = &args[1];
+        match Command::new("docker")
+            .args(&args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+        {
+            Ok(s) if s.success() => println!("Container {} running", name),
+            Ok(_) => println!(
+                "Container {} could not start (`docker start {}`)",
+                name, name
+            ),
+            Err(e) => println!("Container {} could not start: {}", name, e),
+        }
+    }
+
     // 2. Keys, for the daemon only. Names are shown, values never.
     let dir = dirs::config_dir().unwrap_or_default().join("jarvis");
     let mut env: Vec<(String, String)> = Vec::new();
@@ -199,6 +227,19 @@ pub async fn run(restart: bool, tui: bool, continue_last: bool) -> anyhow::Resul
 mod tests {
     use super::*;
     use jarvis_core::config::{ModelConfig, RemoteConfig};
+
+    #[test]
+    fn up_starts_the_configured_containers() {
+        // A local SearXNG is a Docker container: `jarvis up` starts it, and
+        // Docker's socket activation starts Docker if needed.
+        let mut config = Config::default();
+        config.up.containers = vec!["jarvis-searxng".into()];
+        assert_eq!(
+            container_starts(&config),
+            vec![vec!["start".to_string(), "jarvis-searxng".to_string()]]
+        );
+        assert!(container_starts(&Config::default()).is_empty());
+    }
 
     #[test]
     fn env_files_parse_with_or_without_export() {

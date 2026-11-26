@@ -39,6 +39,7 @@ the daemon only:
 ollama_env = { OLLAMA_MODELS = "/mnt/storage/models/ollama" }
 ollama_log = "/mnt/storage/models/ollama-serve.log"   # default <data_dir>/ollama.log
 env_files = []          # default: every *.env in ~/.config/jarvis
+containers = ["jarvis-searxng"]   # `docker start`ed, e.g. a local SearXNG
 ```
 
 The pieces still work on their own: `jarvis daemon start`, `jarvis-tui`.
@@ -537,9 +538,37 @@ enabled = true
 env = { JARVIS_SEARX_URL = "https://searx.example.org" }
 ```
 
-`auto` prefers a configured general backend and otherwise tries Wikipedia, then
-Instant Answers. Naming a backend means exactly that backend: it never silently
-answers from a different index.
+`auto` prefers a configured general backend, then tries Wikipedia and Instant
+Answers - also when the general backend is down or finds nothing; the response
+names the backend that answered. Naming a backend means exactly that backend:
+it never silently answers from a different index.
+
+Without `searx` or `brave`, news, prices and "what happened this week" cannot be
+answered: Wikipedia has none of it.
+
+#### A local SearXNG
+
+SearXNG is a metasearch engine you run yourself; it asks DuckDuckGo, Google and
+others and returns JSON. Bound to `127.0.0.1`, nothing else can reach it.
+`/mnt/storage/searxng/config/settings.yml`:
+
+```yaml
+use_default_settings: true
+server:
+  secret_key: "<openssl rand -hex 32>"
+  limiter: false
+  public_instance: false
+search:
+  formats: [html, json]
+```
+
+```sh
+docker run -d --name jarvis-searxng --restart unless-stopped \
+  -p 127.0.0.1:8888:8080 -v /mnt/storage/searxng/config:/etc/searxng searxng/searxng
+```
+
+Then `env = { JARVIS_SEARX_URL = "http://127.0.0.1:8888" }` on the search
+server, and `containers = ["jarvis-searxng"]` under `[up]`.
 
 New MCP tools are `ask` by default, so a headless run denies them until you
 grant access:
