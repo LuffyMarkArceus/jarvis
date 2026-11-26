@@ -329,7 +329,7 @@ impl Orchestrator {
         }
         let state = match outcome.status {
             OutcomeStatus::Succeeded => "done",
-            OutcomeStatus::Failed => "failed",
+            OutcomeStatus::Failed | OutcomeStatus::Malformed => "failed",
             OutcomeStatus::Denied => "denied",
             OutcomeStatus::Declined | OutcomeStatus::NeedsConfirmation => "declined",
             OutcomeStatus::Withheld => "withheld",
@@ -396,7 +396,7 @@ impl Orchestrator {
                 ),
                 name,
                 args,
-                status: OutcomeStatus::Failed,
+                status: OutcomeStatus::Malformed,
                 result: None,
                 pattern: None,
             };

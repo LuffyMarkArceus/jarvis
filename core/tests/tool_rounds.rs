@@ -276,6 +276,7 @@ async fn a_call_without_its_required_arguments_is_not_put_to_the_owner() {
     let owner = Yes(Mutex::new(0));
     let report = s.ask(&owner).await;
     assert_eq!(*owner.0.lock().unwrap(), 0, "nobody is asked about nothing");
-    assert_eq!(report.calls[0].status, "failed", "{:?}", report.calls);
+    // Not "failed": that may have run, and the evals count it as run.
+    assert_eq!(report.calls[0].status, "malformed", "{:?}", report.calls);
     assert!(!dir.join("notes.md").exists());
 }

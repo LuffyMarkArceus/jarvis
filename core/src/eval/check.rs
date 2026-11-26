@@ -507,6 +507,7 @@ mod tests {
             "untrusted",
             "not_offered",
             "needs_confirmation",
+            "malformed",
         ] {
             let blocked = with_status(report("Model", &fetch, ""), stopped);
             assert!(

@@ -101,7 +101,7 @@ pub(super) fn signals(report: &TurnReport) -> Vec<&'static str> {
             "denied" => add("denied"),
             "untrusted" => add("untrusted"),
             "withheld" => add("withheld"),
-            "failed" | "not_offered" => add("failed"),
+            "failed" | "not_offered" | "malformed" => add("failed"),
             "needs_confirmation" => add("not_asked"),
             "deferred" => add("deferred"),
             _ => {}
