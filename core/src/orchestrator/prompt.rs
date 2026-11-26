@@ -14,23 +14,19 @@ pub(super) fn recalled_label(result: &memory::RecallResult) -> Label {
 ///
 /// The blank line keeps it visually separate from the instructions above;
 /// without it a small model reads the remembered text as another rule.
-/// How the mode asks the model to behave (6.6). Interactive is the default
-/// behaviour and adds nothing: its "ask if ambiguous" line cost llama3.2:1b
-/// two eval cases (BASELINES 2026-11-24).
-pub(super) fn mode_line(mode: &crate::modes::Mode) -> Option<&'static str> {
+/// How the mode asks the model to behave (6.6).
+pub(super) fn mode_line(mode: &crate::modes::Mode) -> &'static str {
     use crate::modes::Autonomy;
     match mode.autonomy {
-        Autonomy::Plan => Some("Plan mode: you may look but not change anything. Answer with a numbered plan of the steps you would take."),
-        Autonomy::Interactive => None,
-        Autonomy::Autopilot => Some("You are on Autopilot: do not ask questions; choose sensible defaults, say what you assumed, and carry the task to the end."),
+        Autonomy::Plan => "Plan mode: you may look but not change anything. Answer with a numbered plan of the steps you would take.",
+        Autonomy::Interactive => "If the request is ambiguous, ask one short question instead of guessing.",
+        Autonomy::Autopilot => "You are on Autopilot: do not ask questions; choose sensible defaults, say what you assumed, and carry the task to the end.",
     }
 }
 
-pub(super) fn with_mode_line(mut prompt: String, mode: &crate::modes::Mode) -> String {
-    if let Some(line) = mode_line(mode) {
-        prompt.push('\n');
-        prompt.push_str(line);
-    }
+fn with_mode_line(mut prompt: String, mode: &crate::modes::Mode) -> String {
+    prompt.push('\n');
+    prompt.push_str(mode_line(mode));
     prompt
 }
 

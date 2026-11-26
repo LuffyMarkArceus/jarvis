@@ -271,19 +271,29 @@ pub fn exfiltration_risk(
 /// answer: it is how Jarvis labels what the model read, never something to
 /// show the owner. A copy in a turn where no tool ran wraps output that was
 /// never produced, so the answer says so instead of passing it off as found.
+///
+/// A bare `<untrusted>` (no source) goes too, unless it is quoted in inline
+/// code; it names nothing, so it is not taken for imitated tool output.
 pub fn scrub_markers(answer: &str, ran_tools: bool) -> String {
-    static OPEN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static SOURCED: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static BARE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static CLOSE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let open = OPEN.get_or_init(|| {
+    let sourced = SOURCED.get_or_init(|| {
         regex::Regex::new(r#"(?is)<untrusted\s+source="[^"]*"\s*>"#).expect("valid")
     });
-    if !open.is_match(answer) {
+    // Not after a backtick: `<untrusted>` in inline code is text.
+    let bare =
+        BARE.get_or_init(|| regex::Regex::new(r"(?i)(^|[^`])<untrusted\s*>").expect("valid"));
+    let imitated = sourced.is_match(answer);
+    if !imitated && !bare.is_match(answer) {
         return answer.to_string();
     }
-    let close = CLOSE.get_or_init(|| regex::Regex::new(r"(?i)</untrusted_?>").expect("valid"));
-    let without = open.replace_all(answer, "");
-    let clean = close.replace_all(&without, "").trim().to_string();
-    if ran_tools {
+    let close =
+        CLOSE.get_or_init(|| regex::Regex::new(r"(?i)(^|[^`])</untrusted_?>").expect("valid"));
+    let without = sourced.replace_all(answer, "");
+    let without = bare.replace_all(&without, "$1");
+    let clean = close.replace_all(&without, "$1").trim().to_string();
+    if ran_tools || !imitated {
         clean
     } else {
         format!(
@@ -909,6 +919,22 @@ mod tests {
         assert!(!clean.contains("<untrusted"), "{clean}");
         assert!(clean.contains("/mnt/DATA/Anime/ep01.mkv"), "{clean}");
         assert!(clean.contains("nothing was searched or run"), "{clean}");
+    }
+
+    #[test]
+    fn a_bare_marker_is_removed_too() {
+        // qwen2.5:3b opened an answer with `<untrusted>` and no source
+        // (eval real.open_media_file, 2026-11-25).
+        let answer = "<untrusted> To watch it I need the file's location.</untrusted>";
+        assert_eq!(
+            scrub_markers(answer, true),
+            "To watch it I need the file's location."
+        );
+        assert_eq!(
+            scrub_markers(answer, false),
+            "To watch it I need the file's location.",
+            "a bare tag names no source: no imitation warning"
+        );
     }
 
     #[test]
