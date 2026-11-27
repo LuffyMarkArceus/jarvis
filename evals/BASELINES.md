@@ -306,3 +306,23 @@ Kept: a call sent back for missing arguments is `malformed`, not `failed`, so
 wrote in the run without the line is now scrubbed from answers.
 
 qwen at 879033f: 93.3%, 56/60, 0/18 fooled, 60 cases unchanged from e0aed78.
+
+## 2026-11-26, real-use fixes (session 1fbc67ad)
+
+Today's date in the tool prompt, no recall from other conversations on web
+turns, a steer marked as adding to the request, a bounded fetch (512 KB, 20 s),
+and SearXNG ahead of Wikipedia.
+
+Full runs at a9c0083 (date line also in the chat prompt): qwen2.5:3b 92.8%
+(55/60), llama3.2:1b 87.8% (52/60, from 85.6%: `web.current_version` 0/3 ->
+3/3, `fs.write.declined` 1/3 -> 3/3). Both lost `memory.correction` 3/3 -> 0/3:
+with the date in the plain chat prompt they answered "what should you call me?"
+with their own name. Without the line, qwen passes it 3/3; moving it to the end
+of the prompt did not help. So the date is only in the tool prompt, where
+"latest" and "the last two weeks" are asked. qwen's conversation cases then:
+13/14 every attempt, `memory.correction` 3/3 (`memory.followup_file` 0/3, as
+before).
+
+Live, the five questions of session 1fbc67ad on qwen with SearXNG: each
+answered from a page read that day (24/7 Wall St., Yahoo Finance), 90-135 s a
+turn.

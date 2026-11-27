@@ -50,6 +50,8 @@ pub struct UpConfig {
     pub ollama_env: std::collections::BTreeMap<String, String>,
     /// Where `ollama serve` logs. Unset: `<data_dir>/ollama.log`.
     pub ollama_log: Option<PathBuf>,
+    /// Docker containers to `docker start`, e.g. a local SearXNG.
+    pub containers: Vec<String>,
 }
 
 /// `[sandbox]`: what a shell command may touch.

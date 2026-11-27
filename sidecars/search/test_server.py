@@ -278,6 +278,17 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(self.calls, ["searx"])
         self.assertTrue(out.startswith("Backend: searx"))
 
+    def test_auto_falls_back_to_wikipedia_when_searx_is_down(self):
+        # A local SearXNG that is not running must not take search down
+        # with it; the answer names the backend it really came from.
+        def down(base, q, n):
+            raise OSError("connection refused")
+
+        server.search_searx = down
+        server.search_wikipedia = lambda q, n: [server.Result("W", "https://w.example")]
+        out = server.search("q", env={"JARVIS_SEARX_URL": "http://127.0.0.1:8888"})
+        self.assertTrue(out.startswith("Backend: wikipedia"), out)
+
     def test_auto_falls_back_to_instant_when_wikipedia_is_empty(self):
         server.search_wikipedia = lambda q, n: []
         server.search_instant = lambda q, n: [server.Result("I", "https://i.example")]

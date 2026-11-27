@@ -621,3 +621,45 @@ async fn an_auto_approved_write_with_no_lasting_copy_is_not_made() {
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "x".repeat(100));
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn the_prompt_says_what_day_it_is() {
+    // Real use (2026-11-26): "this last 2 weeks" and "latest" were judged
+    // against the model's training data; nemotron said "as of late 2024".
+    let (jarvis, dir) = web_jarvis();
+    let today = chrono::Local::now().format("%-d %B %Y").to_string();
+    let tools = jarvis.tool_system_prompt(&[]);
+    assert!(tools.contains(&today), "{tools}");
+    // Not in plain chat: there it cost qwen and llama memory.correction.
+    assert!(!jarvis.conversation_system_prompt().contains(&today));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_web_turn_gets_no_recall_from_other_conversations() {
+    // Real use (2026-11-26): an old session's Rust answer, recalled into a
+    // stock question, became the answer. A web question is about the world
+    // now; old conversations only mislead it.
+    let (jarvis, dir) = web_jarvis();
+    let memory = jarvis.memory.as_ref().unwrap();
+    memory.create_session("old").unwrap();
+    memory
+        .add_message(
+            "old",
+            "assistant",
+            "Google stock fell on Monday, says the old page",
+        )
+        .unwrap();
+    let conv = jarvis.new_conversation();
+    let rec = TurnRecorder::new(&conv);
+    let input = "what happened to Google stock";
+    let chat = jarvis.with_recall(&rec, input, "base".to_string(), false);
+    assert!(
+        chat.prompt.contains("Google stock fell"),
+        "chat still recalls: {}",
+        chat.prompt
+    );
+    let web = jarvis.with_recall(&rec, input, "base".to_string(), true);
+    assert!(!web.prompt.contains("Google stock fell"), "{}", web.prompt);
+    let _ = std::fs::remove_dir_all(dir);
+}

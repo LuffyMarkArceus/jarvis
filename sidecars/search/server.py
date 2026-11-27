@@ -20,7 +20,8 @@ random. Instead every backend is explicit:
 * ``brave``     - the Brave Search API, configured with ``JARVIS_BRAVE_KEY``.
 
 ``auto`` prefers a configured general backend, because that is a deliberate
-choice by the operator, and otherwise tries Wikipedia then Instant Answers.
+choice by the operator, then tries Wikipedia and Instant Answers - also when
+the general backend is down or finds nothing.
 
 The response always names the backend that produced it, so neither the model
 nor the user has to guess how much of the web was actually covered.
@@ -347,10 +348,12 @@ def search(
         # A configured general backend is an explicit operator choice, so it
         # wins over the keyless defaults. Otherwise the keyless chain is tried
         # in order until one produces results.
+        # If it is down or finds nothing, the keyless chain still answers,
+        # and the response names the backend that did.
         if searx_url:
-            chain = ["searx"]
+            chain = ["searx", "wikipedia", "instant"]
         elif brave_key:
-            chain = ["brave"]
+            chain = ["brave", "wikipedia", "instant"]
         else:
             chain = ["wikipedia", "instant"]
     else:

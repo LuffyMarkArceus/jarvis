@@ -1650,3 +1650,21 @@ mod tests {
         assert_eq!(args["command"], "find /tmp -name '*.log'");
     }
 }
+
+#[cfg(test)]
+mod real_use_2026_11_26 {
+    #[test]
+    fn the_stock_and_film_questions_need_the_web() {
+        // Each of these must count as a web turn, which gets no recall from
+        // other conversations.
+        for q in [
+            "What happened with Nvidia stock this last 2 week?",
+            "can you check about AMD stock as well?",
+            "and how about the Google stock?",
+            "how about tesla stock",
+            "Can you tell me what charecters are in the latest Avengers movie releasing on 18th December 2026?",
+        ] {
+            assert!(super::needs_web(q) || super::needs_source(q), "{q}");
+        }
+    }
+}
