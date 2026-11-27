@@ -628,11 +628,10 @@ fn the_prompt_says_what_day_it_is() {
     // against the model's training data; nemotron said "as of late 2024".
     let (jarvis, dir) = web_jarvis();
     let today = chrono::Local::now().format("%-d %B %Y").to_string();
-    assert!(
-        jarvis.conversation_system_prompt().contains(&today),
-        "{}",
-        jarvis.conversation_system_prompt()
-    );
+    let tools = jarvis.tool_system_prompt(&[]);
+    assert!(tools.contains(&today), "{tools}");
+    // Not in plain chat: there it cost qwen and llama memory.correction.
+    assert!(!jarvis.conversation_system_prompt().contains(&today));
     let _ = std::fs::remove_dir_all(dir);
 }
 

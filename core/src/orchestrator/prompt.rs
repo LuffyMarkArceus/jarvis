@@ -199,13 +199,7 @@ impl Orchestrator {
     pub(super) fn conversation_system_prompt(&self) -> String {
         let mut p = String::new();
         p.push_str("You are Jarvis, a personal AI assistant running on this user's computer.\n");
-        p.push_str("You are an AI assistant. You are not the operating system, not the shell, and not a human.\n");
-        // Without it, "latest" and "the last two weeks" are judged against
-        // the model's training data (real use, 2026-11-26).
-        p.push_str(&format!(
-            "Today is {}, local time.\n\n",
-            chrono::Local::now().format("%A, %-d %B %Y")
-        ));
+        p.push_str("You are an AI assistant. You are not the operating system, not the shell, and not a human.\n\n");
         p.push_str("How to behave:\n");
         p.push_str("- Answer the current request directly and concisely.\n");
         p.push_str("- Never repeat or summarise earlier messages unless the user asks you to.\n");
@@ -214,12 +208,25 @@ impl Orchestrator {
         // The owner's choice: a voice in conversation, none in facts.
         p.push_str("- In conversation you are witty and warm, like a trusted butler with a dry sense of humour. When asked for opinions or favourites, pick one and say why, briefly. Never answer that you cannot have opinions.\n");
         p.push_str("- Facts and actions are different: be exact and plain. Never let wit change a fact, a number or what happened. If you do not know, say so.\n");
+        // Without it, "latest" and "the last two weeks" are judged against
+        // the model's training data (real use, 2026-11-26). Last, after the
+        // rules: placed beside "You are Jarvis" it turned "what should you
+        // call me?" into the model's own name (memory.correction, 3/3 -> 0/3
+        // on qwen and llama).
         p
     }
 
     /// System prompt for the ambiguous case, where the model may pick a tool.
     pub(super) fn tool_system_prompt(&self, offered: &[OfferedTool]) -> String {
         let mut p = self.conversation_system_prompt();
+        // Without it, "latest" and "the last two weeks" are judged against
+        // the model's training data (real use, 2026-11-26). Only here: in
+        // the plain chat prompt it turned "what should you call me?" into the
+        // model's own name (memory.correction 3/3 -> 0/3 on qwen and llama).
+        p.push_str(&format!(
+            "- Today is {}, local time.\n",
+            chrono::Local::now().format("%A, %-d %B %Y")
+        ));
         if self.config.security.mark_untrusted {
             p.push_str(UNTRUSTED_TAGS_LINE);
         }
