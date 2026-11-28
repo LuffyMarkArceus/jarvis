@@ -86,9 +86,7 @@ The order they will be done in is in the roadmap.
 
 **For the owner**
 
-* The OpenRouter key is capped at $11 ($0 spent); about $1 was suggested.
 * OpenCode Zen free models (Big Pickle, Beam Free) refuse API use; see the 2026-11-09 baselines entry.
-* `/home/shrey/~/.config/ums-deploy.env` (2026-10-06) is not Jarvis's; check it.
 
 ## Where things are
 
